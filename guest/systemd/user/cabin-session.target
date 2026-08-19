@@ -1,6 +1,6 @@
 [Unit]
 Description=Cabin headless desktop session
-Wants=cabin-keyring.service cabin-shell.service cabin-rdp.service
+Wants=cabin-keyring.service cabin-shell.service cabin-rdp.service cabin-flathub.service
 After=cabin-keyring.service cabin-shell.service
 
 [Install]

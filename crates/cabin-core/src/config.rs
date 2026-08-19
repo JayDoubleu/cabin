@@ -135,6 +135,21 @@ pub const GUEST_HOST_SOCKET: &str = "/run/host-container.sock";
 /// The socket the desktop user actually talks to.
 pub const GUEST_PROXY_SOCKET: &str = "/run/cabin/container.sock";
 
+/// The SELinux type a desktop container runs as.
+///
+/// Not the default `container_t`, because the desktop has to sandbox things
+/// inside itself. Fedora loads every image through glycin, which decodes each
+/// one in a `bwrap` sandbox, and that sandbox mounts its own `devpts`.
+/// `container_t` is not allowed to, so the mount fails, every decode fails,
+/// and the session shows blank squares where icons should be. Text still
+/// draws, so it looks like a theme fault rather than a policy one.
+///
+/// `container_engine_t` is the type for a container that runs containers, and
+/// it permits that mount. It is not `label=disable`: the container keeps its
+/// SELinux type and keeps its own MCS categories, so it stays separated from
+/// other containers. Disabling labelling would give up both.
+pub const GUEST_SELINUX_TYPE: &str = "container_engine_t";
+
 impl SocketPolicy {
     /// The host socket to bind into the guest, if any.
     ///
@@ -154,6 +169,18 @@ impl SocketPolicy {
     /// including `stat`, which reads as the file being absent.
     pub fn needs_selinux_disabled(self) -> bool {
         self.guest_socket_path().is_some()
+    }
+
+    /// The `--security-opt label=` argument for a desktop.
+    ///
+    /// Exposing a host socket needs labelling off altogether. Every other
+    /// desktop stays confined, under the type in [`GUEST_SELINUX_TYPE`].
+    pub fn selinux_label_option(self) -> String {
+        if self.needs_selinux_disabled() {
+            "disable".to_string()
+        } else {
+            format!("type:{GUEST_SELINUX_TYPE}")
+        }
     }
 
     /// Environment for the guest, so the usual tools find the right socket.
@@ -571,5 +598,31 @@ mod tests {
             kind: crate::mount::MountKind::Directory,
         });
         assert!(a.needs_recreate(&b));
+    }
+
+    #[test]
+    fn a_desktop_stays_selinux_confined() {
+        // Not label=disable. The container keeps a type and keeps its own MCS
+        // categories, so it stays separated from other containers.
+        let option = SocketPolicy::None.selinux_label_option();
+        assert_eq!(option, format!("type:{GUEST_SELINUX_TYPE}"));
+        assert_ne!(option, "disable");
+    }
+
+    #[test]
+    fn the_type_permits_the_nested_sandbox() {
+        // container_t cannot mount the devpts that Fedora's image decoder
+        // sandbox needs, and the desktop then shows no icons at all.
+        assert_ne!(GUEST_SELINUX_TYPE, "container_t");
+        assert_eq!(GUEST_SELINUX_TYPE, "container_engine_t");
+    }
+
+    #[test]
+    fn exposing_a_host_socket_still_turns_labelling_off() {
+        // The socket is labelled user_tmp_t and a confined container cannot
+        // open it, so this one case needs more than a different type.
+        for policy in [SocketPolicy::HostPodman, SocketPolicy::HostDocker] {
+            assert_eq!(policy.selinux_label_option(), "disable", "{policy:?}");
+        }
     }
 }

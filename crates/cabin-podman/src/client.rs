@@ -201,10 +201,10 @@ impl Podman {
                 })
                 .collect(),
             systemd: "always".to_string(),
-            selinux_opts: config
-                .socket
-                .needs_selinux_disabled()
-                .then(|| vec!["disable".to_string()]),
+            // Always set, because the default type cannot mount the devpts
+            // that Fedora's image decoder needs and the desktop then has no
+            // icons at all. See GUEST_SELINUX_TYPE.
+            selinux_opts: Some(vec![config.socket.selinux_label_option()]),
             resource_limits,
             stop_signal: SIGRTMIN_3,
         };

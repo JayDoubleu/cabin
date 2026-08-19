@@ -162,7 +162,26 @@ Use `just`. Run `just` alone to list every task.
     its own PID namespace. DESIGN.md section 19.4 has the full comparison.
     Use `podman exec` to get a shell, which is what the Open a shell dialogue
     shows.
-35. **Store interface names for remote access, never addresses.** An address
+35. **A desktop runs as `container_engine_t`, not the default
+    `container_t`.** Fedora decodes every image through glycin, which runs
+    each decode in a `bwrap` sandbox that mounts its own `devpts`.
+    `container_t` may not, so every decode fails and the session shows blank
+    squares in place of icons. Text still draws, so it reads as a theme fault
+    rather than a policy one, and no AVC is logged because the rule is
+    `dontaudit`. Do not "fix" this with `label=disable`: the type keeps the
+    container confined and keeps its MCS categories, and disabling labelling
+    gives up both.
+36. **The guest's home is a volume, so the build cannot seed it.** Anything
+    written to `/home/cabin` during a build is hidden at run time. The
+    Flathub repository is therefore fetched at build time and added to the
+    session by `cabin-flathub.service`. A system wide repository is not a
+    substitute: installing into one needs polkit, which cannot start here.
+37. **Keep the dash favourites to applications the recipe installs.**
+    Fedora's default names Firefox, Calendar and Calculator, none of which
+    are installed. GNOME drops an entry that names a missing application
+    without saying so, so the dash came up empty and the desktop looked
+    broken. `95-cabin-favourites.gschema.override` sets the list.
+38. **Store interface names for remote access, never addresses.** An address
     changes with the network, and a stored one would leave the desktop unable
     to start after a DHCP lease changed. Names resolve to addresses when the
     container is created. Loopback is always bound as well.

@@ -27,6 +27,7 @@ install_data(
 )
 
 install_data(
+  'systemd' / 'user' / 'cabin-flathub.service',
   'systemd' / 'user' / 'cabin-keyring.service',
   'systemd' / 'user' / 'cabin-rdp.service',
   'systemd' / 'user' / 'cabin-session.target',

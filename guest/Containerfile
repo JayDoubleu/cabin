@@ -64,7 +64,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         pipewire pipewire-pulseaudio wireplumber \
         mesa-dri-drivers mesa-libEGL mesa-libGL mesa-vulkan-drivers \
         xorg-x11-server-Xwayland \
-        openssl passwd sudo shadow-utils procps-ng iproute \
+        openssl passwd sudo shadow-utils procps-ng iproute curl \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
@@ -73,13 +73,47 @@ RUN dnf -y install --setopt=install_weak_deps=False \
 # Nothing here is needed for the desktop to run, so this is the list to change.
 # It is a separate step from the one above on purpose: editing it rebuilds only
 # this layer, which takes seconds, while the session above stays as it is.
+#
+# gnome-software is the store. It installs Flatpaks into the desktop user's
+# home, which is a volume, so applications the user adds survive the desktop
+# being recreated. It cannot install RPMs: that needs PackageKit, PackageKit
+# needs polkit, and polkit cannot start in a rootless container. Weak
+# dependencies are off, so PackageKit does not arrive and the store does not
+# offer what it cannot do.
 RUN dnf -y install --setopt=install_weak_deps=False \
         gnome-console nautilus gnome-text-editor gnome-control-center \
+        gnome-software flatpak \
         adwaita-icon-theme adwaita-cursor-theme \
         vim-minimal less git \
         podman podman-compose fuse-overlayfs \
     && dnf clean all \
     && rm -rf /var/cache/dnf
+
+# [YOURS] Where the store gets applications from.
+#
+# The file is fetched now and the repository is added to the session later, by
+# cabin-flathub.service. It cannot be added here: the store installs into the
+# desktop user's home, that home is a volume, and a volume hides whatever the
+# build wrote underneath it.
+#
+# A system wide repository is not a substitute. Installing into one needs
+# polkit, polkit cannot start in a rootless container, and the store would
+# offer applications it then fails to install.
+RUN mkdir -p /usr/share/cabin \
+    && curl -fsSL -o /usr/share/cabin/flathub.flatpakrepo \
+        https://dl.flathub.org/repo/flathub.flatpakrepo
+
+# [YOURS] What sits in the dash when the desktop first starts.
+#
+# Fedora's own default lists Firefox, Calendar and Calculator, none of which
+# are installed here, so the dash came up empty and the desktop looked broken.
+# GNOME drops an entry that names a missing application without saying so.
+# Keep this list to applications the recipe installs.
+RUN printf '%s\n' \
+        '[org.gnome.shell]' \
+        "favorite-apps=['org.gnome.Console.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.TextEditor.desktop', 'org.gnome.Software.desktop', 'org.gnome.Settings.desktop']" \
+        > /usr/share/glib-2.0/schemas/95-cabin-favourites.gschema.override \
+    && glib-compile-schemas /usr/share/glib-2.0/schemas/
 
 # [REQUIRED] Units that do not belong in a container.
 #

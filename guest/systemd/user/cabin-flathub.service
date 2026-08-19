@@ -1,0 +1,18 @@
+[Unit]
+Description=Cabin application store repository
+Documentation=man:flatpak-remote-add(1)
+# The desktop user's home is a volume, so anything written to it during the
+# build is hidden at run time. The repository has to be added in the session
+# instead, which is what this unit is for.
+ConditionPathExists=/usr/share/cabin/flathub.flatpakrepo
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# From the file shipped in the image rather than from the network, so a
+# desktop with no connection still starts without waiting for a timeout.
+ExecStart=/usr/bin/flatpak remote-add --user --if-not-exists \
+    flathub /usr/share/cabin/flathub.flatpakrepo
+# The desktop works without a store, so a failure here must not hold up the
+# session or mark it degraded.
+SuccessExitStatus=1

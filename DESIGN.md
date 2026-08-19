@@ -2202,3 +2202,91 @@ failed the same way. That one had not been noticed.
 
 The rule is that anything from outside the program is data. A label that parses
 it as markup will one day be handed something that is not.
+
+---
+
+## 22. A desktop that shows no icons
+
+### 22.1 What was seen, and what it was
+
+Every icon in the session drew as a blank square: the dash, the quick settings
+toggles, the application grid. Text drew correctly. That combination reads as a
+missing icon theme, and it is not one. The theme was byte for byte the same as
+the host's, the caches were built, and `gtk_icon_theme_lookup_icon` returned
+the right file.
+
+The session log held one line:
+
+```
+Could not load a pixbuf from icon theme.
+This may indicate that pixbuf loaders or the mime database could not be found.
+```
+
+Both suggestions in that message are wrong here. The chain is longer:
+
+1. Fedora 44 links `gdk-pixbuf` against **glycin**, so every image decode goes
+   through it. There is no switch to turn that off.
+2. glycin decodes each image in a **`bwrap` sandbox**, and that sandbox is
+   started with `--dev /dev`, which mounts a fresh `devpts`.
+3. A container labelled `container_t` may not mount `devpts`. The mount is
+   refused, `bwrap` exits, and the decode fails.
+4. Adwaita's icons are SVG, so every icon fails. Text is drawn by Pango and
+   never touches the decoder, which is why it survived.
+
+Nothing in the log names SELinux. The rule is `dontaudit`, so no AVC is
+recorded, and the failure surfaces three layers above its cause.
+
+### 22.2 Why the type, and not `label=disable`
+
+The container has to be allowed that mount. Four options were measured:
+
+| Option | Mount allowed | Resulting label |
+|---|---|---|
+| Default | No | `container_t:s0:c269,c829` |
+| `label=nested` | No | unchanged |
+| `label=type:container_engine_t` | Yes | `container_engine_t:s0:c265,c325` |
+| `label=disable` | Yes | `spc_t:s0` |
+
+`container_engine_t` is the type for a container that runs containers, and a
+nested sandbox is what glycin is doing. It keeps the container confined and it
+keeps the per-container MCS categories, so one desktop stays separated from
+another. `label=disable` gives up both and is kept for the one case that needs
+it: a host container socket is labelled `user_tmp_t` and no confined type can
+open it.
+
+The capability set is not involved. This toolbox reproduces the working case
+with **no** effective capabilities at all, because it runs as `spc_t`.
+
+### 22.3 The dash was empty for an unrelated reason
+
+Fedora's default `favorite-apps` names Firefox, Calendar, Software and
+Calculator. The guest installs none of them, and GNOME drops an entry that
+names a missing application without saying so, so the dash showed two icons
+where it should show six. With the icons themselves blank as well, the desktop
+looked like it had no applications at all.
+
+`95-cabin-favourites.gschema.override` sets the list to what the recipe
+installs. It is a default rather than a write, so a user's own arrangement
+still wins and still persists, because dconf lives in the home volume.
+
+### 22.4 The store installs Flatpaks, not RPMs
+
+`gnome-software` is installed, and it can only do half of what it does on a
+normal Fedora. Installing an RPM goes through PackageKit, PackageKit asks
+polkit, and `polkit.service` cannot start here: it fails at `step USER` with
+`Failed to keep CAP_SYS_ADMIN`, which a rootless container does not have. That
+is the same family of problem as section 22.1 and as the clipboard channel in
+section 15.
+
+Flatpak needs none of it. A user installation writes to
+`~/.local/share/flatpak`, the home is a volume, so applications the user adds
+survive the desktop being recreated, which the settings dialogue does on every
+change. Weak dependencies are off, so PackageKit never arrives and the store
+does not offer what it would fail at.
+
+The repository has to be added in the session rather than in the build. The
+home is a volume, and a volume hides whatever the build wrote underneath it, so
+a `flatpak remote-add --user` at build time leaves nothing behind.
+`cabin-flathub.service` does it at session start, from a `.flatpakrepo` fetched
+into the image, so a desktop with no network still starts without waiting for a
+timeout.

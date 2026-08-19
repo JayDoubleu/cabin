@@ -203,6 +203,16 @@ the end of it.
 Your copy stops following Cabin's updates, and the dialogue tells you when
 Cabin has a newer recipe than the one you copied.
 
+### Applications in a desktop
+
+A desktop comes with Console, Files, Text Editor, Settings and Software.
+
+Software is the store, and it installs Flatpaks from Flathub. They go into the
+desktop's home, which is a volume, so applications you add survive the desktop
+being recreated. It cannot install RPMs: that needs polkit, which cannot run in
+a rootless container. Use `sudo dnf install` in the terminal for those, and put
+anything you want to keep in your recipe.
+
 ### Opening a shell in a desktop
 
 Each desktop's menu has "Open a shell", which gives you the command:
