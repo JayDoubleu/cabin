@@ -128,7 +128,17 @@ impl Sidebar {
         for desktop in &desktops {
             self.list.append(&self.build_row(desktop));
         }
-        let first_running = desktops.iter().position(|d| d.state.is_running());
+        // Prefer the desktop that was last in use, so reopening Cabin puts
+        // the user back where they were. Fall back to the first that is
+        // running, which is better than an empty pane.
+        let preferred = crate::state::State::new(crate::APP_ID).last_desktop();
+        let first_running = preferred
+            .and_then(|name| {
+                desktops
+                    .iter()
+                    .position(|d| d.name == name && d.state.is_running())
+            })
+            .or_else(|| desktops.iter().position(|d| d.state.is_running()));
         *self.desktops.borrow_mut() = desktops;
 
         // Open the first running desktop once, at start-up. Without this the

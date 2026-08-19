@@ -56,9 +56,17 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Cabin")
-        .default_width(1280)
-        .default_height(800)
         .build();
+
+    let state = std::rc::Rc::new(crate::state::State::new(crate::APP_ID));
+    state.restore_window(&window);
+
+    // Saved as the window closes, so the next launch opens the same size.
+    let state_for_close = state.clone();
+    window.connect_close_request(move |window| {
+        state_for_close.save_window(window);
+        gtk::glib::Propagation::Proceed
+    });
 
     let split = adw::NavigationSplitView::builder()
         .min_sidebar_width(220.0)
@@ -81,7 +89,9 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
 
     // Selecting a running desktop opens a session and starts drawing it.
     let podman_for_select = podman_for_viewer;
+    let state_for_select = state.clone();
     sidebar.connect_selected(move |desktop| {
+        state_for_select.set_last_desktop(&desktop.name);
         if !desktop.state.is_running() {
             tracing::info!("{} is not running", desktop.name);
             return;

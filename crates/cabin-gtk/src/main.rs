@@ -11,6 +11,7 @@ mod remote;
 mod runtime;
 mod settings;
 mod sidebar;
+mod state;
 mod viewer;
 mod window;
 

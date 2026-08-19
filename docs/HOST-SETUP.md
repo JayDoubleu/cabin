@@ -127,6 +127,14 @@ and exits, with no output, which is confusing when you are trying to read logs.
 CABIN_DEV_INSTANCE=1 just run
 ```
 
+### The settings schema, for a native run
+
+GLib aborts when an application's schema is missing, so a native run of a GNOME
+application exits immediately and silently unless the schema is installed or
+`GSETTINGS_SCHEMA_DIR` points at a compiled copy. `just run` compiles one into
+`target/glib-schemas` and points at it, so this needs no action. The Flatpak
+installs the schema properly and is unaffected.
+
 ### SELinux
 
 Cabin runs desktops with SELinux labelling intact. The one exception is a

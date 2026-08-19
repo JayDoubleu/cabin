@@ -1406,17 +1406,29 @@ before being used as a file name, and a test covers `../` in a desktop name.
 Verified live: a first connection records a fingerprint, and a connection
 expecting a different one is refused.
 
-### 15.19 What is not finished
+### 15.19 Remembering where the user was
+
+The window restores its previous size, and Cabin reopens the desktop that was
+last in use rather than simply the first one running.
+
+The maximised size is deliberately not recorded. Saving it would mean that
+unmaximising after a restart restored a window the size of the screen, with no
+way back to a sensible size except dragging.
+
+One trap this exposed: **GLib aborts when a schema is missing**, so the moment
+the application read a setting, a native run began exiting immediately with no
+output at all. Nothing identifies the cause. `just run` now compiles the schema
+into `target/glib-schemas` and points `GSETTINGS_SCHEMA_DIR` at it. The Flatpak
+installs the schema properly and was never affected, which is exactly the sort
+of difference that makes a packaged build look fine while development is
+broken.
+
+### 15.20 What is not finished
 
 An audit of the tree against this document, rather than a list from memory.
 
 **The password is not in the keyring.** Section 8 says the Secret portal. It is
 still an environment variable on the container, which `podman inspect` shows.
-
-**Five settings keys are declared and unread.** `window-width`,
-`window-height`, `window-maximized`, `last-desktop` and `default-image` all
-exist in the gschema and nothing uses them. The window does not remember its
-size, and Cabin does not reopen the desktop that was last in use.
 
 **Clipboard sharing is blocked upstream.** Section 15.2 has the detail. It
 cannot be enabled until `gnome-remote-desktop` degrades instead of aborting

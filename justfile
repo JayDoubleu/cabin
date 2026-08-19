@@ -28,9 +28,19 @@ default:
 build:
     cargo build
 
+# Compile the settings schema for a native run.
+#
+# GLib aborts when a schema is missing, so without this the application exits
+# immediately with no output. The Flatpak installs the schema properly; a
+# native run has to be pointed at a compiled copy.
+_schemas:
+    @mkdir -p target/glib-schemas
+    @cp data/cabin.gschema.xml target/glib-schemas/{{app_id}}.gschema.xml
+    @glib-compile-schemas target/glib-schemas
+
 # Run the app natively, without the Flatpak sandbox.
-run:
-    RUST_LOG=cabin=debug cargo run -p cabin-gtk
+run: _schemas
+    GSETTINGS_SCHEMA_DIR=target/glib-schemas RUST_LOG=cabin=debug cargo run -p cabin-gtk
 
 # Run every test.
 test:

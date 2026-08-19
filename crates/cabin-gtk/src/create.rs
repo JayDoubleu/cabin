@@ -61,6 +61,7 @@ pub fn present(
     dialog.set_default_response(Some("create"));
     dialog.set_close_response("cancel");
 
+    let default_image = crate::state::State::new(crate::APP_ID).default_image();
     let parent_widget = parent.as_ref().clone();
     dialog.connect_response(None, move |dialog, response| {
         if response != "create" {
@@ -72,6 +73,7 @@ pub fn present(
         }
 
         let mut config = DesktopConfig::new(&name);
+        config.image = default_image.clone();
         config.memory_mb = Some(memory_row.value() as u64);
         config.graphics = match graphics_row.selected() {
             0 => GraphicsMode::Automatic,
