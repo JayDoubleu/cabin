@@ -107,11 +107,20 @@ impl Podman {
         // The home directory lives in a named volume, so reconfiguring a
         // desktop can recreate the container without destroying the user's
         // files. Podman seeds a new volume from the image on first use.
-        let volumes = vec![NamedVolume {
-            name: cabin_core::home_volume_name(&config.name),
-            dest: cabin_core::GUEST_HOME.to_string(),
-            options: vec!["rw".to_string()],
-        }];
+        let volumes = vec![
+            NamedVolume {
+                name: cabin_core::home_volume_name(&config.name),
+                dest: cabin_core::GUEST_HOME.to_string(),
+                options: vec!["rw".to_string()],
+            },
+            // Separate from the home volume, because it holds the TLS private
+            // key and nothing in the desktop session should be able to read it.
+            NamedVolume {
+                name: cabin_core::state_volume_name(&config.name),
+                dest: cabin_core::GUEST_STATE.to_string(),
+                options: vec!["rw".to_string()],
+            },
+        ];
 
         let mut mounts = Vec::from_iter(config.mounts.iter().map(|m| {
             let mut options = vec![m.mode.as_podman_option().to_string()];

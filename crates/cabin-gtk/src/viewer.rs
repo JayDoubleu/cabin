@@ -44,6 +44,8 @@ pub fn attach(
         },
         width: desktop.config.width,
         height: desktop.config.height,
+        // None on a first connection, which records whatever is presented.
+        expected_fingerprint: crate::pinning::recorded(&desktop.name),
     };
 
     let (command_tx, command_rx) = std::sync::mpsc::channel();
@@ -52,18 +54,32 @@ pub fn attach(
     display.set_command_sender(command_tx);
 
     let name = desktop.name.clone();
+    let name_for_events = name.clone();
     std::thread::Builder::new()
         .name(format!("cabin-rdp-{name}"))
         .spawn(move || cabin_rdp::run_session(params, command_rx, event_tx))
         .expect("could not start the session thread");
 
     let display = display.clone();
+    let name = name_for_events;
     gtk::glib::spawn_future_local(async move {
         let mut showing = false;
         while let Ok(event) = event_rx.recv().await {
             match event {
-                SessionEvent::Connected { width, height } => {
+                SessionEvent::Connected {
+                    width,
+                    height,
+                    fingerprint,
+                } => {
                     tracing::info!("session connected at {width}x{height}");
+                    // Record on the first connection, so every later one is
+                    // checked against it.
+                    if let Some(fingerprint) = fingerprint {
+                        if crate::pinning::recorded(&name).is_none() {
+                            tracing::info!("recording certificate for {name}");
+                            crate::pinning::record(&name, &fingerprint);
+                        }
+                    }
                 }
                 SessionEvent::Frame(frame) => {
                     // Switch on the first frame, not on Connected. A connected

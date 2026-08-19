@@ -21,6 +21,9 @@ fn params(port: u16) -> ConnectionParams {
         },
         width: 1920,
         height: 1080,
+        // These tests connect to a throwaway guest, so there is nothing
+        // recorded to check against.
+        expected_fingerprint: None,
     }
 }
 

@@ -19,6 +19,9 @@ pub struct ConnectionParams {
     pub credentials: Credentials,
     pub width: u32,
     pub height: u32,
+    /// The fingerprint recorded from an earlier connection, if any. `None`
+    /// accepts and records whatever the guest presents.
+    pub expected_fingerprint: Option<String>,
 }
 
 /// Owns a shim client and frees it on drop.
@@ -66,12 +69,47 @@ impl Client {
         Ok(())
     }
 
+    fn expect_fingerprint(&self, fingerprint: Option<&str>) -> Result<()> {
+        match fingerprint {
+            Some(value) => {
+                let value = cstring(value)?;
+                // SAFETY: valid handle and a live CString for the call.
+                unsafe { sys::cabin_rdp_expect_fingerprint(self.0, value.as_ptr()) };
+            }
+            // SAFETY: null means "no expectation yet", which the shim handles.
+            None => unsafe { sys::cabin_rdp_expect_fingerprint(self.0, std::ptr::null()) },
+        }
+        Ok(())
+    }
+
+    fn seen_fingerprint(&self) -> Option<String> {
+        // SAFETY: valid handle; the shim owns the returned string.
+        let raw = unsafe { sys::cabin_rdp_seen_fingerprint(self.0) };
+        if raw.is_null() {
+            return None;
+        }
+        // SAFETY: the shim returns a NUL terminated string it owns.
+        Some(
+            unsafe { std::ffi::CStr::from_ptr(raw) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
+    fn fingerprint_changed(&self) -> bool {
+        // SAFETY: valid handle.
+        (unsafe { sys::cabin_rdp_fingerprint_changed(self.0) }) == 1
+    }
+
     fn connect(&self, address: &str) -> Result<()> {
         // SAFETY: valid handle.
         let rc = unsafe { sys::cabin_rdp_connect(self.0) };
         match rc {
             sys::CABIN_OK => Ok(()),
             sys::CABIN_ERR_AUTH => Err(Error::AuthenticationFailed),
+            _ if self.fingerprint_changed() => Err(Error::CertificateChanged {
+                seen: self.seen_fingerprint().unwrap_or_default(),
+            }),
             _ => {
                 // SAFETY: valid handle.
                 let code = unsafe { sys::cabin_rdp_last_error(self.0) };
@@ -202,6 +240,7 @@ pub fn run_session(
     let _ = events.send_blocking(SessionEvent::Connected {
         width: params.width,
         height: params.height,
+        fingerprint: client.seen_fingerprint(),
     });
 
     let mut last_frame = 0u64;
@@ -250,6 +289,7 @@ pub fn run_session(
 fn start(params: &ConnectionParams) -> Result<Client> {
     let client = Client::new()?;
     client.configure(params)?;
+    client.expect_fingerprint(params.expected_fingerprint.as_deref())?;
     client.connect(&format!("{}:{}", params.host, params.port))?;
     Ok(client)
 }

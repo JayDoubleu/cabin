@@ -32,6 +32,13 @@ pub enum Error {
     },
     #[error("the server rejected the credentials")]
     AuthenticationFailed,
+
+    #[error(
+        "this desktop presented a different security certificate than last time.\n\n\
+         That is expected if the desktop was rebuilt from scratch. If it was not, \
+         something may be intercepting the connection.\n\nIt now presents:\n{seen}"
+    )]
+    CertificateChanged { seen: String },
     #[error("the server requires NLA, which the client did not offer")]
     NlaRequired,
     #[error("the RDP session ended: {0}")]

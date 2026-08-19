@@ -33,6 +33,9 @@ struct cabin_rdp
 	int connected;
 	DispClientContext* disp;
 	pEndPaint original_end_paint;
+	char* expected_fingerprint;
+	char* seen_fingerprint;
+	int fingerprint_changed;
 };
 
 static struct cabin_rdp* owner_of(rdpContext* context)
@@ -56,25 +59,45 @@ static BOOL cabin_desktop_resize(rdpContext* context)
 	return gdi_resize(context->gdi, width, height);
 }
 
-/* Accept the guest's self-signed certificate.
+/* Checks the guest's certificate by pinned fingerprint.
  *
- * Cabin generates one certificate per container and the user never sees a
- * certificate authority, so a chain check would always fail. Pinning the
- * fingerprint is the right long-term answer and is tracked in DESIGN.md
- * section 8. Until then the transport is encrypted but unauthenticated. */
+ * Cabin generates one certificate per container and there is no authority to
+ * sign it, so a chain check can never succeed. Pinning is the alternative that
+ * actually means something: the first connection records the fingerprint, and
+ * every later one must match it. Without this the transport is encrypted but
+ * unauthenticated, and a machine in the middle would not be noticed.
+ *
+ * Return 1 accepts and stores permanently, 2 accepts for this session, 0
+ * rejects. */
 static DWORD cabin_verify_certificate(freerdp* instance, const char* host, UINT16 port,
                                       const char* common_name, const char* subject,
                                       const char* issuer, const char* fingerprint, DWORD flags)
 {
-	(void)instance;
 	(void)host;
 	(void)port;
 	(void)common_name;
 	(void)subject;
 	(void)issuer;
-	(void)fingerprint;
 	(void)flags;
-	return 2; /* accept for this session only */
+
+	struct cabin_rdp* self = owner_of(instance->context);
+	if (!self || !fingerprint)
+		return 0;
+
+	free(self->seen_fingerprint);
+	self->seen_fingerprint = strdup(fingerprint);
+
+	if (!self->expected_fingerprint)
+	{
+		/* First connection to this desktop. Record what it presented. */
+		return 2;
+	}
+
+	if (strcmp(self->expected_fingerprint, fingerprint) == 0)
+		return 2;
+
+	self->fingerprint_changed = 1;
+	return 0;
 }
 
 static DWORD cabin_verify_changed_certificate(freerdp* instance, const char* host, UINT16 port,
@@ -306,7 +329,27 @@ void cabin_rdp_free(cabin_rdp* self)
 		return;
 	if (self->ctx)
 		freerdp_client_context_free(&self->ctx->context);
+	free(self->expected_fingerprint);
+	free(self->seen_fingerprint);
 	free(self);
+}
+
+void cabin_rdp_expect_fingerprint(cabin_rdp* self, const char* fingerprint)
+{
+	if (!self)
+		return;
+	free(self->expected_fingerprint);
+	self->expected_fingerprint = fingerprint ? strdup(fingerprint) : NULL;
+}
+
+const char* cabin_rdp_seen_fingerprint(cabin_rdp* self)
+{
+	return self ? self->seen_fingerprint : NULL;
+}
+
+int cabin_rdp_fingerprint_changed(cabin_rdp* self)
+{
+	return self ? self->fingerprint_changed : 0;
 }
 
 int cabin_rdp_configure(cabin_rdp* self, const char* host, uint32_t port, const char* username,
@@ -343,11 +386,13 @@ int cabin_rdp_configure(cabin_rdp* self, const char* host, uint32_t port, const 
 	if (!freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, FALSE))
 		return CABIN_ERR_GENERIC;
 
-	/* Cabin generates a fresh certificate per container. See the note on
-	 * cabin_verify_certificate. */
-	if (!freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE))
+	/* Both of these must stay off. Either one makes FreeRDP accept the
+	 * certificate without ever calling VerifyCertificateEx, so the pinning in
+	 * cabin_verify_certificate would never run and would silently be a
+	 * decoration rather than a check. */
+	if (!freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, FALSE))
 		return CABIN_ERR_GENERIC;
-	if (!freerdp_settings_set_bool(settings, FreeRDP_AutoAcceptCertificate, TRUE))
+	if (!freerdp_settings_set_bool(settings, FreeRDP_AutoAcceptCertificate, FALSE))
 		return CABIN_ERR_GENERIC;
 
 	return CABIN_OK;

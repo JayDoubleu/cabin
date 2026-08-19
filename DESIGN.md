@@ -1374,16 +1374,41 @@ starts further along:
 The code paths for the policy are correct and stay in the tree. Only the choice
 is withheld.
 
-### 15.18 What is not finished
+### 15.18 Pinning the certificate
+
+Every desktop signs its own certificate, so a chain check can never succeed and
+there is nothing to check against. Pinning is what makes the connection mean
+anything: the first connection records the fingerprint, and a later one that
+presents a different certificate is refused.
+
+Three things had to be true for this to be more than decoration.
+
+**`IgnoreCertificate` and `AutoAcceptCertificate` must be off.** Either one
+makes FreeRDP accept the certificate without ever calling
+`VerifyCertificateEx`, so the check would never run. An earlier version set
+both, which is why the callback existed and did nothing.
+
+**The certificate must outlive the container.** It lives in `/var/lib/cabin`,
+which is now a named volume separate from the home directory. Without that,
+every settings change would regenerate the certificate and look exactly like an
+interception. It is a separate volume from the home directory on purpose,
+because it holds the private key and nothing in the desktop session should be
+able to read it.
+
+**A deleted desktop must be forgotten.** Otherwise a new desktop reusing the
+name would present a different certificate and be reported as an attack.
+
+The store is a file per desktop in the application's data directory, keyed by
+name rather than container id, because the id changes whenever a desktop is
+reconfigured. Names come from the user, so they are reduced to safe characters
+before being used as a file name, and a test covers `../` in a desktop name.
+
+Verified live: a first connection records a fingerprint, and a connection
+expecting a different one is refused.
+
+### 15.19 What is not finished
 
 An audit of the tree against this document, rather than a list from memory.
-
-**The TLS certificate is not pinned.** Section 8 says Cabin pins the
-fingerprint on first connect and warns if it changes. It does not:
-`cabin_verify_certificate` accepts whatever it is given. The transport is
-encrypted but unauthenticated, so a machine in the middle on the path to a
-remote desktop would not be detected. This matters more now that remote access
-exists.
 
 **The password is not in the keyring.** Section 8 says the Secret portal. It is
 still an environment variable on the container, which `podman inspect` shows.

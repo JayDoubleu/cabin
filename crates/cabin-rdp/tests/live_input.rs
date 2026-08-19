@@ -56,6 +56,8 @@ impl Session {
             },
             width: 1920,
             height: 1080,
+            // A throwaway guest, so there is nothing recorded to check against.
+            expected_fingerprint: None,
         };
         std::thread::spawn(move || run_session(params, command_rx, event_tx));
         Self {
@@ -219,9 +221,15 @@ fn clicking_the_clock_opens_the_calendar() {
     let mut session = Session::open(13389);
     let quiet = Duration::from_millis(1500);
 
-    // Park the pointer somewhere inert first. The top bar highlights whatever
-    // the pointer is over, so a baseline taken with the pointer on the clock
-    // would differ from the final frame by that highlight alone.
+    // A freshly booted guest sits in the Activities overview, so close it
+    // first. Without this the click lands on the overview instead of the top
+    // bar and the test measures the wrong thing entirely.
+    session.tap(scancode::ESCAPE, false);
+    let _ = session.settle(quiet);
+
+    // Park the pointer somewhere inert. The top bar highlights whatever the
+    // pointer is over, so a baseline taken with the pointer on the clock would
+    // differ from the final frame by that highlight alone.
     session.move_to(40, 400);
     let start = session.settle(quiet);
     let (width, _) = (start.width, start.height);

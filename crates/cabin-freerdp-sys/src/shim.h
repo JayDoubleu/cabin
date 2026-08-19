@@ -27,6 +27,20 @@ void cabin_rdp_free(cabin_rdp* self);
 int cabin_rdp_configure(cabin_rdp* self, const char* host, uint32_t port, const char* username,
                         const char* password, const char* domain, uint32_t width, uint32_t height);
 
+/* Pins the certificate.
+ *
+ * Pass the fingerprint recorded from an earlier connection, or NULL on the
+ * first connection to accept and record whatever the guest presents. When a
+ * fingerprint is set and the guest presents a different one, the connection is
+ * refused. */
+void cabin_rdp_expect_fingerprint(cabin_rdp* self, const char* fingerprint);
+
+/* The fingerprint the guest presented, or NULL if none has been seen. */
+const char* cabin_rdp_seen_fingerprint(cabin_rdp* self);
+
+/* True when the guest presented a fingerprint that did not match. */
+int cabin_rdp_fingerprint_changed(cabin_rdp* self);
+
 int cabin_rdp_connect(cabin_rdp* self);
 
 /* Processes pending events. Returns 1 while connected, 0 once disconnected,

@@ -347,6 +347,9 @@ impl Sidebar {
             let podman = sidebar.podman.clone();
             let id = desktop.id.clone();
             let sidebar = sidebar.clone();
+            // Otherwise a new desktop reusing the name would present a
+            // different certificate and be reported as an interception.
+            crate::pinning::forget(&desktop.name);
             runtime::spawn(
                 async move { podman.remove(&id, true).await },
                 move |result| {

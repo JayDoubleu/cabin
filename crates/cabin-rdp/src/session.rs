@@ -67,6 +67,9 @@ pub enum SessionEvent {
     Connected {
         width: u32,
         height: u32,
+        /// The certificate the guest presented, to be recorded on a first
+        /// connection.
+        fingerprint: Option<String>,
     },
     Frame(Frame),
     /// The guest changed its own resolution, which happens after a resize

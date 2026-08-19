@@ -373,3 +373,60 @@ async fn the_host_podman_socket_reaches_the_desktop() {
     podman.stop(&id, 20).await.ok();
     let _ = podman.remove(&id, true).await;
 }
+
+/// Pinning only means something if the certificate outlives the container.
+/// Otherwise every settings change would look like a machine in the middle.
+#[tokio::test]
+#[ignore = "needs a running podman.socket and the cabin-guest image"]
+async fn the_tls_certificate_survives_a_recreate() {
+    let podman = Podman::new();
+    let name = "cabin-cert-test";
+    let _ = podman.remove(name, true).await;
+    let _ = host_podman(&["volume", "rm", "-f", &cabin_core::state_volume_name(name)]);
+
+    let mut config = DesktopConfig::new(name);
+    config.graphics = GraphicsMode::Software;
+
+    let id = podman
+        .create_desktop(&config, 13990, &[], "cert-test")
+        .await
+        .expect("create");
+    podman.start_desktop(&id, name).await.expect("start");
+
+    let read_fingerprint = || {
+        let out = host_podman(&[
+            "exec",
+            name,
+            "sh",
+            "-c",
+            "openssl x509 -in /var/lib/cabin/tls/rdp.crt -noout -fingerprint -sha256",
+        ]);
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let before = read_fingerprint();
+    assert!(!before.is_empty(), "the guest should have a certificate");
+    println!("before: {before}");
+
+    podman.stop(&id, 20).await.expect("stop");
+    podman.remove(&id, true).await.expect("remove");
+    config.memory_mb = Some(3072);
+    let second = podman
+        .create_desktop(&config, 13990, &[], "cert-test")
+        .await
+        .expect("recreate");
+    podman
+        .start_desktop(&second, name)
+        .await
+        .expect("start again");
+
+    let after = read_fingerprint();
+    println!("after:  {after}");
+    assert_eq!(
+        before, after,
+        "the certificate changed, so every reconfigure would look like an attack"
+    );
+
+    podman.stop(&second, 20).await.ok();
+    let _ = podman.remove(&second, true).await;
+}

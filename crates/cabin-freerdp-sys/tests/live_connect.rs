@@ -112,3 +112,55 @@ fn connects_and_receives_frames() {
     // SAFETY: valid handle.
     unsafe { cabin_rdp_disconnect(client.0) };
 }
+
+/// The certificate must be checked, not waved through. A first connection
+/// records the fingerprint; a second with a wrong one is refused.
+#[test]
+#[ignore = "needs a running guest from 'just guest-test'"]
+fn the_certificate_is_pinned() {
+    use std::ffi::CStr;
+
+    let client = Client::new();
+    assert_eq!(configure(&client, "testpass"), CABIN_OK);
+    // SAFETY: valid handle, and null means "no expectation yet".
+    unsafe { cabin_rdp_expect_fingerprint(client.0, std::ptr::null()) };
+
+    // SAFETY: valid handle.
+    assert_eq!(
+        unsafe { cabin_rdp_connect(client.0) },
+        CABIN_OK,
+        "first connect"
+    );
+    // SAFETY: valid handle; the pointer is owned by the shim.
+    let seen = unsafe { cabin_rdp_seen_fingerprint(client.0) };
+    assert!(
+        !seen.is_null(),
+        "the certificate should have been inspected"
+    );
+    // SAFETY: the shim returns a NUL terminated string it owns.
+    let recorded = unsafe { CStr::from_ptr(seen) }
+        .to_string_lossy()
+        .into_owned();
+    println!("recorded fingerprint: {recorded}");
+    assert!(!recorded.is_empty());
+    // SAFETY: valid handle.
+    unsafe { cabin_rdp_disconnect(client.0) };
+    drop(client);
+
+    // A different fingerprint must be refused.
+    let client = Client::new();
+    assert_eq!(configure(&client, "testpass"), CABIN_OK);
+    let wrong = CString::new("00:11:22:33:44:55:66:77").unwrap();
+    // SAFETY: valid handle and a live CString.
+    unsafe { cabin_rdp_expect_fingerprint(client.0, wrong.as_ptr()) };
+    // SAFETY: valid handle.
+    let rc = unsafe { cabin_rdp_connect(client.0) };
+    assert_ne!(rc, CABIN_OK, "a changed certificate must not connect");
+    // SAFETY: valid handle.
+    assert_eq!(
+        unsafe { cabin_rdp_fingerprint_changed(client.0) },
+        1,
+        "the refusal should be reported as a fingerprint change"
+    );
+    println!("a wrong fingerprint was refused, as it should be");
+}

@@ -45,6 +45,9 @@ extern "C" {
         height: u32,
     ) -> c_int;
 
+    pub fn cabin_rdp_expect_fingerprint(client: *mut cabin_rdp, fingerprint: *const c_char);
+    pub fn cabin_rdp_seen_fingerprint(client: *mut cabin_rdp) -> *const c_char;
+    pub fn cabin_rdp_fingerprint_changed(client: *mut cabin_rdp) -> c_int;
     pub fn cabin_rdp_connect(client: *mut cabin_rdp) -> c_int;
     pub fn cabin_rdp_poll(client: *mut cabin_rdp, timeout_ms: u32) -> c_int;
 

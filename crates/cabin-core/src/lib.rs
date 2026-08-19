@@ -29,6 +29,19 @@ pub fn home_volume_name(desktop_name: &str) -> String {
     format!("cabin-{desktop_name}-home")
 }
 
+/// Where a desktop keeps its own state, including its TLS certificate.
+pub const GUEST_STATE: &str = "/var/lib/cabin";
+
+/// The named volume that holds a desktop's state.
+///
+/// The TLS certificate lives here. Cabin pins its fingerprint, so if a
+/// settings change regenerated the certificate, every reconfigure would look
+/// exactly like a machine in the middle. The certificate has to outlive the
+/// container for pinning to mean anything.
+pub fn state_volume_name(desktop_name: &str) -> String {
+    format!("cabin-{desktop_name}-state")
+}
+
 /// The run state of a desktop, as reported by Podman.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -61,6 +74,13 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_and_home_are_separate_volumes() {
+        // Sharing one volume would put the TLS key in the user's home
+        // directory, where anything in the desktop could read it.
+        assert_ne!(state_volume_name("a"), home_volume_name("a"));
+    }
 
     #[test]
     fn home_volume_is_namespaced_per_desktop() {

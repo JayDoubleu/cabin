@@ -6,6 +6,7 @@ mod display;
 mod graphics;
 mod keymap;
 mod netaddr;
+mod pinning;
 mod remote;
 mod runtime;
 mod settings;
