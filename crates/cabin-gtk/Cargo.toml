@@ -16,5 +16,6 @@ anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+async-channel.workspace = true
 gtk = { package = "gtk4", version = "0.9" }
 adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }

@@ -474,12 +474,12 @@ just guest          # build the guest image
 
 ## 10. Milestones
 
-| # | Milestone | Proves |
-|---|---|---|
-| 1 | Guest image serves a GNOME desktop over RDP, verified with an external client | The whole idea works |
-| 2 | Flatpak shell with sidebar and stubbed data | Packaging and UI skeleton |
-| 3 | Podman client: list, start, stop, event stream | Real state in the sidebar |
-| 4 | `CabinDisplay` shows guest frames, read-only | The hardest component |
+| # | Milestone | Proves | State |
+|---|---|---|---|
+| 1 | Guest image serves a GNOME desktop over RDP | The whole idea works | Done, see section 12 |
+| 2 | Flatpak shell with sidebar and stubbed data | Packaging and UI skeleton | Done |
+| 3 | Podman client: list, start, stop, event stream | Real state in the sidebar | Done, see section 13 |
+| 4 | `CabinDisplay` shows guest frames, read-only | The hardest component | Next |
 | 5 | Keyboard and pointer input | Usable desktop |
 | 6 | Fit-to-window and fixed resolutions | The headline feature |
 | 7 | Create, delete, mounts, GPU and socket settings | Feature complete |
@@ -624,3 +624,55 @@ directory.
 The Shell screenshot D-Bus method returns `AccessDenied`. That is expected on
 GNOME 47 and later, which restricts it to portal callers. It is a dead end for
 diagnostics, not a fault.
+
+
+---
+
+## 13. Milestone 3 notes
+
+The application now reads real state. The sidebar lists desktops, starts and
+stops them, and creates new ones.
+
+### 13.1 Bridging Tokio and GTK
+
+The Podman client needs a Tokio runtime for its socket I/O. GTK objects are not
+`Send`, so they cannot cross to a Tokio worker thread. `runtime.rs` holds the
+bridge: the future runs on Tokio, the result crosses back through a one-shot
+channel, and the callback runs on the main thread where it may touch widgets.
+
+The event feed uses the same idea with a buffered channel, because it produces
+many values instead of one.
+
+### 13.2 The list is never mutated in place
+
+Every change re-queries Podman and rebuilds the rows. This is deliberate.
+Podman is the only store of state, so any attempt to keep a parallel model in
+the interface would drift from it. Rebuilding a list of a few rows costs
+nothing.
+
+The Podman event feed drives the rebuild, so a desktop started from the command
+line appears without the user refreshing anything. This is verified: an
+external `podman start` produces `init` and `start` events and the list
+reflects them.
+
+### 13.3 Live tests
+
+`crates/cabin-podman/tests/live_podman.rs` runs against a real Podman socket.
+The tests are ignored by default because they need `podman.socket` and the
+guest image.
+
+```sh
+cargo test -p cabin-podman -- --ignored --test-threads=1
+```
+
+They cover the create, list, start, stop, and remove cycle, that mounts and
+sizes survive a round trip through container labels, and that a container
+without Cabin labels never appears in the desktop list.
+
+### 13.4 Password handling is not final
+
+`create.rs` generates a per-desktop password and passes it to the guest as an
+environment variable, so `podman inspect` reveals it. That is the same exposure
+the guest already has, so it adds no new risk, but it is not where the password
+belongs. Section 8 states the intent: the host keyring, through the Secret
+portal. This is still to do.

@@ -92,3 +92,7 @@ flatpak-run:
 clean:
     cargo clean
     rm -rf _build _flatpak .flatpak-builder
+
+# Create a Cabin-managed demo desktop, so the app has something to list.
+demo:
+    cargo test -p cabin-podman --test make_demo -- --ignored --nocapture

@@ -3,9 +3,10 @@
 //! See the layout sketch in DESIGN.md section 5.3.
 
 use crate::display::CabinDisplay;
+use crate::sidebar::Sidebar;
 use adw::prelude::*;
-use cabin_core::State;
 use cabin_podman::Podman;
+use std::sync::Arc;
 
 /// The fixed sizes offered in the display menu.
 const RESOLUTIONS: &[(u32, u32)] = &[(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)];
@@ -24,7 +25,30 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         .max_sidebar_width(320.0)
         .build();
 
-    split.set_sidebar(Some(&build_sidebar()));
+    let podman = Arc::new(Podman::new());
+    let sidebar = Sidebar::new(podman);
+
+    let sidebar_toolbar = adw::ToolbarView::new();
+    sidebar_toolbar.add_top_bar(&adw::HeaderBar::new());
+    sidebar_toolbar.set_content(Some(&sidebar.widget));
+    let sidebar_page = adw::NavigationPage::builder()
+        .title("Cabin")
+        .child(&sidebar_toolbar)
+        .build();
+
+    // Selecting a desktop will open a session in milestone 4. For now it
+    // reports what it would connect to, which is enough to verify the list
+    // carries the right port and state.
+    sidebar.connect_selected(|desktop| {
+        tracing::info!(
+            "selected {} ({:?}), rdp port {:?}",
+            desktop.name,
+            desktop.state,
+            desktop.rdp_port
+        );
+    });
+
+    split.set_sidebar(Some(&sidebar_page));
     split.set_content(Some(&build_content()));
     window.set_content(Some(&split));
 
@@ -34,50 +58,6 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     report_render_nodes();
 
     window
-}
-
-fn build_sidebar() -> adw::NavigationPage {
-    let list = gtk::ListBox::builder()
-        .selection_mode(gtk::SelectionMode::Single)
-        .css_classes(vec!["navigation-sidebar"])
-        .build();
-
-    let scroller = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vexpand(true)
-        .child(&list)
-        .build();
-
-    let new_button = gtk::Button::builder()
-        .label("New Desktop")
-        .css_classes(vec!["suggested-action", "pill"])
-        .margin_top(6)
-        .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
-        .build();
-
-    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    box_.append(&scroller);
-    box_.append(&new_button);
-
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&adw::HeaderBar::new());
-    toolbar.set_content(Some(&box_));
-
-    // The list is empty until the Podman client is wired in, which is
-    // milestone 3. Show that state rather than a blank panel.
-    let placeholder = adw::StatusPage::builder()
-        .icon_name("computer-symbolic")
-        .title("No desktops")
-        .description("Create one to get started.")
-        .build();
-    list.set_placeholder(Some(&placeholder));
-
-    adw::NavigationPage::builder()
-        .title("Cabin")
-        .child(&toolbar)
-        .build()
 }
 
 fn build_content() -> adw::NavigationPage {
@@ -186,17 +166,5 @@ fn report_render_nodes() {
     }
     for (path, driver) in &nodes {
         tracing::info!("render node {path} uses the {driver} driver");
-    }
-}
-
-/// Kept for the sidebar rows in milestone 3.
-#[allow(dead_code)]
-fn state_icon(state: State) -> &'static str {
-    match state {
-        State::Running => "media-playback-start-symbolic",
-        State::Paused => "media-playback-pause-symbolic",
-        State::Exited | State::Created => "media-playback-stop-symbolic",
-        State::Stopping => "content-loading-symbolic",
-        State::Unknown => "dialog-question-symbolic",
     }
 }

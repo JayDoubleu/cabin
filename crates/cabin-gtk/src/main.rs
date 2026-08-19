@@ -1,8 +1,11 @@
 //! Cabin: run Fedora GNOME desktops in containers.
 
 mod app;
+mod create;
 mod display;
 mod graphics;
+mod runtime;
+mod sidebar;
 mod window;
 
 use adw::prelude::*;
