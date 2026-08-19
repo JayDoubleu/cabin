@@ -1324,18 +1324,47 @@ The guess is only a guess, so a real error from Podman is always preferred over
 it. But 255 with an empty log is this failure often enough that naming it is
 far more useful than reporting the number.
 
-### 15.16 Still to do
-- `rdpdr`, `rdpsnd` and `AUDIO_PLAYBACK_DVC` still connect even though the shim
-  sets `FreeRDP_DeviceRedirection`, `FreeRDP_AudioPlayback` and friends to
-  false, so those settings are applied too late or overridden by
-  `freerdp_client_load_addins`. Harmless today, but it is unwanted surface.
-- The odd-dimension rounding path is still untested. The guest rounds odd
-  sizes **down** to even, so 1703x961 is granted as 1702x960, but GTK kept
-  constraining the pane to even dimensions so the case never arose. Exercising
-  it needs the application to request an odd width directly. It is a one-pixel
-  concern.
-- Input is verified in sections 15.9 and 15.10. What is not covered is the
-  widget's own event controllers: the tests drive `SessionCommand` directly,
-  so the GTK controllers and the keycode mapping are unit tested but never
-  exercised together against a guest.
-- Audio, clipboard and connection profiles for other devices remain unstarted.
+### 15.16 What is not finished
+
+An audit of the tree against this document, rather than a list from memory.
+
+**The container runtime setting does nothing.** `SocketPolicy` round trips
+through the labels and the dialogue offers all four choices, but
+`create_desktop` never reads it. Nested Podman is not set up, and neither host
+socket is mounted. The failure is at least in the safe direction, since the
+dangerous options do not happen either, but the dialogue currently promises
+something the code does not do. This is the largest gap.
+
+**The TLS certificate is not pinned.** Section 8 says Cabin pins the
+fingerprint on first connect and warns if it changes. It does not:
+`cabin_verify_certificate` accepts whatever it is given. The transport is
+encrypted but unauthenticated, so a machine in the middle on the path to a
+remote desktop would not be detected. This matters more now that remote access
+exists.
+
+**The password is not in the keyring.** Section 8 says the Secret portal. It is
+still an environment variable on the container, which `podman inspect` shows.
+
+**Five settings keys are declared and unread.** `window-width`,
+`window-height`, `window-maximized`, `last-desktop` and `default-image` all
+exist in the gschema and nothing uses them. The window does not remember its
+size, and Cabin does not reopen the desktop that was last in use.
+
+**Clipboard sharing is blocked upstream.** Section 15.2 has the detail. It
+cannot be enabled until `gnome-remote-desktop` degrades instead of aborting
+when the FUSE mount fails.
+
+**Audio is not started.** The RDPSND channel is deliberately disabled in the
+shim.
+
+**`polkit` does not run in the guest.** Open question 5. Privileged actions in
+Settings inside the desktop will refuse.
+
+Three things work but have never been checked in the way they will be used:
+
+- The render path has only been seen under XWayland, never native Wayland.
+- The widget's own event controllers and the keycode mapping are unit tested,
+  but the live input tests drive `SessionCommand` directly, so the two have
+  never been exercised together against a guest.
+- The odd-dimension resize rounding has no test, because GTK kept constraining
+  the pane to even sizes.

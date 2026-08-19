@@ -209,3 +209,53 @@ async fn a_desktop_that_will_not_start_says_why() {
 
     let _ = podman.remove(&id, true).await;
 }
+
+/// Shared folders must reach the container, not just the labels.
+#[tokio::test]
+#[ignore = "needs a running podman.socket and the cabin-guest image"]
+async fn a_shared_folder_reaches_the_container() {
+    use cabin_core::{Mount, MountMode};
+
+    let podman = Podman::new();
+    let name = "cabin-mount-test";
+    let _ = podman.remove(name, true).await;
+
+    let mut config = DesktopConfig::new(name);
+    config.graphics = GraphicsMode::Software;
+    config.mounts.push(Mount {
+        host_path: "/tmp".to_string(),
+        guest_path: "/mnt/host-tmp".to_string(),
+        mode: MountMode::ReadOnly,
+        relabel: false,
+    });
+
+    let id = podman
+        .create_desktop(&config, 13993, &[], "mount-test")
+        .await
+        .expect("create");
+
+    // Ask podman what it actually recorded, rather than trusting our labels.
+    let output = host_podman(&[
+        "inspect",
+        name,
+        "--format",
+        "{{range .Mounts}}{{.Source}}->{{.Destination}}:{{.RW}} {{end}}",
+    ]);
+    let mounts = String::from_utf8_lossy(&output.stdout);
+    println!("podman recorded: {}", mounts.trim());
+
+    assert!(
+        mounts.contains("/tmp->/mnt/host-tmp"),
+        "the shared folder should be a real mount, got {mounts:?}"
+    );
+    assert!(
+        mounts.contains("/mnt/host-tmp:false"),
+        "a read-only folder must not be writable, got {mounts:?}"
+    );
+    assert!(
+        mounts.contains("/home/cabin:true"),
+        "the home volume should still be there and writable, got {mounts:?}"
+    );
+
+    let _ = podman.remove(&id, true).await;
+}
