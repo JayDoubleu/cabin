@@ -1,24 +1,59 @@
 # Cabin guest image: a headless Fedora GNOME desktop exposed over RDP.
 #
 # The container runs systemd as PID 1. systemd starts a user session for the
-# "cabin" user. The user session runs GNOME Shell with the headless mutter
-# backend, and gnome-remote-desktop serves that session over RDP.
+# "cabin" user. That session runs GNOME Shell with the headless mutter backend,
+# and gnome-remote-desktop serves it over RDP.
+#
+# ---------------------------------------------------------------------------
+# EDITING THIS FILE
+#
+# You are welcome to change it. Sections are marked so you can tell what is
+# safe to change from what the desktop needs to work at all:
+#
+#   [REQUIRED]  Remove it and the desktop will not start, or will start and
+#               not accept a connection. Each one says why.
+#   [YOURS]     Change freely. Nothing here is load-bearing.
+#
+# If a desktop stops working after an edit, the fastest way back is to delete
+# your recipe and start again from the one Cabin ships.
+# ---------------------------------------------------------------------------
 #
 # Build:
 #   podman build -t localhost/cabin-guest:f44 -f guest/Containerfile guest/
+
+# [REQUIRED] Fedora, because everything below is named the way Fedora names it.
+# A different distribution needs a different package list and different unit
+# names, which is a rewrite rather than an edit.
 FROM registry.fedoraproject.org/fedora:44
 
-# Marks the image as one of ours. Cabin lists images by this label, so an
-# image built here is told apart from everything else on the host, and the
-# image manager never offers to delete somebody else's work by default.
+# [REQUIRED] Marks the image as one of Cabin's.
+#
+# The image manager lists images by this label and offers only labelled ones
+# when a desktop is created. Remove it and your image still builds, and then
+# does not appear anywhere in Cabin. Keep it in any image you want to use.
 LABEL io.github.jaydoubleu.cabin.guest="true"
 
+# [REQUIRED] The user the desktop runs as.
+#
+# The id is 1000 so that files in a shared folder belong to the same person
+# inside the desktop as outside it.
 ARG CABIN_USER=cabin
 ARG CABIN_UID=1000
 
-# GNOME session, remote desktop, audio, and portals.
-# Weak dependencies stay off to keep the image small. Extra packages that the
-# session needs are listed explicitly.
+# [REQUIRED] The desktop session itself.
+#
+# Weak dependencies stay off to keep the image small, so anything the session
+# needs is named here. Removing a line from this list is how a desktop ends up
+# starting with no way to connect to it:
+#
+#   systemd, dbus          systemd is PID 1 and everything talks over the bus
+#   gnome-shell, mutter    the session, run with the headless backend
+#   gnome-remote-desktop   the RDP server Cabin connects to
+#   gnome-keyring          holds the RDP credentials
+#   pipewire               gnome-remote-desktop will not start without it
+#   mesa                   software rendering when no GPU is passed in
+#   xwayland               anything not yet ported to Wayland
+#   openssl                generates the desktop's TLS certificate at boot
 RUN dnf -y install --setopt=install_weak_deps=False \
         systemd systemd-container dbus-broker dbus-daemon \
         gnome-shell gnome-session mutter gnome-settings-daemon \
@@ -29,15 +64,32 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         pipewire pipewire-pulseaudio wireplumber \
         mesa-dri-drivers mesa-libEGL mesa-libGL mesa-vulkan-drivers \
         xorg-x11-server-Xwayland \
+        openssl passwd sudo shadow-utils procps-ng iproute \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+# [YOURS] Applications and tools.
+#
+# Nothing here is needed for the desktop to run, so this is the list to change.
+# It is a separate step from the one above on purpose: editing it rebuilds only
+# this layer, which takes seconds, while the session above stays as it is.
+RUN dnf -y install --setopt=install_weak_deps=False \
         gnome-console nautilus gnome-text-editor gnome-control-center \
         adwaita-icon-theme adwaita-cursor-theme \
-        openssl passwd sudo shadow-utils procps-ng iproute \
         vim-minimal less git \
         podman podman-compose fuse-overlayfs \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-# Remove units that make no sense in a container and slow down or break boot.
+# [REQUIRED] Units that do not belong in a container.
+#
+# Some of these would fail, some would hang the boot, and two of them matter
+# for a reason that is not obvious: geoclue and rtkit run services with User=,
+# which a rootless container cannot set up, and they fail at "step USER" and
+# hold up the session. See DESIGN.md section 12.3.
+#
+# multi-user.target rather than graphical.target, because the session is
+# started by cabin-session.target below and not by a display manager.
 RUN systemctl mask \
         systemd-remount-fs.service \
         systemd-machine-id-commit.service \
@@ -53,9 +105,16 @@ RUN systemctl mask \
         geoclue.service rtkit-daemon.service \
     && systemctl set-default multi-user.target
 
-# The desktop user. The password is replaced at first boot from the
-# CABIN_PASSWORD environment variable.
-# Subordinate IDs let the desktop user run rootless Podman of its own. The
+# [REQUIRED] The desktop user.
+#
+# The password here is a placeholder. Cabin replaces it at every boot from the
+# CABIN_PASSWORD environment variable, so changing it in this file achieves
+# nothing.
+#
+# Lingering is what lets the user session run without anybody logging in, and
+# the whole desktop is that session. Without it the container boots to nothing.
+#
+# Subordinate ids let the desktop user run rootless Podman of its own. The
 # range is inside the container's own user namespace, so it costs nothing on
 # the host.
 RUN useradd --uid ${CABIN_UID} --create-home --shell /bin/bash \
@@ -68,15 +127,25 @@ RUN useradd --uid ${CABIN_UID} --create-home --shell /bin/bash \
     && loginctl enable-linger ${CABIN_USER} 2>/dev/null || \
        (mkdir -p /var/lib/systemd/linger && touch /var/lib/systemd/linger/${CABIN_USER})
 
+# [REQUIRED] Cabin's own scripts and units, which start and configure the
+# session. These files sit beside this one in the recipe folder.
 COPY scripts/ /usr/libexec/cabin/
 COPY systemd/system/ /etc/systemd/system/
 COPY systemd/user/ /etc/systemd/user/
 
+# [REQUIRED] Turn those units on.
+#
+# cabin-prepare runs at every boot: it reads the settings Cabin passes in,
+# generates the TLS certificate once, and writes the password. The session
+# target is enabled --global because it belongs to the user session rather
+# than to the system.
 RUN chmod +x /usr/libexec/cabin/* \
     && systemctl enable cabin-prepare.service \
     && systemctl enable cabin-host-socket.socket \
     && systemctl --global enable cabin-session.target
 
+# [REQUIRED] Defaults. Cabin overrides these per desktop, so the values here
+# only apply when the image is run by hand.
 ENV CABIN_WIDTH=1920 \
     CABIN_HEIGHT=1080 \
     CABIN_USER=${CABIN_USER} \
@@ -84,5 +153,11 @@ ENV CABIN_WIDTH=1920 \
     CABIN_PASSWORD=cabin
 
 EXPOSE 3389/tcp
+
+# [REQUIRED] systemd shuts down on SIGRTMIN+3, not on SIGTERM. With the default
+# signal a stop waits for the whole timeout and then kills the container, so
+# the session never shuts down cleanly.
 STOPSIGNAL SIGRTMIN+3
+
+# [REQUIRED] systemd is PID 1. Everything above assumes it.
 CMD ["/sbin/init"]

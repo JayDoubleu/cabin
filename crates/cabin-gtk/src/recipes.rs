@@ -125,32 +125,61 @@ pub fn check_name(name: &str, taken: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// The recipe a new custom image starts from.
+/// What a new recipe is built on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Basis {
+    /// A layer on top of the image Cabin ships. Fast, and follows the base.
+    Layer,
+    /// A whole copy of the base recipe. Slower, and every line is editable.
+    FullCopy,
+}
+
+/// The recipe a layered image starts from.
 ///
-/// It builds on the base rather than repeating it. Repeating it would mean
-/// every custom image rebuilt the whole guest, taking minutes and another
-/// gigabyte and a half, and it would drift from the base as Cabin updates.
-/// Building on it takes seconds and keeps only the difference.
+/// It builds on the base rather than repeating it. Repeating it means every
+/// custom image rebuilds the whole guest, which took 57 seconds and another
+/// 1.65 GB when measured, against 11 seconds and about 30 MB for a layer, and
+/// it drifts from the base as Cabin updates.
 fn starter(name: &str) -> String {
     format!(
-        "# The {name} guest image.\n\
-         #\n\
-         # This builds on the image Cabin ships, so only what you add below is\n\
-         # rebuilt. Everything already in the desktop stays as it is.\n\
-         FROM {BASE_TAG}\n\
-         \n\
-         LABEL io.github.jaydoubleu.cabin.guest=\"true\"\n\
-         \n\
-         # Add what you need. For example:\n\
-         #\n\
-         # RUN dnf -y install --setopt=install_weak_deps=False \\\\\n\
-         #         firefox code \\\\\n\
-         #     && dnf clean all\n"
+        r#"# The {name} guest image.
+#
+# This builds on the image Cabin ships. Only what you add below is built, so a
+# change here takes seconds rather than rebuilding a whole desktop. It also
+# means this image follows the Cabin one: when that is rebuilt, rebuild this
+# and your additions land on top of the new version.
+#
+# To change the desktop itself rather than add to it, make a recipe from a full
+# copy of the Cabin recipe instead. That gives you every line, with notes on
+# what each one is for.
+
+# [REQUIRED] The image this one adds to. Cabin builds it from the recipe named
+# "Cabin guest", so that has to be built before this one.
+FROM {BASE_TAG}
+
+# [REQUIRED] Marks the image as one of Cabin's.
+#
+# The image manager lists images by this label, and the New Desktop dialogue
+# offers only labelled ones. Remove it and this image still builds, and then
+# does not appear anywhere in Cabin.
+LABEL io.github.jaydoubleu.cabin.guest="true"
+
+# [YOURS] Everything below is yours. For example:
+#
+# RUN dnf -y install --setopt=install_weak_deps=False \
+#         firefox code \
+#     && dnf clean all
+#
+# Anything a Fedora container can do works here. The desktop user is called
+# cabin. Note that its home directory is a volume, so files written to
+# /home/cabin during a build are hidden by the volume at run time. Put them
+# somewhere else and have the desktop copy them if it needs to.
+"#
     )
 }
 
 /// Creates a recipe, ready to build.
-pub fn create(name: &str) -> Result<Recipe, String> {
+pub fn create(name: &str, basis: Basis) -> Result<Recipe, String> {
     let name = name.trim().to_string();
     let dir = custom_root().join(&name);
     if dir.exists() {
@@ -158,8 +187,23 @@ pub fn create(name: &str) -> Result<Recipe, String> {
     }
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    std::fs::write(dir.join("Containerfile"), starter(&name))
-        .map_err(|e| format!("could not write the recipe: {e}"))?;
+
+    match basis {
+        Basis::Layer => std::fs::write(dir.join("Containerfile"), starter(&name))
+            .map_err(|e| format!("could not write the recipe: {e}"))?,
+        Basis::FullCopy => {
+            // The whole tree, because the base Containerfile copies the
+            // scripts and units beside it. A copy of the one file would build
+            // nothing, and the failure would name a missing path rather than
+            // the missing copy.
+            let Some(base) = guestdir::shipped() else {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err("Cabin could not find the files it ships with.".to_string());
+            };
+            guestdir::copy_context(&base, &dir)?;
+        }
+    }
+
     Ok(Recipe {
         tag: tag_for(&name),
         dir,
@@ -233,13 +277,30 @@ mod tests {
     }
 
     #[test]
+    fn the_starter_says_which_lines_must_stay() {
+        // A user editing a recipe cannot tell what is load-bearing unless the
+        // recipe says so, and the label is the one that fails quietly: the
+        // image builds and then appears nowhere.
+        let text = starter("dev");
+        assert!(text.contains("[REQUIRED]"), "nothing is marked as required");
+        assert!(text.contains("[YOURS]"), "nothing is marked as editable");
+        let label_at = text
+            .find("LABEL io.github.jaydoubleu.cabin.guest")
+            .expect("the label should be there");
+        assert!(
+            text[..label_at].contains("does not appear anywhere in Cabin"),
+            "the label should say what removing it costs"
+        );
+    }
+
+    #[test]
     fn creating_and_deleting_a_recipe_round_trips() {
         let name = format!("probe{}", std::process::id());
         // The name has to pass the same check the dialogue applies, or the
         // test would prove something the interface cannot reach.
         assert!(check_name(&name, &[]).is_ok(), "{name}");
 
-        let recipe = create(&name).expect("create");
+        let recipe = create(&name, Basis::Layer).expect("create");
         assert!(recipe.dir.join("Containerfile").is_file());
         assert_eq!(recipe.tag, tag_for(&name));
         assert!(custom().iter().any(|r| r.name == name));
@@ -247,6 +308,32 @@ mod tests {
         delete(&name).expect("delete");
         assert!(!recipe.dir.exists());
         assert!(!custom().iter().any(|r| r.name == name));
+    }
+
+    #[test]
+    fn a_full_copy_brings_the_files_the_recipe_needs() {
+        // The base Containerfile copies scripts/ and systemd/ from beside it.
+        // A copy of the one file would build nothing, and the failure would
+        // name a missing path rather than the missing copy.
+        let name = format!("fullprobe{}", std::process::id());
+        let recipe = create(&name, Basis::FullCopy).expect("create");
+
+        assert!(recipe.dir.join("Containerfile").is_file());
+        assert!(recipe.dir.join("scripts").is_dir());
+        assert!(recipe.dir.join("systemd").join("user").is_dir());
+        let text = std::fs::read_to_string(recipe.dir.join("Containerfile")).unwrap();
+        assert!(
+            text.contains("registry.fedoraproject.org"),
+            "a full copy starts from the distribution, not from the base tag"
+        );
+        assert!(
+            text.contains("[REQUIRED]"),
+            "the copy should carry its notes"
+        );
+        // Cabin's own build file is not part of the guest.
+        assert!(!recipe.dir.join("meson.build").exists());
+
+        delete(&name).expect("delete");
     }
 
     #[test]

@@ -164,12 +164,21 @@ you have seen the list.
 ### Several guest images
 
 Guest Images lists recipes. Cabin ships one, and you can add your own with New
-Recipe. A new recipe builds on the one Cabin ships, so only what you add is
-built: adding a package takes about ten seconds and a few tens of megabytes,
-not a full rebuild.
+Recipe. Build it, and it appears in the New Desktop dialogue as something to
+choose, so you can keep one desktop plain and another with your toolchain in
+it. Cabin's own image is always offered and marked as the default.
 
-Build it, and it appears in the New Desktop dialogue as something to choose. So
-you can keep one desktop plain and another with your toolchain in it.
+A new recipe starts one of two ways:
+
+| Start from | Builds in | Follows Cabin | Good for |
+|---|---|---|---|
+| The Cabin guest image | seconds | yes | adding software |
+| A full copy of the recipe | minutes | no | changing the desktop itself |
+
+Either way the recipe explains itself. Every section is marked `[REQUIRED]`,
+with the reason and how it fails if you remove it, or `[YOURS]` for what is
+safe to change. So you can edit it without guessing which line is holding the
+desktop up.
 
 ### Changing what goes into a desktop
 

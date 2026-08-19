@@ -66,10 +66,14 @@ pub fn present(
 
     // Which image the desktop is built from. Only images that exist are
     // offered, because a desktop cannot be made from one that does not.
-    let image_row = adw::ComboRow::builder()
-        .title("Image")
-        .subtitle("What the desktop starts with.")
+    let image_row = adw::ComboRow::builder().title("Image").build();
+    // Which image the chosen name refers to, kept beside the choice rather
+    // than inside it so the dropdown stays readable.
+    let detail_row = adw::ActionRow::builder()
+        .title("From")
+        .css_classes(vec!["property"])
         .build();
+    detail_row.set_use_markup(false);
     // The tag for each entry, in the same order as the model.
     let image_tags: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
 
@@ -94,6 +98,7 @@ pub fn present(
     group.add(&memory_row);
     group.add(&graphics_row);
     group.add(&image_row);
+    group.add(&detail_row);
     group.add(&open_settings);
     group.add(&image_missing);
 
@@ -133,6 +138,7 @@ pub fn present(
     // Re-run after a build, so a new image appears without reopening.
     let row_for_check = image_missing.clone();
     let combo_for_check = image_row.clone();
+    let detail_for_check = detail_row.clone();
     let tags_for_check = image_tags.clone();
     let dialog_for_check = dialog.clone();
     let name_for_check = name_row.clone();
@@ -142,6 +148,7 @@ pub fn present(
     let check_image: Rc<dyn Fn()> = Rc::new(move || {
         let row = row_for_check.clone();
         let combo = combo_for_check.clone();
+        let detail_row = detail_for_check.clone();
         let tags = tags_for_check.clone();
         let dialog = dialog_for_check.clone();
         let name = name_for_check.clone();
@@ -157,15 +164,29 @@ pub fn present(
             let choices = buildable_images(&images);
             row.set_visible(choices.is_empty());
 
-            let labels: Vec<&str> = choices.iter().map(|(l, _)| l.as_str()).collect();
+            let labels: Vec<&str> = choices.iter().map(|c| c.label.as_str()).collect();
             combo.set_model(Some(&gtk::StringList::new(&labels)));
             combo.set_sensitive(!choices.is_empty());
-            // Land on the image last used, so the common case is one
-            // fewer decision.
-            if let Some(index) = choices.iter().position(|(_, tag)| *tag == preferred) {
+            // Land on the image last used, so making several desktops on one
+            // image is a single decision rather than several.
+            if let Some(index) = choices.iter().position(|c| c.tag == preferred) {
                 combo.set_selected(index as u32);
             }
-            tags.replace(choices.into_iter().map(|(_, tag)| tag).collect());
+            // The dropdown shows a name. The row beneath says which image that
+            // is, because only the tag is unambiguous.
+            let details: Vec<String> = choices.iter().map(|c| c.detail.clone()).collect();
+            let show_detail = move |combo: &adw::ComboRow| {
+                detail_row.set_subtitle(
+                    details
+                        .get(combo.selected() as usize)
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                );
+            };
+            show_detail(&combo);
+            combo.connect_selected_notify(show_detail);
+
+            tags.replace(choices.into_iter().map(|c| c.tag).collect());
 
             dialog.set_response_enabled(
                 "create",
@@ -253,23 +274,54 @@ fn show_error(parent: &gtk::Widget, message: &str) {
     dialog.present(Some(parent));
 }
 
-/// The images a desktop can be made from, as label and tag.
+/// One image a desktop can be made from.
+struct Choice {
+    /// What the dropdown shows.
+    label: String,
+    /// The tag the desktop is created with.
+    tag: String,
+    /// The size and tag, for the row beneath the dropdown.
+    detail: String,
+}
+
+/// The images a desktop can be made from.
 ///
 /// Only Cabin's own, and only those with a name: an untagged image left by a
 /// rebuild cannot be referred to and would not survive the next clean-up.
-fn buildable_images(images: &[cabin_podman::Image]) -> Vec<(String, String)> {
-    let mut choices: Vec<(String, String)> = Vec::new();
+fn buildable_images(images: &[cabin_podman::Image]) -> Vec<Choice> {
+    let recipes = crate::recipes::all();
+    let mut choices: Vec<Choice> = Vec::new();
+
     for image in images.iter().filter(|i| i.is_guest && !i.dangling) {
         for tag in &image.tags {
-            let label = match crate::recipes::all().into_iter().find(|r| &r.tag == tag) {
+            let is_base = tag == crate::recipes::BASE_TAG;
+            let name = recipes
+                .iter()
+                .find(|r| &r.tag == tag)
                 // Name it the way the recipe list does, so the two agree.
-                Some(recipe) => format!("{} ({})", recipe.name, image.human_size()),
-                None => format!("{tag} ({})", image.human_size()),
-            };
-            choices.push((label, tag.clone()));
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| tag.clone());
+            choices.push(Choice {
+                label: if is_base {
+                    format!("{name} (default)")
+                } else {
+                    name
+                },
+                detail: format!("{} \u{b7} {tag}", image.human_size()),
+                tag: tag.clone(),
+            });
         }
     }
-    choices.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // The image Cabin ships is always first and always says so. It is the one
+    // that works without anything else having been built, so it is the answer
+    // whenever the user has no reason to prefer another.
+    choices.sort_by(|a, b| {
+        let not_base = |c: &Choice| c.tag != crate::recipes::BASE_TAG;
+        not_base(a)
+            .cmp(&not_base(b))
+            .then_with(|| a.label.cmp(&b.label))
+    });
     choices
 }
 

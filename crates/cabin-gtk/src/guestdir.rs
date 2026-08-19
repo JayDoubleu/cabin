@@ -177,6 +177,11 @@ fn fingerprint(dir: &Path) -> String {
     format!("{hash:016x}")
 }
 
+/// Copies a build context, leaving out what does not belong in one.
+pub fn copy_context(source: &Path, target: &Path) -> Result<(), String> {
+    copy_tree(source, target)
+}
+
 fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
     std::fs::create_dir_all(target)
         .map_err(|e| format!("could not create {}: {e}", target.display()))?;

@@ -2054,6 +2054,12 @@ list names them. Only Cabin's own images appear, and only those with a tag: an
 untagged image left by a rebuild cannot be referred to and would not survive
 the next clean-up.
 
+The image Cabin ships is always first and is marked as the default. It is the
+one that works without anything else having been built, so it is the answer
+whenever the user has no reason to prefer another. A row beneath the choice
+names the tag and size, because the dropdown shows a name and only the tag is
+unambiguous.
+
 The choice is remembered, so making several desktops on the same image is one
 decision rather than several. When nothing is built the dialogue says so and
 offers to build, rather than letting the desktop fail afterwards, which is what
@@ -2063,7 +2069,46 @@ A custom recipe cannot be built before the base is, because it starts `FROM`
 it. The recipe row says that rather than letting Podman report a missing image
 the user never asked for.
 
-### 21.3 Data in a label is not markup
+### 21.3 A recipe says what is load-bearing
+
+A user editing a recipe cannot tell what the desktop needs from what is merely
+present. Nothing in a Containerfile says which line is holding the session up.
+
+Every section of the base recipe is now marked:
+
+- `[REQUIRED]` with the reason. Removing it stops the desktop working, and the
+  note says how it fails.
+- `[YOURS]` for what is safe to change.
+
+The reasons are the ones that cost time to find. That `geoclue` and `rtkit`
+fail at "step USER" in a rootless container. That systemd shuts down on
+`SIGRTMIN+3`, so the default signal makes every stop wait for the timeout and
+then kill the container. That the session target is enabled `--global` because
+it belongs to the user session. These were in DESIGN.md and in nobody's editor.
+
+The label is the one that fails quietly: remove it and the image still builds,
+and then appears nowhere in Cabin. Its note says exactly that.
+
+The package list is now two steps rather than one. The first holds what the
+session needs, with a line saying what each group is for. The second holds
+applications and tools and is marked `[YOURS]`. Splitting them is not
+cosmetic: editing the second rebuilds only that layer, which takes seconds,
+while the session above stays as it is. The package set is unchanged, and the
+rebuilt image boots in four seconds and answers the RDP probe.
+
+A new recipe can therefore start two ways, and the dialogue states the cost of
+each rather than describing them as simple or advanced:
+
+| | Builds in | Follows Cabin | Good for |
+|---|---|---|---|
+| On the Cabin image | seconds | yes | adding software |
+| A full copy | minutes | no | changing the desktop |
+
+A full copy brings the whole tree, because the base Containerfile copies the
+scripts and units from beside it. A copy of the one file would build nothing,
+and the failure would name a missing path rather than the missing copy.
+
+### 21.4 Data in a label is not markup
 
 `AdwPreferencesRow` parses its title and subtitle as Pango markup. An untagged
 image was shown as `<untagged> abf4cebddb04`, which reads as an unclosed tag,

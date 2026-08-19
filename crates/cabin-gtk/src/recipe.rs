@@ -266,6 +266,16 @@ fn missing(parent: &impl IsA<gtk::Widget>) {
     error.present(Some(parent));
 }
 
+/// What each way of starting a recipe costs, measured on the development host
+/// by adding one package to the base.
+const BASIS_DESCRIPTIONS: &[&str] = &[
+    "Adds to the Cabin desktop. Builds in seconds and follows Cabin's updates. \
+     Right for adding software.",
+    "Copies every line of Cabin's recipe, with notes on what each one is for. \
+     Builds in minutes and stops following Cabin's updates. Right for changing \
+     the desktop itself.",
+];
+
 /// Asks for a name, creates the recipe, and opens it ready to edit.
 pub fn present_new(parent: &impl IsA<gtk::Widget>, on_changed: impl Fn() + 'static) {
     let on_changed: Rc<dyn Fn()> = Rc::new(on_changed);
@@ -274,13 +284,31 @@ pub fn present_new(parent: &impl IsA<gtk::Widget>, on_changed: impl Fn() + 'stat
     let dialog = adw::AlertDialog::builder()
         .heading("New Recipe")
         .body(
-            "A recipe builds a guest image. This one starts from the image              Cabin ships, so only what you add is built, and you can pick it              when you create a desktop.",
+            "A recipe builds a guest image, and you pick which image a desktop \
+             uses when you create it.",
         )
         .build();
 
     let name_row = adw::EntryRow::builder().title("Name").build();
+
+    // Two ways to start, and the difference is worth stating in numbers
+    // rather than in adjectives.
+    let basis_row = adw::ComboRow::builder()
+        .title("Start from")
+        .model(&gtk::StringList::new(&[
+            "The Cabin guest image",
+            "A full copy of the Cabin recipe",
+        ]))
+        .subtitle(BASIS_DESCRIPTIONS[0])
+        .build();
+    basis_row.set_subtitle_lines(0);
+    basis_row.connect_selected_notify(|row| {
+        row.set_subtitle(BASIS_DESCRIPTIONS[(row.selected() as usize).min(1)]);
+    });
+
     let group = adw::PreferencesGroup::new();
     group.add(&name_row);
+    group.add(&basis_row);
     dialog.set_extra_child(Some(&group));
 
     dialog.add_response("cancel", "Cancel");
@@ -317,7 +345,12 @@ pub fn present_new(parent: &impl IsA<gtk::Widget>, on_changed: impl Fn() + 'stat
         if response != "create" {
             return;
         }
-        match crate::recipes::create(&name_row.text()) {
+        let basis = if basis_row.selected() == 0 {
+            crate::recipes::Basis::Layer
+        } else {
+            crate::recipes::Basis::FullCopy
+        };
+        match crate::recipes::create(&name_row.text(), basis) {
             Ok(recipe) => {
                 on_changed();
                 // Straight into the editor. A recipe that only says FROM is
