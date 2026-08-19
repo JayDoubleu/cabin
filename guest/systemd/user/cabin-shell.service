@@ -1,0 +1,13 @@
+[Unit]
+Description=Cabin GNOME Shell (headless)
+After=cabin-keyring.service
+Requires=cabin-keyring.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+EnvironmentFile=/run/cabin/env
+ExecStart=/usr/libexec/cabin/start-shell.sh
+TimeoutStartSec=120
+Restart=on-failure
+RestartSec=2

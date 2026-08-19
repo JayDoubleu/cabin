@@ -1,0 +1,13 @@
+[Unit]
+Description=Cabin first boot setup
+After=local-fs.target
+Before=systemd-user-sessions.service
+ConditionPathExists=!/var/lib/cabin/.provisioned
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/cabin/firstboot.sh
+
+[Install]
+WantedBy=multi-user.target

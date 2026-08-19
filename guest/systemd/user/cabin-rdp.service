@@ -1,0 +1,12 @@
+[Unit]
+Description=Cabin RDP configuration
+After=cabin-shell.service
+Requires=cabin-shell.service
+PartOf=cabin-session.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/run/cabin/env
+ExecStart=/usr/libexec/cabin/configure-rdp.sh
+ExecStart=/usr/bin/systemctl --user --no-block start gnome-remote-desktop-headless.service

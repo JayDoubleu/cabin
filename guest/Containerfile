@@ -1,0 +1,76 @@
+# Cabin guest image: a headless Fedora GNOME desktop exposed over RDP.
+#
+# The container runs systemd as PID 1. systemd starts a user session for the
+# "cabin" user. The user session runs GNOME Shell with the headless mutter
+# backend, and gnome-remote-desktop serves that session over RDP.
+#
+# Build:
+#   podman build -t localhost/cabin-guest:f44 -f guest/Containerfile guest/
+FROM registry.fedoraproject.org/fedora:44
+
+ARG CABIN_USER=cabin
+ARG CABIN_UID=1000
+
+# GNOME session, remote desktop, audio, and portals.
+# Weak dependencies stay off to keep the image small. Extra packages that the
+# session needs are listed explicitly.
+RUN dnf -y install --setopt=install_weak_deps=False \
+        systemd systemd-container dbus-broker dbus-daemon \
+        gnome-shell gnome-session mutter gnome-settings-daemon \
+        gnome-remote-desktop \
+        gnome-keyring libsecret \
+        gsettings-desktop-schemas gnome-desktop4 \
+        xdg-desktop-portal xdg-desktop-portal-gnome xdg-user-dirs \
+        pipewire pipewire-pulseaudio wireplumber \
+        mesa-dri-drivers mesa-libEGL mesa-libGL mesa-vulkan-drivers \
+        xorg-x11-server-Xwayland \
+        gnome-console nautilus gnome-text-editor gnome-control-center \
+        adwaita-icon-theme adwaita-cursor-theme \
+        openssl passwd sudo shadow-utils procps-ng iproute \
+        vim-minimal less git \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+# Remove units that make no sense in a container and slow down or break boot.
+RUN systemctl mask \
+        systemd-remount-fs.service \
+        systemd-machine-id-commit.service \
+        systemd-hwdb-update.service \
+        systemd-udevd.service systemd-udevd-kernel.socket systemd-udevd-control.socket \
+        systemd-udev-trigger.service \
+        systemd-modules-load.service \
+        systemd-random-seed.service \
+        dev-hugepages.mount sys-fs-fuse-connections.mount \
+        getty.target console-getty.service \
+        NetworkManager.service \
+        systemd-oomd.service systemd-oomd.socket \
+        geoclue.service rtkit-daemon.service \
+    && systemctl set-default multi-user.target
+
+# The desktop user. The password is replaced at first boot from the
+# CABIN_PASSWORD environment variable.
+RUN useradd --uid ${CABIN_UID} --create-home --shell /bin/bash \
+        --groups wheel ${CABIN_USER} \
+    && echo "${CABIN_USER}:cabin" | chpasswd \
+    && echo "${CABIN_USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/90-cabin \
+    && chmod 0440 /etc/sudoers.d/90-cabin \
+    && loginctl enable-linger ${CABIN_USER} 2>/dev/null || \
+       (mkdir -p /var/lib/systemd/linger && touch /var/lib/systemd/linger/${CABIN_USER})
+
+COPY scripts/ /usr/libexec/cabin/
+COPY systemd/system/ /etc/systemd/system/
+COPY systemd/user/ /etc/systemd/user/
+
+RUN chmod +x /usr/libexec/cabin/* \
+    && systemctl enable cabin-firstboot.service \
+    && systemctl --global enable cabin-session.target
+
+ENV CABIN_WIDTH=1920 \
+    CABIN_HEIGHT=1080 \
+    CABIN_USER=${CABIN_USER} \
+    CABIN_RDP_PORT=3389 \
+    CABIN_PASSWORD=cabin
+
+EXPOSE 3389/tcp
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

@@ -1,0 +1,20 @@
+[package]
+name = "cabin-gtk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cabin"
+path = "src/main.rs"
+
+[dependencies]
+cabin-core.workspace = true
+cabin-podman.workspace = true
+cabin-rdp.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+gtk = { package = "gtk4", version = "0.9" }
+adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }

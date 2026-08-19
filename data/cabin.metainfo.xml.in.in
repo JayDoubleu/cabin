@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>@APP_ID@</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>Cabin</name>
+  <summary>Run Fedora GNOME desktops in containers</summary>
+
+  <description>
+    <p>
+      Cabin runs full Fedora GNOME desktops inside containers and shows them in
+      a resizable window. Each desktop starts in about a second and behaves
+      like a small virtual machine, without emulating hardware.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Manage several desktops from one sidebar</li>
+      <li>The guest resolution follows the window, or use a fixed size</li>
+      <li>Connect from other devices with any standard RDP client</li>
+      <li>Share host directories as read-write or read-only</li>
+      <li>Choose hardware or software rendering per desktop</li>
+    </ul>
+    <p>
+      A container shares the host kernel. Cabin is a configuration boundary,
+      not a sandbox for hostile code. Use a virtual machine for that.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">@APP_ID@.desktop</launchable>
+
+  <url type="homepage">https://github.com/JayDoubleu/linux-virtual-desktop-container</url>
+  <url type="bugtracker">https://github.com/JayDoubleu/linux-virtual-desktop-container/issues</url>
+
+  <developer id="io.github.jaydoubleu">
+    <name>Jay W</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-08-19">
+      <description>
+        <p>First scaffold. The guest image serves a GNOME desktop over RDP.</p>
+      </description>
+    </release>
+  </releases>
+</component>

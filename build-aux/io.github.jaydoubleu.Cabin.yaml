@@ -1,0 +1,56 @@
+# Flatpak manifest for Cabin.
+#
+# Build with:
+#   flatpak-builder --user --install --force-clean \
+#       _flatpak build-aux/io.github.jaydoubleu.Cabin.yaml
+#
+# cargo-sources.json must be current. Regenerate it after any Cargo.lock
+# change with "just flatpak-sources".
+id: io.github.jaydoubleu.Cabin
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: cabin
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/cabin/cargo
+    CABIN_CARGO_OFFLINE: '1'
+
+finish-args:
+  # Display and rendering for the viewer.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+
+  # RDP runs over TCP to a port the container publishes on loopback.
+  - --share=network
+
+  # Guest audio over RDPSND. Scheduled after the first release.
+  - --socket=pulseaudio
+
+  # The Podman REST socket. Marking the directory read-only still allows
+  # read-write use of the socket inside it, and stops Cabin writing files
+  # next to it.
+  - --filesystem=xdg-run/podman:ro
+
+  # Per-desktop RDP credentials live in the host keyring.
+  - --talk-name=org.freedesktop.secrets
+
+# Deliberately NOT requested:
+#   --filesystem=home            Mount paths come from the file chooser portal.
+#   --talk-name=org.freedesktop.Flatpak   That would be a sandbox escape.
+
+modules:
+  - name: cabin
+    buildsystem: meson
+    config-opts:
+      - -Dbuildtype=release
+    sources:
+      - type: dir
+        path: ..
+      - ../cargo-sources.json

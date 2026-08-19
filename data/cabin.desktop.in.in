@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Cabin
+GenericName=Container Desktops
+Comment=Run Fedora GNOME desktops in containers
+Categories=System;Emulator;
+Exec=cabin
+Icon=@APP_ID@
+Terminal=false
+Type=Application
+StartupNotify=true
+Keywords=container;desktop;podman;rdp;vm;

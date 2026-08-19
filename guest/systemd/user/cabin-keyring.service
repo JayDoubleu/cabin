@@ -1,0 +1,9 @@
+[Unit]
+Description=Cabin login keyring
+Documentation=man:gnome-keyring-daemon(1)
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/run/cabin/env
+ExecStart=/usr/libexec/cabin/unlock-keyring.sh

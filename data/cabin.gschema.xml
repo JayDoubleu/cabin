@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="io.github.jaydoubleu.Cabin"
+          path="/io/github/jaydoubleu/Cabin/">
+    <key name="window-width" type="i">
+      <default>1280</default>
+      <summary>Main window width</summary>
+    </key>
+    <key name="window-height" type="i">
+      <default>800</default>
+      <summary>Main window height</summary>
+    </key>
+    <key name="window-maximized" type="b">
+      <default>false</default>
+      <summary>Main window maximised state</summary>
+    </key>
+    <key name="last-desktop" type="s">
+      <default>''</default>
+      <summary>Name of the desktop shown when Cabin last closed</summary>
+    </key>
+    <key name="default-image" type="s">
+      <default>'localhost/cabin-guest:f44'</default>
+      <summary>Image used for a new desktop</summary>
+    </key>
+  </schema>
+</schemalist>
