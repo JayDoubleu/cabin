@@ -1,34 +1,11 @@
-//! Finds the guest build context, and manages a customised copy of it.
+//! Finds the guest build context, and copies it for a user's own recipe.
 //!
 //! Cabin builds its guest image on the machine that runs it, so the `guest/`
-//! tree has to be readable at run time. Two trees can exist: the one shipped
-//! with the application, which is read-only, and a copy the user has taken and
-//! changed. See DESIGN.md section 20.
+//! tree has to be readable at run time. That tree is shipped inside the
+//! installation and never changes. A user who wants a different desktop takes
+//! a named copy of it, which is a recipe of its own. See DESIGN.md section 20.
 
 use std::path::{Path, PathBuf};
-
-/// Which recipe a build would use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Source {
-    /// The tree shipped with the application. Read-only.
-    Shipped,
-    /// A copy the user has taken and may have changed.
-    Custom,
-}
-
-/// Records which shipped tree a custom copy was taken from.
-///
-/// Without it there is no way to tell a customised recipe that is current from
-/// one taken three releases ago, and the second silently builds an old guest.
-///
-/// It lives beside the copy rather than inside it. Anything inside is part of
-/// the build context and would be sent to Podman, and a build context should
-/// hold what the build needs and nothing else.
-fn origin_file() -> PathBuf {
-    gtk::glib::user_config_dir()
-        .join("cabin")
-        .join("guest-origin")
-}
 
 /// Every place the shipped context may be, most specific first.
 fn shipped_candidates() -> Vec<PathBuf> {
@@ -68,27 +45,9 @@ pub fn shipped() -> Option<PathBuf> {
         .find(|path| path.join("Containerfile").is_file())
 }
 
-/// Where a customised copy lives.
-///
-/// Under the user's configuration directory, which the Flatpak can write
-/// without asking for any filesystem permission. The shipped tree is inside
-/// the installation and is read-only, so editing in place is not an option
-/// even when it looks like one.
-pub fn custom_dir() -> PathBuf {
-    gtk::glib::user_config_dir().join("cabin").join("guest")
-}
-
-/// True when a customised copy exists.
-pub fn has_custom() -> bool {
-    custom_dir().join("Containerfile").is_file()
-}
-
-/// The tree a build would use, and where it came from.
-pub fn active() -> Option<(PathBuf, Source)> {
-    if has_custom() {
-        return Some((custom_dir(), Source::Custom));
-    }
-    shipped().map(|dir| (dir, Source::Shipped))
+/// True when `dir` is the tree Cabin ships, which cannot be written.
+pub fn is_shipped(dir: &Path) -> bool {
+    shipped().as_deref() == Some(dir)
 }
 
 /// Where Cabin looked, for a message when it found nothing.
@@ -100,64 +59,55 @@ pub fn searched() -> String {
         .join("\n")
 }
 
-/// Copies the shipped tree so the user can change it.
+/// Records which shipped tree a full copy was taken from.
 ///
-/// The whole tree is copied, not only the Containerfile, because the
-/// Containerfile copies the scripts and units beside it. A copy holding only
-/// the one file would build nothing.
-pub fn customise() -> Result<PathBuf, String> {
+/// Without it there is no way to tell a copy that is current from one taken
+/// three releases ago, and the second silently builds an old guest.
+///
+/// It lives beside the copy rather than inside it. Anything inside is part of
+/// the build context and would be sent to Podman, and a build context should
+/// hold what the build needs and nothing else.
+fn origin_file(recipe_dir: &Path) -> PathBuf {
+    let mut name = recipe_dir.file_name().unwrap_or_default().to_os_string();
+    name.push(".origin");
+    recipe_dir.with_file_name(name)
+}
+
+/// Notes that `recipe_dir` is a full copy of the shipped tree as it is now.
+pub fn record_origin(recipe_dir: &Path) -> Result<(), String> {
     let Some(source) = shipped() else {
-        return Err(format!(
-            "Cabin could not find the files it ships with. It looked in:\n{}",
-            searched()
-        ));
-    };
-    let target = custom_dir();
-    if target.exists() {
-        std::fs::remove_dir_all(&target)
-            .map_err(|e| format!("could not replace the previous copy: {e}"))?;
-    }
-    copy_tree(&source, &target)?;
-    write_origin(&source)?;
-    Ok(target)
-}
-
-/// Deletes the customised copy, so builds go back to the shipped tree.
-pub fn reset() -> Result<(), String> {
-    let dir = custom_dir();
-    if !dir.exists() {
         return Ok(());
-    }
-    std::fs::remove_dir_all(&dir)
-        .map_err(|e| format!("could not remove {}: {e}", dir.display()))?;
-    let _ = std::fs::remove_file(origin_file());
-    Ok(())
+    };
+    std::fs::write(origin_file(recipe_dir), fingerprint(&source))
+        .map_err(|e| format!("could not record where the copy came from: {e}"))
 }
 
-/// True when the shipped tree has changed since the copy was taken.
+/// True when `recipe_dir` is a full copy and the shipped tree has since moved.
 ///
 /// An application update can bring a new guest recipe, and a copy taken before
 /// it keeps building the old one. Nothing warns about that on its own.
-pub fn shipped_has_moved_on() -> bool {
+pub fn shipped_has_moved_on(recipe_dir: &Path) -> bool {
     let Some(source) = shipped() else {
         return false;
     };
-    let recorded = std::fs::read_to_string(origin_file()).unwrap_or_default();
-    let recorded = recorded.trim();
+    let recorded = std::fs::read_to_string(origin_file(recipe_dir)).unwrap_or_default();
+    let recorded = recorded.trim().to_string();
+    // No marker means the recipe is not a full copy, so there is nothing it
+    // could have fallen behind.
     if recorded.is_empty() {
         return false;
     }
     recorded != fingerprint(&source)
 }
 
-fn write_origin(source: &Path) -> Result<(), String> {
-    let path = origin_file();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
-    }
-    std::fs::write(path, fingerprint(source))
-        .map_err(|e| format!("could not record where the copy came from: {e}"))
+/// True when `recipe_dir` was made as a full copy of the shipped tree.
+pub fn has_origin(recipe_dir: &Path) -> bool {
+    origin_file(recipe_dir).is_file()
+}
+
+/// Forgets the origin marker for a recipe that is being deleted.
+pub fn forget_origin(recipe_dir: &Path) {
+    let _ = std::fs::remove_file(origin_file(recipe_dir));
 }
 
 /// A stable identifier for the contents of a tree.
@@ -209,6 +159,50 @@ fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Where an earlier version put the one copy it allowed.
+///
+/// That copy took the base recipe's own tag, so taking one hid the recipe
+/// Cabin ships. It is now a named recipe like any other.
+fn legacy_copy_dir() -> PathBuf {
+    gtk::glib::user_config_dir().join("cabin").join("guest")
+}
+
+/// Moves a copy made by an earlier version into the named recipes.
+///
+/// Returns the name it was given, so the caller can say where it went. Doing
+/// nothing is the normal case, and a failure here must not stop the
+/// application: the copy stays where it is and the shipped recipe is used.
+pub fn migrate_legacy_copy(recipes_root: &Path, name: &str) -> Option<String> {
+    let legacy = legacy_copy_dir();
+    if !legacy.join("Containerfile").is_file() {
+        return None;
+    }
+    let target = recipes_root.join(name);
+    if target.exists() {
+        return None;
+    }
+    if let Err(e) = copy_tree(&legacy, &target) {
+        tracing::error!("could not move the old guest copy: {e}");
+        return None;
+    }
+    // The marker moves with it, so the "Cabin ships a newer recipe" warning
+    // keeps working across the move.
+    let old_marker = gtk::glib::user_config_dir()
+        .join("cabin")
+        .join("guest-origin");
+    if let Ok(recorded) = std::fs::read_to_string(&old_marker) {
+        let _ = std::fs::write(origin_file(&target), recorded.trim());
+    } else {
+        let _ = record_origin(&target);
+    }
+    if let Err(e) = std::fs::remove_dir_all(&legacy) {
+        tracing::error!("could not remove the old guest copy: {e}");
+    }
+    let _ = std::fs::remove_file(&old_marker);
+    tracing::info!("moved the old guest copy to {}", target.display());
+    Some(name.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,38 +230,53 @@ mod tests {
     }
 
     #[test]
-    fn the_custom_copy_is_not_inside_the_installation() {
-        // The shipped tree is read-only, in the Flatpak and in a system
-        // install alike, so a copy kept beside it could never be saved.
-        let custom = custom_dir();
-        assert!(!custom.starts_with("/app/share"));
-        assert!(!custom.starts_with("/usr"));
+    fn the_shipped_tree_is_always_found_so_it_is_always_offered() {
+        // The recipe Cabin ships is the one choice that needs nothing else to
+        // exist. If it can go missing, a user who has taken a copy has no way
+        // back to it.
+        assert!(shipped().is_some());
+        assert!(is_shipped(&shipped().unwrap()));
     }
 
     #[test]
     fn the_origin_marker_is_not_inside_the_build_context() {
         // Anything inside the copy is packed and sent to Podman. A build
         // context should hold what the build needs and nothing else.
-        assert!(!origin_file().starts_with(custom_dir()));
+        let dir = PathBuf::from("/home/someone/.config/cabin/images/mine");
+        let marker = origin_file(&dir);
+        assert!(!marker.starts_with(&dir));
+        assert_eq!(marker.parent(), dir.parent());
     }
 
-    /// Not a unit test of pure logic: it reports which recipe a build would
-    /// use on this machine, which is the one thing that cannot be checked
-    /// without looking at the filesystem.
     #[test]
-    fn reports_the_active_recipe() {
-        let (dir, source) = active().expect("some recipe should be found");
-        println!("active recipe: {source:?} at {}", dir.display());
-        assert!(dir.join("Containerfile").is_file());
-        if has_custom() {
-            assert_eq!(
-                source,
-                Source::Custom,
-                "a copy must win over the shipped tree"
-            );
-        } else {
-            assert_eq!(source, Source::Shipped);
-        }
+    fn a_recipe_with_no_marker_is_never_called_stale() {
+        // A layered recipe is not a copy of anything, so it cannot fall
+        // behind the shipped tree and must not be warned about.
+        let dir = std::env::temp_dir().join(format!("cabin-nomarker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!shipped_has_moved_on(&dir));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_copy_is_stale_once_the_shipped_tree_changes() {
+        let root = std::env::temp_dir().join(format!("cabin-stale-{}", std::process::id()));
+        let dir = root.join("mine");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        record_origin(&dir).expect("record");
+        assert!(
+            !shipped_has_moved_on(&dir),
+            "a copy taken just now is current"
+        );
+
+        // A marker from an older tree is what an application update leaves.
+        std::fs::write(origin_file(&dir), "0000000000000000").unwrap();
+        assert!(shipped_has_moved_on(&dir));
+
+        forget_origin(&dir);
+        assert!(!shipped_has_moved_on(&dir), "a forgotten marker is silent");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -287,5 +296,17 @@ mod tests {
             "a changed recipe must change the fingerprint"
         );
         assert!(!before.is_empty());
+    }
+
+    #[test]
+    fn migrating_moves_the_old_copy_and_leaves_nothing_behind() {
+        // Only meaningful when this machine has an old copy, so it checks the
+        // shape of the move rather than requiring one.
+        let root = std::env::temp_dir().join(format!("cabin-mig-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        if !legacy_copy_dir().join("Containerfile").is_file() {
+            assert_eq!(migrate_legacy_copy(&root, "moved"), None);
+        }
+        std::fs::remove_dir_all(&root).ok();
     }
 }

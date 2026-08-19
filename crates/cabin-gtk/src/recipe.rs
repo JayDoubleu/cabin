@@ -1,33 +1,28 @@
-//! Viewing and editing the guest recipe.
+//! Viewing and editing a guest recipe.
 //!
-//! The recipe is `guest/Containerfile`. The copy shipped with Cabin is
-//! read-only, because it lives inside the installation. A user who wants to
-//! change it takes a copy first, and builds then use the copy. See DESIGN.md
-//! section 20.
+//! The recipe shipped with Cabin is read-only, because it lives inside the
+//! installation. A user who wants a different desktop makes a recipe of their
+//! own, which may be a copy of the shipped one. See DESIGN.md section 20.
 
-use crate::guestdir::{self, Source};
+use crate::guestdir;
 use adw::prelude::*;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-/// Shows the active base recipe.
-pub fn present(parent: &impl IsA<gtk::Widget>, on_changed: impl Fn() + 'static) {
-    let Some((dir, _)) = guestdir::active() else {
-        missing(parent);
-        return;
-    };
-    present_path(parent, dir, on_changed);
-}
-
 /// Shows the recipe in `dir`, editable unless it is the shipped tree.
 pub fn present_path(parent: &impl IsA<gtk::Widget>, dir: PathBuf, on_changed: impl Fn() + 'static) {
+    present_path_boxed(parent.as_ref(), dir, Rc::new(on_changed));
+}
+
+/// The body of `present_path`, with the callback's type erased.
+///
+/// This dialogue opens the New Recipe dialogue, which opens this one again.
+/// While the callback stays generic each hop is a fresh closure type, so the
+/// compiler instantiates the pair forever and gives up at the recursion limit.
+fn present_path_boxed(parent: &gtk::Widget, dir: PathBuf, on_changed: Rc<dyn Fn()>) {
     // The shipped tree is the only one that cannot be written, and it is the
     // only one that is not under the user's own directory.
-    let source = if guestdir::shipped().as_deref() == Some(dir.as_path()) {
-        Source::Shipped
-    } else {
-        Source::Custom
-    };
+    let shipped = guestdir::is_shipped(&dir);
     let path = dir.join("Containerfile");
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -42,8 +37,7 @@ pub fn present_path(parent: &impl IsA<gtk::Widget>, dir: PathBuf, on_changed: im
         }
     };
 
-    let editable = source == Source::Custom;
-    let on_changed: Rc<dyn Fn()> = Rc::new(on_changed);
+    let editable = !shipped;
 
     let dialog = adw::Dialog::builder()
         .title(if editable {
@@ -75,27 +69,32 @@ pub fn present_path(parent: &impl IsA<gtk::Widget>, dir: PathBuf, on_changed: im
     // Say which recipe this is and where it came from, because the same
     // window shows two different things and only one of them can be saved.
     let banner = adw::Banner::builder()
-        .title(match source {
-            Source::Shipped => "This is the recipe Cabin ships with. Take a copy to change it.",
-            Source::Custom => "This is your copy. Builds use it instead of the one Cabin ships.",
+        .title(if shipped {
+            "This is the recipe Cabin ships with. Copy it to make one you can change."
+        } else {
+            "This is your recipe. Edit it, then build it to use it."
         })
         .revealed(true)
         .build();
 
-    if source == Source::Shipped {
-        banner.set_button_label(Some("Take a Copy"));
-        let parent_widget = parent.as_ref().clone();
+    if shipped {
+        banner.set_button_label(Some("Copy It"));
+        let parent_widget = parent.clone();
         let dialog_ref = dialog.clone();
         let on_changed_ref = on_changed.clone();
         banner.connect_button_clicked(move |_| {
             dialog_ref.close();
-            customise(&parent_widget, on_changed_ref.clone());
+            present_new_boxed(
+                &parent_widget,
+                crate::recipes::Basis::FullCopy,
+                on_changed_ref.clone(),
+            );
         });
-    } else if guestdir::shipped_has_moved_on() {
+    } else if guestdir::shipped_has_moved_on(&dir) {
         // An update brought a newer default, and this copy predates it.
         banner.set_title(
-            "Cabin now ships a newer recipe. Your copy is still used, and does \
-             not have the changes.",
+            "Cabin now ships a newer recipe. This copy does not have the \
+             changes, and will not get them.",
         );
         banner.add_css_class("warning");
     }
@@ -178,94 +177,6 @@ pub fn present_path(parent: &impl IsA<gtk::Widget>, dir: PathBuf, on_changed: im
     dialog.present(Some(parent));
 }
 
-/// Takes a copy of the shipped recipe, after saying what that means.
-pub fn customise(parent: &impl IsA<gtk::Widget>, on_changed: Rc<dyn Fn()>) {
-    let dialog = adw::AlertDialog::builder()
-        .heading("Take a copy of the recipe?")
-        .body(format!(
-            "Cabin copies the guest files to a folder you own, and builds use \
-             that copy from then on. Updates to Cabin will no longer change \
-             your guest image.\n\nThe copy goes in:\n{}",
-            guestdir::custom_dir().display()
-        ))
-        .build();
-    dialog.add_response("cancel", "Cancel");
-    dialog.add_response("copy", "Take a Copy");
-    dialog.set_response_appearance("copy", adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("copy"));
-
-    let parent_widget = parent.as_ref().clone();
-    dialog.connect_response(None, move |_, response| {
-        if response != "copy" {
-            return;
-        }
-        match guestdir::customise() {
-            Ok(_) => {
-                on_changed();
-                present(&parent_widget, {
-                    let again = on_changed.clone();
-                    move || again()
-                });
-            }
-            Err(message) => {
-                let error = adw::AlertDialog::builder()
-                    .heading("Could not take a copy")
-                    .body(message)
-                    .build();
-                error.add_response("close", "Close");
-                error.present(Some(&parent_widget));
-            }
-        }
-    });
-    dialog.present(Some(parent));
-}
-
-/// Puts the shipped recipe back, after saying what is lost.
-pub fn confirm_reset(parent: &impl IsA<gtk::Widget>, on_changed: impl Fn() + 'static) {
-    let dialog = adw::AlertDialog::builder()
-        .heading("Use the recipe Cabin ships with?")
-        .body(
-            "Your copy of the guest files will be deleted, including anything \
-             you changed in it. Images you have already built are not affected.",
-        )
-        .build();
-    dialog.add_response("cancel", "Cancel");
-    dialog.add_response("reset", "Delete My Copy");
-    dialog.set_response_appearance("reset", adw::ResponseAppearance::Destructive);
-    dialog.set_default_response(Some("cancel"));
-
-    let parent_widget = parent.as_ref().clone();
-    dialog.connect_response(None, move |_, response| {
-        if response != "reset" {
-            return;
-        }
-        if let Err(message) = guestdir::reset() {
-            let error = adw::AlertDialog::builder()
-                .heading("Could not delete your copy")
-                .body(message)
-                .build();
-            error.add_response("close", "Close");
-            error.present(Some(&parent_widget));
-            return;
-        }
-        on_changed();
-    });
-    dialog.present(Some(parent));
-}
-
-fn missing(parent: &impl IsA<gtk::Widget>) {
-    let error = adw::AlertDialog::builder()
-        .heading("The guest files are missing")
-        .body(format!(
-            "Cabin builds the guest image from files it ships with, and could \
-             not find them.\n\nIt looked in:\n{}",
-            guestdir::searched()
-        ))
-        .build();
-    error.add_response("close", "Close");
-    error.present(Some(parent));
-}
-
 /// What each way of starting a recipe costs, measured on the development host
 /// by adding one package to the base.
 const BASIS_DESCRIPTIONS: &[&str] = &[
@@ -278,7 +189,29 @@ const BASIS_DESCRIPTIONS: &[&str] = &[
 
 /// Asks for a name, creates the recipe, and opens it ready to edit.
 pub fn present_new(parent: &impl IsA<gtk::Widget>, on_changed: impl Fn() + 'static) {
-    let on_changed: Rc<dyn Fn()> = Rc::new(on_changed);
+    present_new_boxed(
+        parent.as_ref(),
+        crate::recipes::Basis::Layer,
+        Rc::new(on_changed),
+    );
+}
+
+/// The same dialogue, opened on `basis`.
+///
+/// Copying the shipped recipe and adding to it are the same act with a
+/// different starting point, so they are one dialogue rather than two that
+/// have to be kept in step.
+pub fn present_new_from(
+    parent: &impl IsA<gtk::Widget>,
+    basis: crate::recipes::Basis,
+    on_changed: impl Fn() + 'static,
+) {
+    present_new_boxed(parent.as_ref(), basis, Rc::new(on_changed));
+}
+
+/// The body of `present_new_from`, with the callback's type erased. See
+/// `present_path_boxed` for why.
+fn present_new_boxed(parent: &gtk::Widget, basis: crate::recipes::Basis, on_changed: Rc<dyn Fn()>) {
     let taken: Vec<String> = crate::recipes::all().into_iter().map(|r| r.name).collect();
 
     let dialog = adw::AlertDialog::builder()
@@ -290,6 +223,16 @@ pub fn present_new(parent: &impl IsA<gtk::Widget>, on_changed: impl Fn() + 'stat
         .build();
 
     let name_row = adw::EntryRow::builder().title("Name").build();
+    // A name that is free, so the dialogue opens ready to use rather than
+    // opening with an error against a name the user did not choose.
+    name_row.set_text(&first_free_name(
+        if basis == crate::recipes::Basis::FullCopy {
+            "my-guest"
+        } else {
+            "my-tools"
+        },
+        &taken,
+    ));
 
     // Two ways to start, and the difference is worth stating in numbers
     // rather than in adjectives.
@@ -305,11 +248,14 @@ pub fn present_new(parent: &impl IsA<gtk::Widget>, on_changed: impl Fn() + 'stat
     // "The Cabin guest image" into "The Cab...".
     basis_row.set_use_subtitle(true);
     basis_row.set_subtitle_lines(0);
+    if basis == crate::recipes::Basis::FullCopy {
+        basis_row.set_selected(1);
+    }
 
     // The explanation needs the full width, so it is a row of its own rather
     // than the combo's subtitle.
     let basis_note = adw::ActionRow::builder()
-        .title(BASIS_DESCRIPTIONS[0])
+        .title(BASIS_DESCRIPTIONS[basis_row.selected() as usize])
         .css_classes(vec!["dim-label"])
         .build();
     basis_note.set_title_lines(0);
@@ -354,7 +300,7 @@ pub fn present_new(parent: &impl IsA<gtk::Widget>, on_changed: impl Fn() + 'stat
     name_row.connect_changed(check.clone());
     check(&name_row);
 
-    let parent_widget = parent.as_ref().clone();
+    let parent_widget = parent.clone();
     dialog.connect_response(None, move |_, response| {
         if response != "create" {
             return;
@@ -369,8 +315,7 @@ pub fn present_new(parent: &impl IsA<gtk::Widget>, on_changed: impl Fn() + 'stat
                 on_changed();
                 // Straight into the editor. A recipe that only says FROM is
                 // not why anyone made one.
-                let again = on_changed.clone();
-                present_path(&parent_widget, recipe.dir, move || again());
+                present_path_boxed(&parent_widget, recipe.dir, on_changed.clone());
             }
             Err(message) => {
                 let error = adw::AlertDialog::builder()
@@ -384,4 +329,52 @@ pub fn present_new(parent: &impl IsA<gtk::Widget>, on_changed: impl Fn() + 'stat
     });
 
     dialog.present(Some(parent));
+}
+
+/// Suggests a recipe name that is not in use.
+fn first_free_name(base: &str, taken: &[String]) -> String {
+    if !taken.iter().any(|t| t == base) {
+        return base.to_string();
+    }
+    for suffix in 2..100 {
+        let candidate = format!("{base}-{suffix}");
+        if !taken.iter().any(|t| t == &candidate) {
+            return candidate;
+        }
+    }
+    base.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suggests_a_name_that_is_free() {
+        assert_eq!(first_free_name("my-guest", &[]), "my-guest");
+        assert_eq!(
+            first_free_name("my-guest", &["my-guest".to_string()]),
+            "my-guest-2"
+        );
+    }
+
+    #[test]
+    fn the_suggested_name_passes_the_check_the_dialogue_applies() {
+        // The dialogue disables Create for a name that fails, so a suggestion
+        // that fails would open the dialogue unusable.
+        for basis in ["my-guest", "my-tools"] {
+            assert!(
+                crate::recipes::check_name(&first_free_name(basis, &[]), &[]).is_ok(),
+                "{basis}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_basis_has_its_own_description() {
+        // The note under the dropdown is indexed by the selection, so a
+        // missing entry would panic rather than show nothing.
+        assert_eq!(BASIS_DESCRIPTIONS.len(), 2);
+        assert_ne!(BASIS_DESCRIPTIONS[0], BASIS_DESCRIPTIONS[1]);
+    }
 }

@@ -128,12 +128,14 @@ Use `just`. Run `just` alone to list every task.
     by default turns the manager into a way to delete somebody else's work.
     Pruning is the exception: Podman prunes by danglingness, not by owner, and
     the confirmation has to say so.
-28. **The shipped guest recipe is read-only, and that is not a policy.** It
+28. **The shipped guest recipe is read-only, and it never disappears.** It
     lives inside the installation, under `/app/share` in the Flatpak. A user
-    who wants to change it takes a copy to `<config>/cabin/guest`, and the
-    presence of that copy is what makes builds use it. Do not add a setting
-    to select between them: presence is the setting, and a second one would
-    get out of step with the files.
+    who wants to change it takes a copy, and that copy is a named recipe with
+    its own tag under `<config>/cabin/images/`. An earlier version let one
+    copy take the shipped recipe's own tag, which hid the shipped recipe: a
+    user whose copy stopped building then had no way back, and the shipped
+    image vanished from the New Desktop dropdown. Never let two recipes build
+    one tag.
 29. **A custom recipe builds `FROM` the base, never from Fedora.** Repeating
     the base costs 57 seconds and 1.65 GB per image instead of 11 seconds and
     about 30 MB, and it drifts from the base as Cabin updates.
@@ -142,21 +144,25 @@ Use `just`. Run `just` alone to list every task.
     thing telling them which line holds the session up. If you add something
     load-bearing, mark it and say how it fails. The label is the one that
     fails quietly: the image builds and then appears nowhere in Cabin.
-31. **A name must fit a dropdown.** `AdwComboRow` shows the selected item on
+31. **Offer every recipe, built or not.** The New Desktop dropdown lists
+    recipes, not images. Listing only built images leaves a fresh
+    installation with an empty dropdown, and hides a recipe the user has
+    just made. An unbuilt choice says so and offers to build that recipe.
+32. **A name must fit a dropdown.** `AdwComboRow` shows the selected item on
     the title's line, which leaves a few characters in a dialogue, so set
     `use-subtitle` for anything longer than a word. Keep qualifiers such as
     "your copy" or "default" out of the name and put them beside the row.
-32. **Text from Podman or the filesystem is data, not markup.**
+33. **Text from Podman or the filesystem is data, not markup.**
     `AdwPreferencesRow` parses its title and subtitle as Pango markup, so an
     image called `<untagged> abc` or a path holding an ampersand makes GTK
     drop the label and warn. Call `set_use_markup(false)` on any row that
     carries such text.
-33. **Do not make a desktop a Toolbx container.** It was considered and it
+34. **Do not make a desktop a Toolbx container.** It was considered and it
     cannot work: toolbox runs with `--pid=host`, and systemd as PID 1 needs
     its own PID namespace. DESIGN.md section 19.4 has the full comparison.
     Use `podman exec` to get a shell, which is what the Open a shell dialogue
     shows.
-34. **Store interface names for remote access, never addresses.** An address
+35. **Store interface names for remote access, never addresses.** An address
     changes with the network, and a stored one would leave the desktop unable
     to start after a DHCP lease changed. Names resolve to addresses when the
     container is created. Loopback is always bound as well.

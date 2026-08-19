@@ -17,10 +17,6 @@ use std::sync::Arc;
 /// updates exist, and which those widgets' handlers then need to call.
 type RefreshCell = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 
-/// The image a desktop is built from unless the setting says otherwise.
-pub const DEFAULT_TAG: &str = "localhost/cabin-guest:f44";
-
-/// Opens the image manager.
 /// Opens the image manager.
 pub fn present(
     parent: &impl IsA<gtk::Widget>,
@@ -42,8 +38,10 @@ pub fn present(
     let recipe_group = adw::PreferencesGroup::builder()
         .title("Recipes")
         .description(
-            "A recipe says what goes into a guest image. Add your own to give a \
-             desktop different software, then pick it when you create one.",
+            "A recipe says what goes into a guest image. Cabin ships one and you \
+             can add your own. Build a recipe to get its image, then pick that \
+             image when you create a desktop. The star marks the one new \
+             desktops start on.",
         )
         .build();
     let recipe_list = gtk::ListBox::builder()
@@ -259,6 +257,9 @@ fn populate_recipes(
 
     for recipe in crate::recipes::all() {
         let image = images.iter().find(|i| i.tags.contains(&recipe.tag));
+        // Only a layer starts `FROM` the base image, so only a layer has to
+        // wait for it. A full copy starts from Fedora and builds on its own.
+        let needs_base = recipe.kind == crate::recipes::Kind::Custom && !recipe.customised;
 
         let row = adw::ActionRow::builder().title(&recipe.name).build();
         // These carry data, not markup. A name or a tag holding an angle
@@ -268,29 +269,63 @@ fn populate_recipes(
         row.set_subtitle_lines(0);
         // Anything qualifying the name goes beside it. Putting it in the name
         // makes the name too long for the dropdown that also shows it.
-        for (text, style) in [
-            (recipe.customised.then_some("Your copy"), "dim-label"),
-            ((recipe.tag == default_tag).then_some("Default"), "accent"),
-        ] {
-            let Some(text) = text else { continue };
+        let badge = match recipe.kind {
+            crate::recipes::Kind::Shipped => Some("Shipped with Cabin"),
+            crate::recipes::Kind::Custom if recipe.customised => Some("Your copy"),
+            crate::recipes::Kind::Custom => Some("Yours"),
+        };
+        if let Some(text) = badge {
             row.add_suffix(
                 &gtk::Label::builder()
                     .label(text)
-                    .css_classes(vec!["caption", style])
+                    .css_classes(vec!["caption", "dim-label"])
                     .valign(gtk::Align::Center)
                     .build(),
             );
         }
         row.set_subtitle(&match image {
             Some(image) => format!("Built, {} \u{b7} {}", image.human_size(), recipe.tag),
-            // A custom recipe builds on the base, so it cannot be built
-            // before the base is. Say that instead of letting Podman report
-            // a missing image the user never asked for.
-            None if recipe.kind == crate::recipes::Kind::Custom && !base_built => {
+            // A layer builds on the base, so it cannot be built before the
+            // base is. Say that instead of letting Podman report a missing
+            // image the user never asked for.
+            None if needs_base && !base_built => {
                 "Not built. Build the Cabin guest image first.".to_string()
             }
             None => format!("Not built yet \u{b7} {}", recipe.tag),
         });
+
+        // Which image a new desktop starts on. A toggle rather than a menu
+        // entry, because the answer has to be visible as well as settable:
+        // the lit star is how the user sees which recipe it is.
+        let is_default = recipe.tag == default_tag;
+        let star = gtk::ToggleButton::builder()
+            .icon_name(if is_default {
+                "starred-symbolic"
+            } else {
+                "non-starred-symbolic"
+            })
+            .valign(gtk::Align::Center)
+            .css_classes(vec!["flat"])
+            .active(is_default)
+            .sensitive(image.is_some() && !is_default)
+            .tooltip_text(if is_default {
+                "New desktops start on this image"
+            } else if image.is_some() {
+                "Use this image for new desktops"
+            } else {
+                "Build this image before new desktops can use it"
+            })
+            .build();
+        let refresh_for_star = refresh.clone();
+        let tag_for_star = recipe.tag.clone();
+        star.connect_toggled(move |button| {
+            if !button.is_active() {
+                return;
+            }
+            crate::recipes::set_default_tag(&tag_for_star);
+            refresh_for_star();
+        });
+        row.add_suffix(&star);
 
         let build = gtk::Button::builder()
             .label(if image.is_some() { "Rebuild" } else { "Build" })
@@ -300,7 +335,7 @@ fn populate_recipes(
             } else {
                 "suggested-action"
             }])
-            .sensitive(recipe.kind == crate::recipes::Kind::Base || base_built)
+            .sensitive(!needs_base || base_built)
             .build();
         let parent_for_build = parent.clone();
         let podman_for_build = podman.clone();
@@ -328,7 +363,6 @@ fn populate_recipes(
             parent,
             refresh.clone(),
             podman.clone(),
-            image.is_some(),
         ));
         list.append(&row);
     }
@@ -340,7 +374,6 @@ fn recipe_menu(
     parent: &adw::Dialog,
     refresh: Rc<dyn Fn()>,
     podman: Arc<Podman>,
-    built: bool,
 ) -> gtk::MenuButton {
     let popover = gtk::Popover::new();
     let box_ = gtk::Box::builder()
@@ -371,43 +404,23 @@ fn recipe_menu(
     });
     box_.append(&open);
 
-    // Only an image that exists can be the one a new desktop starts on.
-    if built && recipe.tag != crate::recipes::default_tag() {
-        let make_default = flat_button("Use for new desktops", "starred-symbolic");
-        let refresh_for_default = refresh.clone();
-        let tag = recipe.tag.clone();
-        let popover_ref = popover.clone();
-        make_default.connect_clicked(move |_| {
-            popover_ref.popdown();
-            crate::recipes::set_default_tag(&tag);
-            refresh_for_default();
-        });
-        box_.append(&make_default);
-    }
-
     match recipe.kind {
-        crate::recipes::Kind::Base => {
-            // The base is either the shipped tree or the user's copy of it,
-            // and the actions differ. Both live here rather than in a second
-            // place the user has to find.
-            let label = if crate::guestdir::has_custom() {
-                "Use the recipe Cabin ships with"
-            } else {
-                "Take a copy to change it"
-            };
-            let action = flat_button(label, "edit-copy-symbolic");
+        crate::recipes::Kind::Shipped => {
+            // The shipped recipe cannot be changed, so the only thing to
+            // offer is a copy that can. The copy is a recipe of its own, so
+            // this one stays where it is and stays selectable.
+            let action = flat_button("Copy to a new recipe", "edit-copy-symbolic");
             let parent_for_action = parent.clone();
             let refresh_for_action = refresh.clone();
             let popover_ref = popover.clone();
             action.connect_clicked(move |_| {
                 popover_ref.popdown();
                 let refresh = refresh_for_action.clone();
-                if crate::guestdir::has_custom() {
-                    crate::recipe::confirm_reset(&parent_for_action, move || refresh());
-                } else {
-                    let refresh = refresh.clone();
-                    crate::recipe::customise(&parent_for_action, Rc::new(move || refresh()));
-                }
+                crate::recipe::present_new_from(
+                    &parent_for_action,
+                    crate::recipes::Basis::FullCopy,
+                    move || refresh(),
+                );
             });
             box_.append(&action);
         }
@@ -513,11 +526,13 @@ fn populate(
         list.append(
             &adw::ActionRow::builder()
                 .title("No images yet")
-                .subtitle("Build the guest image to make your first desktop.")
+                .subtitle("Build the Cabin guest recipe above to make your first desktop.")
                 .build(),
         );
         return;
     }
+
+    let default_tag = crate::recipes::default_tag();
 
     for image in images {
         let row = adw::ActionRow::builder()
@@ -526,9 +541,12 @@ fn populate(
             .build();
         // The name comes from Podman, so it is data rather than markup.
         row.set_use_markup(false);
-        if image.tags.iter().any(|t| t == DEFAULT_TAG) {
+        // The default can be any built image, so the mark has to follow the
+        // setting. A fixed tag here would keep pointing at Cabin's own image
+        // after the user chose another.
+        if image.tags.iter().any(|t| t == &default_tag) {
             let badge = gtk::Label::builder()
-                .label("In use by Cabin")
+                .label("Default")
                 .css_classes(vec!["caption", "accent"])
                 .valign(gtk::Align::Center)
                 .build();
@@ -718,7 +736,7 @@ pub fn present_build(
     tag: &str,
     on_done: impl Fn() + 'static,
 ) {
-    let Some((context_dir, _)) = crate::guestdir::active() else {
+    let Some(context_dir) = crate::guestdir::shipped() else {
         let error = adw::AlertDialog::builder()
             .heading("The guest files are missing")
             .body(format!(

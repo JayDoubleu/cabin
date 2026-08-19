@@ -1858,7 +1858,7 @@ with the one Cabin uses marked. From there an image can be built, rebuilt or
 deleted.
 
 **The build context ships with the application.** `guest/` installs to
-`<datadir>/cabin/guest`, and `guestdir::find` looks there, at `/app/share` for
+`<datadir>/cabin/guest`, and `guestdir::shipped` looks there, at `/app/share` for
 the Flatpak, beside the executable, and finally in the source tree so that
 `just run` works without installing. A directory only counts when it holds a
 Containerfile, or a partly installed one would be chosen over a complete one
@@ -1941,40 +1941,61 @@ The goal behind the request, reaching a desktop from a terminal, is met by
 
 ## 20. The guest recipe
 
-### 20.1 Two trees, one of them writable
+### 20.1 One shipped tree, and copies of it
 
 The recipe is `guest/Containerfile` and the files beside it. Cabin ships one
-copy and the user may hold another.
+copy, in the installation, and the user may hold any number of their own.
 
-| | Shipped | Customised |
+| | Shipped | The user's |
 |---|---|---|
-| Where | `<datadir>/cabin/guest` | `<config>/cabin/guest` |
+| Where | `<datadir>/cabin/guest` | `<config>/cabin/images/<name>` |
 | Writable | No | Yes |
 | Follows Cabin updates | Yes | No |
+| Tag | `localhost/cabin-guest:f44` | `localhost/cabin-guest-<name>:latest` |
 
 The shipped tree is read-only because it lives inside the installation, under
 `/app/share` in the Flatpak and under `/usr/share` in a system install. Editing
 in place is not merely discouraged, it is impossible, so the interface shows it
 read-only rather than offering a save that would fail.
 
-A customised copy lives under the user's configuration directory, which the
-Flatpak writes without any filesystem permission. When one exists, builds use
-it. That is the whole rule: presence decides, so there is no separate setting
-to get out of step with the files.
+**A copy never replaces the shipped recipe.** An earlier version let one copy
+live at `<config>/cabin/guest` and take the shipped recipe's own tag, so taking
+a copy hid the recipe Cabin ships. That was wrong for three reasons. A user
+whose copy stopped building had no way back to a working guest. Two recipes
+that build one tag cannot both be built, so there was no way to compare them.
+And the New Desktop dialogue offers images by tag, so the shipped image simply
+disappeared from it.
+
+A copy is now a named recipe like any other, with its own name and its own tag.
+The shipped recipe is therefore always present, always offered, and always the
+thing that works on a machine with nothing else on it. `guestdir::shipped()`
+has no fallback and no override: there is one shipped tree and it is found or
+it is not.
+
+`recipes::migrate_legacy_copy` moves a copy made by the earlier version into
+`<config>/cabin/images/my-guest` at start-up, and carries its origin marker
+with it. It runs before anything reads the recipe list, so the user never sees
+the intermediate state.
 
 **The whole tree is copied, not only the Containerfile.** The Containerfile
 copies the scripts and units beside it, so a copy holding one file would build
 nothing.
 
-**The copy records where it came from.** `<config>/cabin/guest-origin` holds a
-hash of the shipped tree at the moment of copying, and the interface says so
-when the shipped tree has moved on. Without it there is no way to tell a
-customised recipe that is current from one taken three releases ago, and the
-second quietly keeps building an old guest.
+**A copy records where it came from.** `<config>/cabin/images/<name>.origin`
+holds a hash of the shipped tree at the moment of copying, and the interface
+says so when the shipped tree has moved on. Without it there is no way to tell
+a copy that is current from one taken three releases ago, and the second
+quietly keeps building an old guest.
+
+The marker also answers a second question at no extra cost: a recipe that has
+one is a full copy, and a recipe that has none is a layer. A layer is not a
+copy of anything and so cannot fall behind, which is why it is never warned
+about. One fact answers both questions rather than two that can disagree.
 
 That marker sits beside the copy rather than inside it. Anything inside is part
 of the build context and gets sent to Podman, and a build context should hold
-what the build needs and nothing else.
+what the build needs and nothing else. Deleting a recipe therefore has to
+delete the marker separately, or the next recipe of the same name inherits it.
 
 The hash is FNV-1a over the packed context. Packing is already deterministic,
 sorted and without file modes or times, so hashing it answers "has any of this
@@ -1983,20 +2004,31 @@ security check, so a short non-cryptographic hash is the right size.
 
 ### 20.2 What the interface offers
 
-The Guest Images dialogue carries a Recipe row above the build button, because
-the recipe is what the build uses: a user who wants a different image has to
-change this rather than press build again.
+The Guest Images dialogue lists every recipe, the shipped one first, and each
+row says whether its image is built and offers to build it.
 
-- **Shipped**: View, and Customise.
-- **Customised**: Edit, and a button to delete the copy and go back.
+- **Shipped**: View, and "Copy to a new recipe".
+- **The user's**: Edit, and Delete.
+
+Copying the shipped recipe and adding to it are the same act with a different
+starting point, so they are one dialogue rather than two that have to be kept
+in step. `recipe::present_new_from` opens the New Recipe dialogue on the chosen
+starting point.
 
 Viewing and editing are the same window. The banner says which recipe it is,
 since only one of the two can be saved and the window otherwise looks the same
 either way. Editing says plainly that changes take effect at the next build,
 because nothing visible happens on save.
 
+**The two dialogues call each other, so their callbacks cannot stay generic.**
+The recipe window opens the New Recipe dialogue, which opens the recipe window
+on what it made. While the callback is `impl Fn()` each hop is a fresh closure
+type, so the compiler instantiates the pair forever and stops at the recursion
+limit. `present_path_boxed` and `present_new_boxed` take `Rc<dyn Fn()>` and
+break the chain; the public entry points stay generic for callers.
+
 `live_overlay.rs` proves the join that nothing else covers. Packing is unit
-tested and building is tested against the shipped tree, but that a *customised*
+tested and building is tested against the shipped tree, but that a *user's*
 recipe is the one that reaches the image was not. The test writes a recipe with
 a marker and a file in a subdirectory, builds it, and runs the image to check
 both arrived. The subdirectory matters: a context that packed only the top
@@ -2009,19 +2041,19 @@ later and look like something else.
 
 ### 21.1 A recipe per image
 
-Section 20 gave the base recipe a writable copy. That answers "change the
-guest" but not "have more than one guest". A user who wants a desktop with a
-different toolchain should not have to choose which single guest everything
+Section 20 gave the user their own copies of the recipe. That answers "change
+the guest" but not "have more than one guest". A user who wants a desktop with
+a different toolchain should not have to choose which single guest everything
 uses.
 
-A recipe is now a named build context. The base is one of them, and the user
-may add more.
+A recipe is a named build context. The shipped one is always there, and the
+user may add more.
 
-| | Base | Custom |
+| | Shipped | The user's |
 |---|---|---|
-| Where | `<datadir>/cabin/guest`, or the copy in `<config>/cabin/guest` | `<config>/cabin/images/<name>` |
+| Where | `<datadir>/cabin/guest` | `<config>/cabin/images/<name>` |
 | Tag | `localhost/cabin-guest:f44` | `localhost/cabin-guest-<name>:latest` |
-| Starts from | `registry.fedoraproject.org/fedora:44` | the base tag |
+| Starts from | `registry.fedoraproject.org/fedora:44` | the base tag, or a full copy |
 
 **A custom recipe builds on the base rather than repeating it.** This is the
 decision the feature rests on. Repeating the base would mean every custom image
@@ -2049,21 +2081,27 @@ and a desktop may still be running from the image.
 
 ### 21.2 Choosing an image for a desktop
 
-The New Desktop dialogue offers the images that exist, named the way the recipe
-list names them. Only Cabin's own images appear, and only those with a tag: an
-untagged image left by a rebuild cannot be referred to and would not survive
-the next clean-up.
+The New Desktop dialogue offers every recipe in a dropdown, named the way the
+recipe list names them, with the shipped one first and selected unless the user
+has chosen another default.
 
-The image Cabin ships is always first and is marked as the default. It is the
-one that works without anything else having been built, so it is the answer
-whenever the user has no reason to prefer another. A row beneath the choice
-names the tag and size, because the dropdown shows a name and only the tag is
-unambiguous.
+**Every recipe is offered, whether or not its image exists.** Offering only
+built images was tried and it is wrong: a fresh installation then shows an
+empty dropdown, and a user who has just made a recipe cannot find it. A choice
+whose image is not built says so, and Create stays disabled with a Build button
+beside the reason. That is something the user can act on. An empty list is not.
 
-The choice is remembered, so making several desktops on the same image is one
-decision rather than several. When nothing is built the dialogue says so and
-offers to build, rather than letting the desktop fail afterwards, which is what
-section 19.1 corrected.
+The Build button builds the *selected* recipe. Building Cabin's own image
+instead would leave the warning showing after a build that appeared to succeed.
+
+Only Cabin's own images appear, and only those with a tag: an untagged image
+left by a rebuild cannot be referred to and would not survive the next
+clean-up. An image whose recipe has been deleted is still offered, because
+deleting a recipe leaves its image alone on purpose and desktops made from it
+keep working.
+
+A row beneath the dropdown says where the image came from, what it costs, and
+its tag, because the dropdown shows a name and only the tag is unambiguous.
 
 A custom recipe cannot be built before the base is, because it starts `FROM`
 it. The recipe row says that rather than letting Podman report a missing image
@@ -2133,8 +2171,14 @@ it unambiguous, and it has the width to be readable there.
 ### 21.5 The default image is chosen, not inferred
 
 A new desktop starts on the image marked as the default, which is Cabin's own
-until the user says otherwise. The image manager sets it, from the menu on any
-recipe whose image is built, and marks the row.
+until the user says otherwise. The image manager sets it with a star on each
+recipe row, lit on the one in use.
+
+**The star is a button on the row, not an entry in the overflow menu.** Which
+image a new desktop starts on has to be visible as well as settable, and a menu
+entry shows neither state nor the alternatives. The star is insensitive on a
+recipe whose image is not built, with a tooltip saying to build it first,
+because a desktop cannot be made from an image that does not exist.
 
 It is stored as a tag rather than a recipe name, because it is a desktop's
 image being chosen and an image can outlive the recipe that made it.

@@ -87,8 +87,8 @@ pub fn present(
     // fails with "no such image" after everything here has been filled in.
     // Ask Podman now, and offer the way out rather than only the message.
     let image_missing = adw::ActionRow::builder()
-        .title("No guest image is built yet")
-        .subtitle("A desktop needs one. Building takes several minutes.")
+        .title("This image is not built yet")
+        .subtitle("A desktop needs it. Building takes several minutes.")
         .css_classes(vec!["warning"])
         .visible(false)
         .build();
@@ -169,36 +169,45 @@ pub fn present(
                 return;
             };
             let choices = buildable_images(&images);
-            row.set_visible(choices.is_empty());
 
             let labels: Vec<&str> = choices.iter().map(|c| c.label.as_str()).collect();
             combo.set_model(Some(&gtk::StringList::new(&labels)));
             combo.set_sensitive(!choices.is_empty());
-            // Land on the image last used, so making several desktops on one
-            // image is a single decision rather than several.
-            if let Some(index) = choices.iter().position(|c| c.tag == preferred) {
-                combo.set_selected(index as u32);
-            }
-            // The dropdown shows a name. The row beneath says which image that
-            // is, because only the tag is unambiguous.
+            // Land on the chosen default, and only if its image exists.
+            // Opening on a choice that cannot be used would leave Create
+            // disabled with nothing saying which selection would fix it.
+            let landing = choices
+                .iter()
+                .position(|c| c.tag == preferred && c.built)
+                .or_else(|| choices.iter().position(|c| c.built))
+                .unwrap_or(0);
+            combo.set_selected(landing as u32);
+
+            // The dropdown shows a name. The rows beneath say which image
+            // that is and whether it exists, because only the tag is
+            // unambiguous and only a built image can be used.
             let details: Vec<String> = choices.iter().map(|c| c.detail.clone()).collect();
-            let show_detail = move |combo: &adw::ComboRow| {
-                detail_row.set_subtitle(
-                    details
-                        .get(combo.selected() as usize)
-                        .map(String::as_str)
-                        .unwrap_or(""),
+            let built: Vec<bool> = choices.iter().map(|c| c.built).collect();
+            let name_for_settle = name.clone();
+            let taken_for_settle = taken.clone();
+            let dialog_for_settle = dialog.clone();
+            let row_for_settle = row.clone();
+            let settle = move |combo: &adw::ComboRow| {
+                let index = combo.selected() as usize;
+                detail_row.set_subtitle(details.get(index).map(String::as_str).unwrap_or(""));
+                let ready = built.get(index).copied().unwrap_or(false);
+                row_for_settle.set_visible(!ready);
+                dialog_for_settle.set_response_enabled(
+                    "create",
+                    ready
+                        && cabin_core::check_name(&name_for_settle.text(), &taken_for_settle)
+                            .is_ok(),
                 );
             };
-            show_detail(&combo);
-            combo.connect_selected_notify(show_detail);
+            settle(&combo);
+            combo.connect_selected_notify(settle);
 
             tags.replace(choices.into_iter().map(|c| c.tag).collect());
-
-            dialog.set_response_enabled(
-                "create",
-                !tags.borrow().is_empty() && cabin_core::check_name(&name.text(), &taken).is_ok(),
-            );
         });
     });
     check_image();
@@ -206,14 +215,33 @@ pub fn present(
     let check_after_build = check_image.clone();
     let podman_for_build = podman.clone();
     let build_parent = parent.as_ref().clone();
+    let tags_for_build = image_tags.clone();
+    let combo_for_build = image_row.clone();
     build_now.connect_clicked(move |_| {
         let recheck = check_after_build.clone();
-        crate::images::present_build(
-            &build_parent,
-            podman_for_build.clone(),
-            crate::images::DEFAULT_TAG,
-            move || recheck(),
-        );
+        // The button sits under the dropdown, so it has to build what the
+        // dropdown says. Building Cabin's own image instead would leave the
+        // warning showing after a build that appeared to succeed.
+        let tag = tags_for_build
+            .borrow()
+            .get(combo_for_build.selected() as usize)
+            .cloned()
+            .unwrap_or_else(|| crate::recipes::BASE_TAG.to_string());
+        match crate::recipes::all().into_iter().find(|r| r.tag == tag) {
+            Some(recipe) => crate::images::present_build_from(
+                &build_parent,
+                podman_for_build.clone(),
+                &recipe.tag,
+                recipe.dir,
+                move || recheck(),
+            ),
+            None => crate::images::present_build(
+                &build_parent,
+                podman_for_build.clone(),
+                &tag,
+                move || recheck(),
+            ),
+        }
     });
     let parent_widget = parent.as_ref().clone();
     dialog.connect_response(None, move |dialog, response| {
@@ -287,40 +315,63 @@ struct Choice {
     label: String,
     /// The tag the desktop is created with.
     tag: String,
-    /// The size and tag, for the row beneath the dropdown.
+    /// Where the image came from and what it costs, for the row beneath.
     detail: String,
+    /// False when the recipe is known but its image is not built. The choice
+    /// is still offered, because hiding it makes Cabin's own image vanish
+    /// from a fresh installation with nothing to say why.
+    built: bool,
 }
 
 /// The images a desktop can be made from.
 ///
-/// Only Cabin's own, and only those with a name: an untagged image left by a
-/// rebuild cannot be referred to and would not survive the next clean-up.
+/// Every recipe is offered, whether or not its image exists yet, and Cabin's
+/// own is offered first and always. A recipe with no image says so and cannot
+/// be chosen, which is a reason the user can act on. Untagged images are left
+/// out: one cannot be referred to and would not survive the next clean-up.
 fn buildable_images(images: &[cabin_podman::Image]) -> Vec<Choice> {
     let recipes = crate::recipes::all();
     let mut choices: Vec<Choice> = Vec::new();
 
+    for recipe in &recipes {
+        let image = images
+            .iter()
+            .filter(|i| i.is_guest && !i.dangling)
+            .find(|i| i.tags.contains(&recipe.tag));
+        let origin = match recipe.kind {
+            crate::recipes::Kind::Shipped => "shipped with Cabin",
+            crate::recipes::Kind::Custom if recipe.customised => "your copy",
+            crate::recipes::Kind::Custom => "yours",
+        };
+        choices.push(Choice {
+            // The name only. Anything qualifying it goes in the row below,
+            // because this string also has to fit a dropdown.
+            label: recipe.name.clone(),
+            detail: match image {
+                Some(image) => format!(
+                    "{origin} \u{b7} {} \u{b7} {}",
+                    image.human_size(),
+                    recipe.tag
+                ),
+                None => format!("{origin} \u{b7} not built yet \u{b7} {}", recipe.tag),
+            },
+            tag: recipe.tag.clone(),
+            built: image.is_some(),
+        });
+    }
+
+    // An image with no recipe behind it: one the user built by hand, or one
+    // whose recipe they deleted. It still works, so it is still offered.
     for image in images.iter().filter(|i| i.is_guest && !i.dangling) {
         for tag in &image.tags {
-            let is_base = tag == crate::recipes::BASE_TAG;
-            let name = recipes
-                .iter()
-                .find(|r| &r.tag == tag)
-                // Name it the way the recipe list does, so the two agree.
-                .map(|r| r.name.clone())
-                .unwrap_or_else(|| tag.clone());
+            if choices.iter().any(|c| &c.tag == tag) {
+                continue;
+            }
             choices.push(Choice {
-                // The name only. Anything qualifying it goes in the row
-                // below, because this string also has to fit a dropdown.
-                label: name,
-                detail: if is_base {
-                    format!(
-                        "{} \u{b7} {tag} \u{b7} shipped with Cabin",
-                        image.human_size()
-                    )
-                } else {
-                    format!("{} \u{b7} {tag}", image.human_size())
-                },
+                label: tag.clone(),
+                detail: format!("no recipe \u{b7} {} \u{b7} {tag}", image.human_size()),
                 tag: tag.clone(),
+                built: true,
             });
         }
     }
@@ -384,6 +435,90 @@ fn generate_password() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn image(tag: &str, guest: bool) -> cabin_podman::Image {
+        cabin_podman::Image {
+            id: format!("id-{tag}"),
+            tags: vec![tag.to_string()],
+            size_bytes: 1_650_000_000,
+            created: 0,
+            is_guest: guest,
+            dangling: false,
+        }
+    }
+
+    #[test]
+    fn cabins_own_image_is_offered_even_when_nothing_is_built() {
+        // The one choice that always works has to be visible on a machine
+        // with nothing on it, or a fresh installation offers an empty list.
+        let choices = buildable_images(&[]);
+        let base = choices
+            .first()
+            .expect("the shipped recipe is always a choice");
+        assert_eq!(base.tag, crate::recipes::BASE_TAG);
+        assert!(!base.built);
+        assert!(base.detail.contains("not built yet"));
+    }
+
+    #[test]
+    fn cabins_own_image_stays_first_when_others_exist() {
+        // It is the answer whenever the user has no reason to prefer another,
+        // so it must not be pushed down the list by a name that sorts before
+        // it.
+        let choices = buildable_images(&[
+            image("localhost/cabin-guest-aaa:latest", true),
+            image(crate::recipes::BASE_TAG, true),
+        ]);
+        assert_eq!(choices[0].tag, crate::recipes::BASE_TAG);
+        assert!(choices[0].built);
+    }
+
+    #[test]
+    fn a_recipe_is_offered_once_however_many_images_carry_its_tag() {
+        let choices = buildable_images(&[image(crate::recipes::BASE_TAG, true)]);
+        let base = choices
+            .iter()
+            .filter(|c| c.tag == crate::recipes::BASE_TAG)
+            .count();
+        assert_eq!(base, 1, "the shipped recipe appeared {base} times");
+    }
+
+    #[test]
+    fn an_image_that_is_not_cabins_is_never_offered() {
+        // A desktop made from one would not have a session in it, and the
+        // failure would arrive minutes later as a connection that never
+        // comes.
+        let choices = buildable_images(&[image("docker.io/library/nginx:latest", false)]);
+        assert!(choices
+            .iter()
+            .all(|c| c.tag != "docker.io/library/nginx:latest"));
+    }
+
+    #[test]
+    fn an_image_whose_recipe_is_gone_is_still_offered() {
+        // Deleting a recipe leaves its image alone on purpose, and desktops
+        // made from it keep working, so it stays a choice.
+        let choices = buildable_images(&[image("localhost/cabin-guest-old:latest", true)]);
+        let orphan = choices
+            .iter()
+            .find(|c| c.tag == "localhost/cabin-guest-old:latest")
+            .expect("an image with no recipe should still be a choice");
+        assert!(orphan.built);
+        assert!(orphan.detail.contains("no recipe"));
+    }
+
+    #[test]
+    fn every_choice_says_where_it_came_from() {
+        // The name alone does not say whether an image is Cabin's or the
+        // user's, and the name is all the dropdown has room for.
+        for choice in buildable_images(&[image(crate::recipes::BASE_TAG, true)]) {
+            assert!(
+                !choice.detail.is_empty(),
+                "{} has nothing under it",
+                choice.label
+            );
+        }
+    }
 
     #[test]
     fn suggests_the_plain_name_when_it_is_free() {

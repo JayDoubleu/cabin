@@ -163,14 +163,18 @@ you have seen the list.
 
 ### Several guest images
 
-Guest Images lists recipes. Cabin ships one, and you can add your own with New
-Recipe. Build it, and it appears in the New Desktop dialogue as something to
-choose, so you can keep one desktop plain and another with your toolchain in
-it.
+Guest Images lists recipes. Cabin's own is always first, and you can add your
+own with New Recipe. Build one and it appears in the New Desktop dialogue as
+something to choose, so you can keep one desktop plain and another with your
+toolchain in it.
 
-New desktops start on Cabin's own image until you say otherwise. Any built
-image can be made the default from its menu in Guest Images, and the row says
-which one it is.
+New desktops start on Cabin's own image until you say otherwise. The star on a
+recipe row makes that recipe's image the one new desktops start on. It lights
+up on the one in use, and it waits until the image is built.
+
+The New Desktop dialogue offers every recipe you have, built or not. One that
+is not built says so and offers to build it, rather than leaving you to work
+out why it is missing.
 
 A new recipe starts one of two ways:
 
@@ -186,15 +190,18 @@ desktop up.
 
 ### Changing what goes into a desktop
 
-The image is built from a Containerfile, which Guest Images shows you. The copy
-Cabin ships is read-only, because it lives inside the installation. To change
-it, press Customise: Cabin copies the guest files to a folder you own and every
-build uses that copy from then on. Add packages, change the desktop, whatever
-you need.
+The image is built from a Containerfile, which Guest Images shows you. The
+recipe Cabin ships is read-only, because it lives inside the installation. To
+change it, press "Copy to a new recipe": you get every line of it under a name
+you choose, and you can edit it freely. Add packages, change the desktop,
+whatever you need.
+
+The recipe Cabin ships never goes away. It stays in the list beside yours and
+stays offered when you make a desktop, so a copy that stops building is never
+the end of it.
 
 Your copy stops following Cabin's updates, and the dialogue tells you when
-Cabin has a newer recipe than the one you copied. There is a button to delete
-your copy and go back.
+Cabin has a newer recipe than the one you copied.
 
 ### Opening a shell in a desktop
 

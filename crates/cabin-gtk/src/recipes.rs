@@ -20,8 +20,8 @@ pub fn tag_for(name: &str) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// The recipe Cabin ships, or the user's copy of it.
-    Base,
+    /// The recipe Cabin ships. Always present, and read-only.
+    Shipped,
     /// One the user added.
     Custom,
 }
@@ -39,33 +39,68 @@ pub struct Recipe {
     /// The image tag it builds.
     pub tag: String,
     pub kind: Kind,
-    /// True when the base is the user's copy rather than the shipped tree.
-    /// Shown as a mark on the row, not as part of the name.
+    /// True when the recipe is a whole copy of the shipped one rather than a
+    /// layer on it. Shown as a mark on the row, not as part of the name.
     pub customised: bool,
 }
 
 impl Recipe {
     /// True when the recipe's files can be changed.
     ///
-    /// Only the shipped base cannot, because it lives inside the installation.
+    /// Only the shipped one cannot, because it lives inside the installation.
     pub fn editable(&self) -> bool {
-        self.kind == Kind::Custom || guestdir::has_custom()
+        self.kind == Kind::Custom
     }
 }
 
 /// Where custom recipes live.
-fn custom_root() -> PathBuf {
+pub fn custom_root() -> PathBuf {
     gtk::glib::user_config_dir().join("cabin").join("images")
 }
 
-/// The base recipe: the shipped tree, or the user's copy of it.
+/// True when a recipe is a whole copy of the shipped tree.
+///
+/// The origin marker beside it is what says so. It is written when the copy
+/// is taken and it is what the staleness warning reads, so one fact answers
+/// both questions rather than two that can disagree.
+fn is_full_copy(dir: &std::path::Path) -> bool {
+    guestdir::has_origin(dir)
+}
+
+/// Moves a copy made by an earlier version into the named recipes.
+///
+/// That version let a copy take the shipped recipe's own tag, so taking one
+/// hid the recipe Cabin ships and there was no way to build both. Run once at
+/// start-up. It reports the name it used so the user can find the copy again.
+pub fn migrate_legacy_copy() -> Option<String> {
+    let root = custom_root();
+    if std::fs::create_dir_all(&root).is_err() {
+        return None;
+    }
+    let taken: Vec<String> = custom().into_iter().map(|r| r.name).collect();
+    let mut name = "my-guest".to_string();
+    for suffix in 2..100 {
+        if !taken.contains(&name) {
+            break;
+        }
+        name = format!("my-guest-{suffix}");
+    }
+    guestdir::migrate_legacy_copy(&root, &name)
+}
+
+/// The recipe Cabin ships.
+///
+/// It is always offered, whatever else the user has made. A copy of it is a
+/// recipe of its own with its own name and tag, so taking one never takes
+/// this away: it is the one choice that works on a machine with nothing on
+/// it, and the way back from a copy that does not build.
 pub fn base() -> Option<Recipe> {
-    guestdir::active().map(|(dir, source)| Recipe {
+    guestdir::shipped().map(|dir| Recipe {
         name: "Cabin guest".to_string(),
         dir,
         tag: BASE_TAG.to_string(),
-        kind: Kind::Base,
-        customised: source == guestdir::Source::Custom,
+        kind: Kind::Shipped,
+        customised: false,
     })
 }
 
@@ -80,12 +115,16 @@ pub fn custom() -> Vec<Recipe> {
         .filter(|e| e.path().join("Containerfile").is_file())
         .map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
+            // A full copy carries an origin marker beside it. A layer does
+            // not, because it is not a copy of anything and cannot fall
+            // behind the shipped tree.
+            let customised = is_full_copy(&e.path());
             Recipe {
                 tag: tag_for(&name),
                 dir: e.path(),
                 name,
                 kind: Kind::Custom,
-                customised: true,
+                customised,
             }
         })
         .collect();
@@ -224,6 +263,9 @@ pub fn create(name: &str, basis: Basis) -> Result<Recipe, String> {
                 return Err("Cabin could not find the files it ships with.".to_string());
             };
             guestdir::copy_context(&base, &dir)?;
+            // Marks it as a copy, and of which version. The mark is what
+            // tells a copy that is current from one taken three releases ago.
+            guestdir::record_origin(&dir)?;
         }
     }
 
@@ -232,7 +274,7 @@ pub fn create(name: &str, basis: Basis) -> Result<Recipe, String> {
         dir,
         name,
         kind: Kind::Custom,
-        customised: true,
+        customised: basis == Basis::FullCopy,
     })
 }
 
@@ -248,7 +290,13 @@ pub fn delete(name: &str) -> Result<(), String> {
     if dir.parent() != Some(custom_root().as_path()) {
         return Err("that recipe is not in the recipes folder".to_string());
     }
-    std::fs::remove_dir_all(&dir).map_err(|e| format!("could not remove {}: {e}", dir.display()))
+    std::fs::remove_dir_all(&dir)
+        .map_err(|e| format!("could not remove {}: {e}", dir.display()))?;
+    // The marker sits beside the recipe rather than inside it, so removing
+    // the directory leaves it behind to be inherited by the next recipe of
+    // the same name.
+    guestdir::forget_origin(&dir);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -361,12 +409,60 @@ mod tests {
     }
 
     #[test]
-    fn the_base_is_listed_first() {
-        // The list is offered as choices, and the base is the one that works
+    fn the_shipped_recipe_is_listed_first() {
+        // The list is offered as choices, and the shipped one is what works
         // without anything else being built.
         let all = all();
-        if let Some(first) = all.first() {
-            assert_eq!(first.kind, Kind::Base);
+        let first = all.first().expect("the shipped recipe is always there");
+        assert_eq!(first.kind, Kind::Shipped);
+    }
+
+    #[test]
+    fn the_shipped_recipe_is_always_offered() {
+        // A copy is a recipe of its own, so taking one must never take the
+        // shipped recipe away. Losing it would leave a user whose copy does
+        // not build with no way back.
+        let base = base().expect("the shipped recipe should be found");
+        assert_eq!(base.kind, Kind::Shipped);
+        assert_eq!(base.tag, BASE_TAG);
+        assert!(!base.editable(), "the shipped recipe cannot be written");
+        assert!(guestdir::is_shipped(&base.dir));
+    }
+
+    /// Not a unit test of pure logic: it reports what this machine actually
+    /// offers, which is the one thing that cannot be checked without looking
+    /// at the filesystem.
+    #[test]
+    fn the_shipped_recipe_is_offered_beside_whatever_the_user_has_made() {
+        let all = all();
+        for recipe in &all {
+            println!(
+                "{:?} {:>12}  {}  {}",
+                recipe.kind,
+                recipe.name,
+                recipe.tag,
+                recipe.dir.display()
+            );
+        }
+        let shipped: Vec<_> = all.iter().filter(|r| r.kind == Kind::Shipped).collect();
+        assert_eq!(shipped.len(), 1, "there is exactly one shipped recipe");
+
+        // Every recipe needs its own tag. Two that share one cannot both be
+        // built, and the second silently replaces the first.
+        let mut tags: Vec<&str> = all.iter().map(|r| r.tag.as_str()).collect();
+        tags.sort_unstable();
+        let count = tags.len();
+        tags.dedup();
+        assert_eq!(tags.len(), count, "two recipes build the same tag");
+    }
+
+    #[test]
+    fn a_copy_does_not_take_the_shipped_recipes_tag() {
+        // Sharing a tag is what made a copy hide the shipped recipe. Two
+        // recipes that build the same tag cannot both be offered.
+        let names = ["my-guest", "guest", "cabin-guest"];
+        for name in names {
+            assert_ne!(tag_for(name), BASE_TAG, "{name} collides with the base");
         }
     }
 }
