@@ -47,6 +47,7 @@ ARG CABIN_UID=1000
 # starting with no way to connect to it:
 #
 #   systemd, dbus          systemd is PID 1 and everything talks over the bus
+#   polkit                 GNOME Shell shows no applications at all without it
 #   gnome-shell, mutter    the session, run with the headless backend
 #   gnome-remote-desktop   the RDP server Cabin connects to
 #   gnome-keyring          holds the RDP credentials
@@ -59,6 +60,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         gnome-shell gnome-session mutter gnome-settings-daemon \
         gnome-remote-desktop \
         gnome-keyring libsecret \
+        polkit \
         gsettings-desktop-schemas gnome-desktop4 \
         xdg-desktop-portal xdg-desktop-portal-gnome xdg-user-dirs \
         pipewire pipewire-pulseaudio wireplumber \
@@ -76,10 +78,14 @@ RUN dnf -y install --setopt=install_weak_deps=False \
 #
 # gnome-software is the store. It installs Flatpaks into the desktop user's
 # home, which is a volume, so applications the user adds survive the desktop
-# being recreated. It cannot install RPMs: that needs PackageKit, PackageKit
-# needs polkit, and polkit cannot start in a rootless container. Weak
-# dependencies are off, so PackageKit does not arrive and the store does not
-# offer what it cannot do.
+# being recreated.
+#
+# It does not install RPMs, and that is on purpose. An RPM lands in the
+# container's own writable layer, and Cabin recreates the container for every
+# settings change, so anything installed that way disappears without warning.
+# PackageKit is what gnome-software would use for RPMs, and weak dependencies
+# are off, so it does not arrive and the store does not offer it. Use dnf in
+# the terminal for a one-off, and put anything worth keeping in the recipe.
 RUN dnf -y install --setopt=install_weak_deps=False \
         gnome-console nautilus gnome-text-editor gnome-control-center \
         gnome-software flatpak \
@@ -96,9 +102,9 @@ RUN dnf -y install --setopt=install_weak_deps=False \
 # desktop user's home, that home is a volume, and a volume hides whatever the
 # build wrote underneath it.
 #
-# A system wide repository is not a substitute. Installing into one needs
-# polkit, polkit cannot start in a rootless container, and the store would
-# offer applications it then fails to install.
+# A system wide repository is not a substitute. Applications installed into one
+# live in the container's writable layer, which Cabin replaces whenever a
+# setting changes, so they would vanish without warning.
 RUN mkdir -p /usr/share/cabin \
     && curl -fsSL -o /usr/share/cabin/flathub.flatpakrepo \
         https://dl.flathub.org/repo/flathub.flatpakrepo
@@ -163,6 +169,10 @@ RUN useradd --uid ${CABIN_UID} --create-home --shell /bin/bash \
 
 # [REQUIRED] Cabin's own scripts and units, which start and configure the
 # session. These files sit beside this one in the recipe folder.
+#
+# systemd/system also carries polkit.service.d, which is what lets polkit start
+# here at all. Without it GNOME Shell shows no applications. That file explains
+# the chain, which is four steps long and reports nothing.
 COPY scripts/ /usr/libexec/cabin/
 COPY systemd/system/ /etc/systemd/system/
 COPY systemd/user/ /etc/systemd/user/

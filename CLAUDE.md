@@ -175,17 +175,25 @@ Use `just`. Run `just` alone to list every task.
     then discarded, because the systemd integration rewrites the type and a
     container running `/sbin/init` always gets that integration. Nothing
     errors, so only the label on a real container shows it.
-36. **The guest's home is a volume, so the build cannot seed it.** Anything
+36. **polkit needs a drop-in, or the desktop shows no applications.** Its
+    unit hardens `polkitd` with directives that need `CAP_SYS_ADMIN` to apply
+    alongside `User=`, which a rootless container lacks. Nothing says so: the
+    shell asks malcontent whether an application may be shown, malcontent
+    asks accountsservice, accountsservice asks polkit, and a dead polkit
+    filters out every application while the desktop files stay perfect. Keep
+    `NoNewPrivileges=yes` in that drop-in. malcontent cannot be removed
+    instead, because `gnome-shell` requires it.
+37. **The guest's home is a volume, so the build cannot seed it.** Anything
     written to `/home/cabin` during a build is hidden at run time. The
     Flathub repository is therefore fetched at build time and added to the
     session by `cabin-flathub.service`. A system wide repository is not a
     substitute: installing into one needs polkit, which cannot start here.
-37. **Keep the dash favourites to applications the recipe installs.**
+38. **Keep the dash favourites to applications the recipe installs.**
     Fedora's default names Firefox, Calendar and Calculator, none of which
     are installed. GNOME drops an entry that names a missing application
     without saying so, so the dash came up empty and the desktop looked
     broken. `95-cabin-favourites.gschema.override` sets the list.
-38. **Store interface names for remote access, never addresses.** An address
+39. **Store interface names for remote access, never addresses.** An address
     changes with the network, and a stored one would leave the desktop unable
     to start after a DHCP lease changed. Names resolve to addresses when the
     container is created. Loopback is always bound as well.

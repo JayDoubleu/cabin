@@ -2292,16 +2292,48 @@ looked like it had no applications at all.
 installs. It is a default rather than a write, so a user's own arrangement
 still wins and still persists, because dconf lives in the home volume.
 
+### 22.3.1 And then the shell hid every application
+
+With the icons drawing, the dash was still empty, the application grid was
+empty, and search spun without ever finishing. The desktop files were correct
+and `Gio.AppInfo.get_all()` returned all five applications with `should_show()`
+true, so nothing in the data was wrong.
+
+GNOME Shell asks malcontent whether each application may be shown. That chain
+is four steps long and no step reports the one below it:
+
+1. `gnome-shell` asks malcontent whether an application may be shown.
+2. malcontent reads a parental controls property from accountsservice.
+3. accountsservice asks polkit to authorise the read.
+4. polkit is not running, so the read is denied and every application is
+   filtered out.
+
+polkit is not running because its unit cannot start in a rootless container.
+Fedora hardens it with namespace, device and seccomp directives, and applying
+those while also switching to the `polkitd` user needs `CAP_SYS_ADMIN`.
+systemd stops at `Failed to keep CAP_SYS_ADMIN` and then `Failed at step USER`.
+This is the same shape as the `geoclue` and `rtkit` failures in section 12.3.
+
+`guest/systemd/system/polkit.service.d/10-cabin-container.conf` relaxes them.
+Each directive was tested alone and in groups: no single one is enough, so they
+are relaxed together. `NoNewPrivileges` stays on, because turning it off stops
+seccomp filters installing at all.
+
+malcontent cannot simply be removed. It is a hard dependency of `gnome-shell`,
+so removing it removes the session.
+
 ### 22.4 The store installs Flatpaks, not RPMs
 
-`gnome-software` is installed, and it can only do half of what it does on a
-normal Fedora. Installing an RPM goes through PackageKit, PackageKit asks
-polkit, and `polkit.service` cannot start here: it fails at `step USER` with
-`Failed to keep CAP_SYS_ADMIN`, which a rootless container does not have. That
-is the same family of problem as section 22.1 and as the clipboard channel in
-section 15.
+`gnome-software` is installed, and it deliberately installs Flatpaks only.
 
-Flatpak needs none of it. A user installation writes to
+An RPM lands in the container's own writable layer, and Cabin recreates the
+container for every settings change, so anything installed that way disappears
+without warning. PackageKit is what `gnome-software` would use for RPMs, and it
+is left out rather than offering an install that does not last. `dnf` in the
+terminal still works for a one-off, and anything worth keeping belongs in the
+recipe.
+
+Flatpak has no such problem. A user installation writes to
 `~/.local/share/flatpak`, the home is a volume, so applications the user adds
 survive the desktop being recreated, which the settings dialogue does on every
 change. Weak dependencies are off, so PackageKit never arrives and the store

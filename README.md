@@ -209,9 +209,12 @@ A desktop comes with Console, Files, Text Editor, Settings and Software.
 
 Software is the store, and it installs Flatpaks from Flathub. They go into the
 desktop's home, which is a volume, so applications you add survive the desktop
-being recreated. It cannot install RPMs: that needs polkit, which cannot run in
-a rootless container. Use `sudo dnf install` in the terminal for those, and put
-anything you want to keep in your recipe.
+being recreated.
+
+It does not install RPMs on purpose. Those land in the container itself, and
+Cabin recreates the container whenever you change a setting, so they would
+disappear without warning. Use `sudo dnf install` in the terminal for a one-off,
+and put anything you want to keep in your recipe.
 
 ### Opening a shell in a desktop
 

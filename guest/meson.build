@@ -27,6 +27,11 @@ install_data(
 )
 
 install_data(
+  'systemd' / 'system' / 'polkit.service.d' / '10-cabin-container.conf',
+  install_dir: datadir / 'cabin' / 'guest' / 'systemd' / 'system' / 'polkit.service.d',
+)
+
+install_data(
   'systemd' / 'user' / 'cabin-flathub.service',
   'systemd' / 'user' / 'cabin-keyring.service',
   'systemd' / 'user' / 'cabin-rdp.service',
