@@ -18,6 +18,14 @@
       <default>''</default>
       <summary>Name of the desktop shown when Cabin last closed</summary>
     </key>
+    <key name="sidebar-visible" type="b">
+      <default>true</default>
+      <summary>Whether the desktop list is shown</summary>
+    </key>
+    <key name="resize-window-to-resolution" type="b">
+      <default>false</default>
+      <summary>Resize the window when a fixed resolution is chosen</summary>
+    </key>
     <key name="default-image" type="s">
       <default>'localhost/cabin-guest:f44'</default>
       <summary>Image used for a new desktop</summary>

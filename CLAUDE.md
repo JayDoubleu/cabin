@@ -109,7 +109,15 @@ Use `just`. Run `just` alone to list every task.
     buffer. That passes every bounds check and reads past the end of the
     allocation. Check the stride against the row before copying. A stride
     longer than the row is the dangerous one.
-24. **Store interface names for remote access, never addresses.** An address
+24. **An `AdwAlertDialog` closes on any response.** So a field it cannot
+    accept must be checked as it is typed, with the response disabled, not
+    rejected on the click. Rejecting after the fact costs the user the whole
+    dialogue. This applies to the desktop name and to a share's location.
+25. **Every setting in the settings dialogue needs the container recreated.**
+    Podman fixes a container's configuration at create time and Cabin keeps
+    that configuration in the labels, so there is no save that keeps the
+    desktop running. Do not add a button that implies there is.
+26. **Store interface names for remote access, never addresses.** An address
     changes with the network, and a stored one would leave the desktop unable
     to start after a DHCP lease changed. Names resolve to addresses when the
     container is created. Loopback is always bound as well.

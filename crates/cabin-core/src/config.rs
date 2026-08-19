@@ -263,6 +263,42 @@ fn default_height() -> u32 {
     1080
 }
 
+/// Whether a desktop name can be used.
+///
+/// The name is not only a label. Podman uses it as the container name and
+/// Cabin builds the volume names from it, so a name it rejects fails at create
+/// time with a message about the request rather than about the name. Checking
+/// here lets the dialogue say so before the user commits to it.
+pub fn check_name(name: &str, taken: &[String]) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Give the desktop a name.".to_string());
+    }
+    if name.len() > 60 {
+        return Err("That name is too long.".to_string());
+    }
+    // Podman requires the first character to be alphanumeric, and the rest to
+    // be alphanumeric, underscore, dot or dash.
+    let mut chars = name.chars();
+    let first = chars.next().unwrap_or_default();
+    if !first.is_ascii_alphanumeric() {
+        return Err("The name must start with a letter or a number.".to_string());
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !c.is_ascii_alphanumeric() && !matches!(c, '_' | '.' | '-'))
+    {
+        if bad == ' ' {
+            return Err("The name cannot contain spaces.".to_string());
+        }
+        return Err(format!("The name cannot contain '{bad}'."));
+    }
+    if taken.iter().any(|t| t.eq_ignore_ascii_case(name)) {
+        return Err(format!("A desktop called {name} already exists."));
+    }
+    Ok(())
+}
+
 impl DesktopConfig {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
@@ -416,6 +452,42 @@ mod tests {
                 loopback: false,
             },
         ]
+    }
+
+    #[test]
+    fn accepts_an_ordinary_name() {
+        assert!(check_name("fedora", &[]).is_ok());
+        assert!(check_name("fedora-dev", &[]).is_ok());
+        assert!(check_name("work_2", &[]).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_name_podman_would_refuse() {
+        assert!(check_name("", &[]).is_err());
+        assert!(check_name("-leading-dash", &[]).is_err());
+        assert!(check_name("has space", &[]).is_err());
+        assert!(check_name("slash/name", &[]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_name_already_in_use() {
+        let taken = vec!["fedora".to_string()];
+        assert!(check_name("fedora", &taken).is_err());
+        assert!(check_name("fedora2", &taken).is_ok());
+    }
+
+    #[test]
+    fn treats_a_name_that_differs_only_in_case_as_taken() {
+        // Podman would accept both, and the two desktops would then be
+        // impossible to tell apart in the sidebar.
+        let taken = vec!["Fedora".to_string()];
+        assert!(check_name("fedora", &taken).is_err());
+    }
+
+    #[test]
+    fn ignores_surrounding_space() {
+        assert!(check_name("  fedora  ", &[]).is_ok());
+        assert!(check_name("   ", &[]).is_err());
     }
 
     #[test]

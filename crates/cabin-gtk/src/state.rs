@@ -58,6 +58,26 @@ impl State {
         let _ = self.settings.set_string("last-desktop", name);
     }
 
+    /// Whether the desktop list was shown when Cabin last closed.
+    pub fn sidebar_visible(&self) -> bool {
+        self.settings.boolean("sidebar-visible")
+    }
+
+    pub fn set_sidebar_visible(&self, visible: bool) {
+        let _ = self.settings.set_boolean("sidebar-visible", visible);
+    }
+
+    /// Whether choosing a fixed resolution also resizes the window.
+    pub fn resize_window_to_resolution(&self) -> bool {
+        self.settings.boolean("resize-window-to-resolution")
+    }
+
+    pub fn set_resize_window_to_resolution(&self, resize: bool) {
+        let _ = self
+            .settings
+            .set_boolean("resize-window-to-resolution", resize);
+    }
+
     /// The image a new desktop starts from.
     pub fn default_image(&self) -> String {
         self.settings.string("default-image").to_string()

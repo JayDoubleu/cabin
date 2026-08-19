@@ -103,9 +103,18 @@ impl Sidebar {
             let refresh_target = for_new.clone();
             // Select the new desktop once it appears, so its settings are one
             // click away and the pane stops showing the previous one.
+            // The names already in use, so the dialogue can refuse a
+            // duplicate as it is typed rather than after Create is pressed.
+            let taken: Vec<String> = for_new
+                .desktops
+                .borrow()
+                .iter()
+                .map(|d| d.name.clone())
+                .collect();
             crate::create::present(
                 button,
                 sidebar.podman.clone(),
+                taken,
                 move |name, open_settings| {
                     refresh_target.pending_settings.set(open_settings);
                     refresh_target.choose(&name);

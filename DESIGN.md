@@ -1737,3 +1737,88 @@ in the desktop's settings, and a user who has just created a desktop is exactly
 the user who wants them. The dialogue now carries an "Open settings" switch,
 and the sidebar opens the settings as soon as the new desktop appears in the
 list.
+
+---
+
+## 18. Milestone 10: the interface catches up
+
+Five changes, all from watching the application be used rather than tested.
+
+### 18.1 A name is checked as it is typed
+
+Creating a desktop with a name already in use failed after the Create button
+was pressed, and an `AdwAlertDialog` closes on any response, so the whole
+dialogue went with it. The user then had to reopen it and set everything
+again. The development host ended up with `fedora22` and `fedora23` as
+evidence.
+
+`cabin_core::check_name` now decides, and the dialogue calls it on every
+keystroke. Create is insensitive while the name is unusable, and the reason
+appears under the field. Nothing is rejected after the fact.
+
+The name is not only a label. Podman uses it as the container name and Cabin
+builds the volume names from it, so the rules are Podman's: it must start with
+an alphanumeric character, and may then hold alphanumerics, underscore, dot and
+dash. A name that differs from an existing one only in case is refused as well.
+Podman would accept both, and the sidebar would then show two rows nobody could
+tell apart.
+
+The dialogue also opens on a name that is free, adding a number if it has to,
+so the common case needs no typing at all.
+
+### 18.2 Applying and running are separate questions
+
+Settings had one button, "Apply and Restart". A desktop that is not running had
+no reason to be started just because its shared folders changed.
+
+There are now two: **Apply**, and **Apply and Start** or **Apply and Restart**
+depending on what the desktop is doing. Apply recreates the container and
+leaves it stopped.
+
+Every setting in the dialogue needs the container recreated, because Podman
+fixes a container's configuration when it is created and Cabin keeps that
+configuration in its labels. There is no way to save these and keep running,
+and the dialogue says so rather than implying a lighter kind of save exists.
+
+When nothing has changed, the run button still means something, so it starts or
+restarts what is already there. Only a running desktop is asked to confirm,
+since only a running desktop loses anything.
+
+### 18.3 A share is set up when it is added
+
+Choosing a folder added it with defaults, and the options were behind the row's
+expander. The location is the field most likely to need changing, and it was
+the least visible.
+
+Adding a share now asks: location, writable, and the SELinux relabel, with the
+single file warning where it applies. The same options stay on the row
+afterwards, so nothing here is a decision that cannot be revisited. The
+location is checked as it is typed, for the same reason as the name in 18.1.
+
+### 18.4 The desktop list can be put away
+
+The layout was an `AdwNavigationSplitView`, which treats the sidebar as a place
+to navigate back to. The desktop list is not that. It is something to hide when
+the desktop needs the room.
+
+It is now an `AdwOverlaySplitView` with a toggle in the pane's header bar. The
+binding is two way, so a collapse the split view decides for itself on a narrow
+window still leaves the button showing the truth. The state is saved with the
+window geometry.
+
+### 18.5 A fixed resolution can bring the window with it
+
+Choosing a resolution larger than the pane letterboxes it. The desktop gets
+smaller rather than larger, which reads as the setting having done nothing.
+
+The display menu now offers "Resize window to match". The chrome is measured
+rather than assumed, because it depends on the header bar and on whether the
+desktop list is showing. Three details matter:
+
+- A maximised or fullscreen window ignores a size request, so those states are
+  left first. Without that the setting silently does nothing.
+- A window larger than the screen cannot be shown, so the request is clamped to
+  the monitor and the pane scales for the remainder. This is reported rather
+  than left to look like a fault.
+- Turning the option on acts at once when a fixed resolution is already
+  chosen, rather than waiting for the user to pick the same one again.

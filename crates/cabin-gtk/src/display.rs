@@ -141,6 +141,11 @@ impl CabinDisplay {
         self.request_guest_resize(width, height);
     }
 
+    /// The fixed resolution in force, if the pane is not following the window.
+    pub fn fixed_resolution(&self) -> Option<(u32, u32)> {
+        self.imp().fixed_size.get()
+    }
+
     pub fn guest_size(&self) -> (u32, u32) {
         self.imp().guest_size.get()
     }

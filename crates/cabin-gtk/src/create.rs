@@ -20,6 +20,7 @@ const PORT_RANGE: std::ops::Range<u16> = 13389..13500;
 pub fn present(
     parent: &impl IsA<gtk::Widget>,
     podman: Arc<Podman>,
+    taken: Vec<String>,
     on_created: impl Fn(String, bool) + 'static,
 ) {
     // connect_response can fire more than once over the dialogue's life, so
@@ -30,10 +31,10 @@ pub fn present(
         .body("A new desktop runs its own Fedora GNOME session.")
         .build();
 
-    let name_row = adw::EntryRow::builder()
-        .title("Name")
-        .text("fedora")
-        .build();
+    let name_row = adw::EntryRow::builder().title("Name").build();
+    // A name that is free, so the dialogue opens ready to use rather than
+    // opening with an error against a name the user did not choose.
+    name_row.set_text(&first_free_name("fedora", &taken));
 
     let memory_row = adw::SpinRow::with_range(1024.0, 65536.0, 1024.0);
     memory_row.set_title("Memory");
@@ -75,16 +76,34 @@ pub fn present(
     dialog.set_default_response(Some("create"));
     dialog.set_close_response("cancel");
 
+    // Check the name as it is typed rather than when Create is pressed.
+    // An AdwAlertDialog closes on any response, so a name rejected at that
+    // point costs the user the whole dialogue and everything else they set.
+    let dialog_for_name = dialog.clone();
+    let group_for_name = group.clone();
+    let check = move |entry: &adw::EntryRow| match cabin_core::check_name(&entry.text(), &taken) {
+        Ok(()) => {
+            entry.remove_css_class("error");
+            group_for_name.set_description(None);
+            dialog_for_name.set_response_enabled("create", true);
+        }
+        Err(why) => {
+            entry.add_css_class("error");
+            group_for_name.set_description(Some(&why));
+            dialog_for_name.set_response_enabled("create", false);
+        }
+    };
+    name_row.connect_changed(check.clone());
+    check(&name_row);
+
     let default_image = crate::state::State::new(crate::APP_ID).default_image();
     let parent_widget = parent.as_ref().clone();
     dialog.connect_response(None, move |dialog, response| {
         if response != "create" {
             return;
         }
+        // Create is only enabled for a name that passed the check above.
         let name = name_row.text().trim().to_string();
-        if name.is_empty() {
-            return;
-        }
 
         let mut config = DesktopConfig::new(&name);
         config.image = default_image.clone();
@@ -137,6 +156,20 @@ fn show_error(parent: &gtk::Widget, message: &str) {
     dialog.present(Some(parent));
 }
 
+/// Suggests a name that is not in use, by adding a number if it has to.
+fn first_free_name(base: &str, taken: &[String]) -> String {
+    if !taken.iter().any(|t| t.eq_ignore_ascii_case(base)) {
+        return base.to_string();
+    }
+    for suffix in 2..100 {
+        let candidate = format!("{base}-{suffix}");
+        if !taken.iter().any(|t| t.eq_ignore_ascii_case(&candidate)) {
+            return candidate;
+        }
+    }
+    base.to_string()
+}
+
 /// Finds a free TCP port by asking the kernel to bind one.
 ///
 /// This races with anything else that binds in the gap before Podman
@@ -170,6 +203,26 @@ fn generate_password() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suggests_the_plain_name_when_it_is_free() {
+        assert_eq!(first_free_name("fedora", &[]), "fedora");
+    }
+
+    #[test]
+    fn suggests_a_numbered_name_when_the_plain_one_is_taken() {
+        let taken = vec!["fedora".to_string(), "fedora-2".to_string()];
+        assert_eq!(first_free_name("fedora", &taken), "fedora-3");
+    }
+
+    #[test]
+    fn the_suggestion_is_always_a_valid_name() {
+        let taken: Vec<String> = (2..20).map(|n| format!("fedora-{n}")).collect();
+        let mut all = vec!["fedora".to_string()];
+        all.extend(taken);
+        let suggested = first_free_name("fedora", &all);
+        assert!(cabin_core::check_name(&suggested, &all).is_ok());
+    }
 
     #[test]
     fn passwords_are_long_and_differ() {

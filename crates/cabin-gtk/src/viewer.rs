@@ -30,7 +30,11 @@ struct Shown {
 
 /// The viewer pane and everything it is showing.
 pub struct Viewer {
-    pub page: adw::NavigationPage,
+    /// The pane itself, for the split view to hold.
+    pub content: adw::ToolbarView,
+    /// Shows and hides the desktop list. The window binds it to the split
+    /// view, so the pane does not need to know how the window is laid out.
+    pub sidebar_toggle: gtk::ToggleButton,
     display: CabinDisplay,
     stack: gtk::Stack,
     placeholder: adw::StatusPage,
@@ -80,10 +84,12 @@ impl Viewer {
         toolbar.add_top_bar(&header);
         toolbar.set_content(Some(&stack));
 
-        let page = adw::NavigationPage::builder()
-            .title("Desktop")
-            .child(&toolbar)
+        let sidebar_toggle = gtk::ToggleButton::builder()
+            .icon_name("sidebar-show-symbolic")
+            .tooltip_text("Show the desktop list")
+            .active(true)
             .build();
+        header.pack_start(&sidebar_toggle);
 
         let settings_button = gtk::Button::builder()
             .icon_name("emblem-system-symbolic")
@@ -92,7 +98,8 @@ impl Viewer {
             .build();
 
         let viewer = Rc::new(Self {
-            page,
+            content: toolbar,
+            sidebar_toggle,
             display,
             stack,
             placeholder,
@@ -146,6 +153,17 @@ impl Viewer {
             .margin_end(8)
             .build();
 
+        let state = crate::state::State::new(crate::APP_ID);
+
+        // Choosing a resolution larger than the pane letterboxes it, which
+        // makes the desktop smaller rather than larger and reads as the
+        // setting having done nothing. Offer to bring the window with it.
+        let match_window = gtk::CheckButton::with_label("Resize window to match");
+        match_window.set_active(state.resize_window_to_resolution());
+        match_window.set_tooltip_text(Some(
+            "Make the Cabin window the size it needs to show the resolution without scaling.",
+        ));
+
         let fit = gtk::CheckButton::with_label("Fit to window");
         fit.set_active(true);
         box_.append(&fit);
@@ -155,13 +173,33 @@ impl Viewer {
             let button = gtk::CheckButton::with_label(&format!("{width} x {height}"));
             button.set_group(Some(&fit));
             let display = self.display.clone();
+            let match_window = match_window.clone();
             button.connect_toggled(move |b| {
-                if b.is_active() {
-                    display.set_fixed_resolution(width, height);
+                if !b.is_active() {
+                    return;
+                }
+                display.set_fixed_resolution(width, height);
+                if match_window.is_active() {
+                    resize_window_for(&display, width, height);
                 }
             });
             box_.append(&button);
         }
+
+        box_.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        box_.append(&match_window);
+
+        let display_for_match = self.display.clone();
+        match_window.connect_toggled(move |b| {
+            crate::state::State::new(crate::APP_ID).set_resize_window_to_resolution(b.is_active());
+            // Act on it at once when a fixed resolution is already chosen,
+            // rather than waiting for the user to pick the same one again.
+            if b.is_active() {
+                if let Some((width, height)) = display_for_match.fixed_resolution() {
+                    resize_window_for(&display_for_match, width, height);
+                }
+            }
+        });
 
         let display = self.display.clone();
         fit.connect_toggled(move |b| {
@@ -487,4 +525,49 @@ fn fullscreen_button() -> gtk::Button {
         }
     });
     button
+}
+
+/// Resizes the window so the pane is exactly `width` by `height`.
+///
+/// The difference between the window and the pane is measured rather than
+/// assumed, because it depends on the header bar, whether the desktop list is
+/// showing, and how wide it is.
+fn resize_window_for(display: &CabinDisplay, width: u32, height: u32) {
+    let Some(window) = display.root().and_downcast::<gtk::Window>() else {
+        return;
+    };
+    if display.width() <= 0 || display.height() <= 0 {
+        // Not laid out yet, so there is no chrome to measure.
+        return;
+    }
+
+    let chrome_w = window.width() - display.width();
+    let chrome_h = window.height() - display.height();
+    let mut wanted_w = width as i32 + chrome_w;
+    let mut wanted_h = height as i32 + chrome_h;
+
+    // A window larger than the screen cannot be shown, and asking for one
+    // leaves it wedged against the edges at a size nobody chose.
+    if let Some((max_w, max_h)) = work_area(&window) {
+        wanted_w = wanted_w.min(max_w);
+        wanted_h = wanted_h.min(max_h);
+        if wanted_w < width as i32 + chrome_w || wanted_h < height as i32 + chrome_h {
+            tracing::info!("{width}x{height} does not fit this screen, so the pane will scale");
+        }
+    }
+
+    // A maximised or fullscreen window ignores a size request, so leave those
+    // states first. Otherwise the setting silently does nothing.
+    window.unfullscreen();
+    window.unmaximize();
+    window.set_default_size(wanted_w, wanted_h);
+}
+
+/// The usable area of the monitor the window is on.
+fn work_area(window: &gtk::Window) -> Option<(i32, i32)> {
+    let surface = window.surface()?;
+    let display = WidgetExt::display(window);
+    let monitor = display.monitor_at_surface(&surface)?;
+    let area = monitor.geometry();
+    Some((area.width(), area.height()))
 }

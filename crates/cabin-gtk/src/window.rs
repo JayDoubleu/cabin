@@ -27,7 +27,10 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         gtk::glib::Propagation::Proceed
     });
 
-    let split = adw::NavigationSplitView::builder()
+    // An overlay split view rather than a navigation one, because the desktop
+    // list is something to hide when the desktop needs the room, not a place
+    // to navigate back to.
+    let split = adw::OverlaySplitView::builder()
         .min_sidebar_width(220.0)
         .max_sidebar_width(320.0)
         .build();
@@ -37,12 +40,10 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     let viewer = Viewer::new();
 
     let sidebar_toolbar = adw::ToolbarView::new();
-    sidebar_toolbar.add_top_bar(&adw::HeaderBar::new());
+    let sidebar_header = adw::HeaderBar::new();
+    sidebar_header.set_title_widget(Some(&adw::WindowTitle::new("Cabin", "")));
+    sidebar_toolbar.add_top_bar(&sidebar_header);
     sidebar_toolbar.set_content(Some(&sidebar.widget));
-    let sidebar_page = adw::NavigationPage::builder()
-        .title("Cabin")
-        .child(&sidebar_toolbar)
-        .build();
 
     // The pane asks for a desktop to be opened, which needs its password, and
     // only the window holds the Podman handle.
@@ -98,9 +99,37 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         viewer_for_list.reconcile(desktops);
     });
 
-    split.set_sidebar(Some(&sidebar_page));
-    split.set_content(Some(&viewer.page));
+    split.set_sidebar(Some(&sidebar_toolbar));
+    split.set_content(Some(&viewer.content));
     window.set_content(Some(&split));
+
+    // The toggle lives in the pane's header bar, and the split view follows
+    // it. Two way, so a collapse that the split view decides for itself, on a
+    // narrow window, still leaves the button showing the truth.
+    viewer
+        .sidebar_toggle
+        .bind_property("active", &split, "show-sidebar")
+        .bidirectional()
+        .sync_create()
+        .build();
+    let toggle_for_tooltip = viewer.sidebar_toggle.clone();
+    viewer.sidebar_toggle.connect_active_notify(move |button| {
+        button.set_tooltip_text(Some(if button.is_active() {
+            "Hide the desktop list"
+        } else {
+            "Show the desktop list"
+        }));
+        let _ = &toggle_for_tooltip;
+    });
+    viewer.sidebar_toggle.set_active(state.sidebar_visible());
+
+    // Saved with the window geometry, so the layout is where it was left.
+    let state_for_sidebar = state.clone();
+    let toggle_for_close = viewer.sidebar_toggle.clone();
+    window.connect_close_request(move |_| {
+        state_for_sidebar.set_sidebar_visible(toggle_for_close.is_active());
+        gtk::glib::Propagation::Proceed
+    });
 
     // Podman is reachable or it is not. Tell the user at start-up rather
     // than failing later with a less obvious message.

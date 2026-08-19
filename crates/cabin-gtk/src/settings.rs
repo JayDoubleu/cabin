@@ -14,6 +14,19 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// Why a single file share can stop following the original.
+///
+/// A bind mount of one file follows the inode. Most editors write a new file
+/// and rename it over the old one, which leaves the desktop looking at the
+/// file that was replaced.
+const FILE_SHARE_WARNING: &str =
+    "A shared file is bound by itself. Most editors replace a file rather than \
+     change it, and the desktop keeps seeing the original. Share the folder \
+     instead if you plan to edit it.";
+
+/// How long to let a guest shut down before Podman kills it.
+const STOP_TIMEOUT_SECS: u32 = 20;
+
 /// The socket options, in the order they appear, safest first.
 ///
 /// `SocketPolicy::Nested` is deliberately absent. Rootless Podman inside a
@@ -58,38 +71,117 @@ pub fn present(
     page.add(&build_remote_group(parent, config.clone()));
     dialog.add(&page);
 
-    // Applying recreates the container, so it is an explicit action rather
-    // than something that happens as each row changes.
+    // Everything in this dialogue needs the container recreated, so applying
+    // is an explicit action rather than something that happens as each row
+    // changes. Two actions, because applying and running are separate
+    // questions: a desktop can be reconfigured without being started.
+    let running = desktop.state.is_running();
+
     let apply = gtk::Button::builder()
-        .label("Apply and Restart")
+        .label("Apply")
+        .tooltip_text(if running {
+            "Apply the changes and leave the desktop stopped"
+        } else {
+            "Apply the changes without starting the desktop"
+        })
+        .css_classes(vec!["pill"])
+        .build();
+    let apply_and_run = gtk::Button::builder()
+        .label(if running {
+            "Apply and Restart"
+        } else {
+            "Apply and Start"
+        })
         .css_classes(vec!["suggested-action", "pill"])
-        .margin_top(12)
-        .halign(gtk::Align::Center)
         .build();
 
-    let group = adw::PreferencesGroup::new();
-    group.add(&apply);
+    let buttons = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .halign(gtk::Align::Center)
+        .margin_top(12)
+        .build();
+    buttons.append(&apply);
+    buttons.append(&apply_and_run);
+
+    let group = adw::PreferencesGroup::builder()
+        .description(if running {
+            // Say it plainly. Podman fixes a container's configuration when it
+            // is created, so there is no way to save these and keep running.
+            "These settings are part of the container, so applying them builds \
+             it again. Anything open in the desktop will close, and your files \
+             are kept."
+        } else {
+            "Applying builds the desktop again. Your files are kept."
+        })
+        .build();
+    group.add(&buttons);
     page.add(&group);
 
-    let parent_widget = parent.as_ref().clone();
-    let dialog_ref = dialog.clone();
-    apply.connect_clicked(move |_| {
-        let updated = config.borrow().clone();
-        if !desktop.config.needs_recreate(&updated) {
-            dialog_ref.close();
-            return;
-        }
-        confirm_and_apply(
-            &parent_widget,
-            podman.clone(),
-            desktop.clone(),
-            updated,
-            on_applied.clone(),
-            dialog_ref.clone(),
-        );
-    });
+    for (button, start_after) in [(&apply, false), (&apply_and_run, true)] {
+        let parent_widget = parent.as_ref().clone();
+        let dialog_ref = dialog.clone();
+        let podman = podman.clone();
+        let on_applied = on_applied.clone();
+        let desktop = desktop.clone();
+        let config = config.clone();
+        button.connect_clicked(move |_| {
+            let updated = config.borrow().clone();
+            if !desktop.config.needs_recreate(&updated) {
+                // Nothing to apply. The run action still means something, so
+                // it starts or restarts what is already there.
+                if start_after {
+                    run_only(
+                        &parent_widget,
+                        podman.clone(),
+                        desktop.clone(),
+                        on_applied.clone(),
+                    );
+                }
+                dialog_ref.close();
+                return;
+            }
+            confirm_and_apply(
+                &parent_widget,
+                podman.clone(),
+                desktop.clone(),
+                updated,
+                start_after,
+                on_applied.clone(),
+                dialog_ref.clone(),
+            );
+        });
+    }
 
     dialog.present(Some(parent));
+}
+
+/// Starts or restarts a desktop whose settings did not change.
+fn run_only(parent: &gtk::Widget, podman: Arc<Podman>, desktop: Desktop, on_applied: Rc<dyn Fn()>) {
+    let parent = parent.clone();
+    let id = desktop.id.clone();
+    let name = desktop.name.clone();
+    let running = desktop.state.is_running();
+    runtime::spawn(
+        async move {
+            if running {
+                podman.restart(&id, STOP_TIMEOUT_SECS).await
+            } else {
+                podman.start_desktop(&id, &name).await
+            }
+        },
+        move |result| {
+            if let Err(e) = result {
+                let error = adw::AlertDialog::builder()
+                    .heading("The desktop did not start")
+                    .body(e.to_string())
+                    .build();
+                error.add_response("close", "Close");
+                error.present(Some(&parent));
+            }
+            on_applied();
+        },
+    );
 }
 
 fn build_mounts_group(
@@ -168,19 +260,25 @@ fn add_button(
         let rebuild = rebuild.clone();
         let window = parent_widget.root().and_downcast::<gtk::Window>();
 
+        let parent_for_options = parent_widget.clone();
         let chosen = move |result: Result<gtk::gio::File, gtk::glib::Error>| {
             let Ok(file) = result else { return };
             let Some(path) = file.path() else { return };
             let host_path = path.to_string_lossy().into_owned();
-            let guest_path = Mount::suggest_guest_path(&host_path);
-            config.borrow_mut().mounts.push(Mount {
-                host_path,
-                guest_path,
-                mode: MountMode::ReadOnly,
-                relabel: true,
-                kind,
-            });
-            rebuild();
+            // Ask for the options now rather than adding a share with
+            // defaults the user then has to go and find.
+            present_mount_options(
+                &parent_for_options,
+                Mount {
+                    guest_path: Mount::suggest_guest_path(&host_path),
+                    host_path,
+                    mode: MountMode::ReadOnly,
+                    relabel: true,
+                    kind,
+                },
+                config.clone(),
+                rebuild.clone(),
+            );
         };
 
         match kind {
@@ -191,6 +289,102 @@ fn add_button(
         }
     });
     button
+}
+
+/// Asks for a new share's options before it is added.
+///
+/// The same options are on the row afterwards, so nothing here is a one time
+/// decision. Asking now means the common case, a share that needs a location
+/// other than the suggested one, is done in one pass.
+fn present_mount_options(
+    parent: &gtk::Widget,
+    mount: Mount,
+    config: Rc<RefCell<DesktopConfig>>,
+    rebuild: Rc<impl Fn() + 'static>,
+) {
+    let dialog = adw::AlertDialog::builder()
+        .heading(match mount.kind {
+            MountKind::Directory => "Share This Folder",
+            MountKind::File => "Share This File",
+        })
+        .body(&mount.host_path)
+        .build();
+
+    let group = adw::PreferencesGroup::new();
+
+    let location = adw::EntryRow::builder()
+        .title("Location inside the desktop")
+        .text(&mount.guest_path)
+        .build();
+    group.add(&location);
+
+    let writable = adw::SwitchRow::builder()
+        .title("Writable")
+        .subtitle("Let the desktop change what is shared.")
+        .active(mount.mode == MountMode::ReadWrite)
+        .build();
+    group.add(&writable);
+
+    let relabel = adw::SwitchRow::builder()
+        .title("Adjust security labels")
+        .subtitle("Fedora needs this. Turn it off only for a path already shared with containers.")
+        .active(mount.relabel)
+        .build();
+    group.add(&relabel);
+
+    if mount.kind == MountKind::File {
+        let note = adw::ActionRow::builder()
+            .title("Editing on this computer may not show up")
+            .subtitle(FILE_SHARE_WARNING)
+            .css_classes(vec!["warning"])
+            .build();
+        note.set_subtitle_lines(0);
+        group.add(&note);
+    }
+
+    dialog.set_extra_child(Some(&group));
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("add", "Share");
+    dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("add"));
+    dialog.set_close_response("cancel");
+
+    // The location has to be usable before the share can be added, and an
+    // AlertDialog closes on any response, so it is checked as it is typed.
+    let dialog_for_check = dialog.clone();
+    let group_for_check = group.clone();
+    let check = move |entry: &adw::EntryRow| match Mount::check_guest_path(&entry.text()) {
+        Ok(()) => {
+            entry.remove_css_class("error");
+            group_for_check.set_description(None);
+            dialog_for_check.set_response_enabled("add", true);
+        }
+        Err(why) => {
+            entry.add_css_class("error");
+            group_for_check.set_description(Some(why));
+            dialog_for_check.set_response_enabled("add", false);
+        }
+    };
+    location.connect_changed(check.clone());
+    check(&location);
+
+    dialog.connect_response(None, move |_, response| {
+        if response != "add" {
+            return;
+        }
+        let mut mount = mount.clone();
+        mount.guest_path = location.text().trim().to_string();
+        mount.mode = if writable.is_active() {
+            MountMode::ReadWrite
+        } else {
+            MountMode::ReadOnly
+        };
+        mount.relabel = relabel.is_active();
+        config.borrow_mut().mounts.push(mount);
+        rebuild();
+    });
+
+    dialog.present(Some(parent));
 }
 
 fn refresh_mount_rows(list: &gtk::ListBox, config: Rc<RefCell<DesktopConfig>>) {
@@ -300,11 +494,7 @@ fn build_mount_row(
         // following the original with no sign that anything is wrong.
         let note = adw::ActionRow::builder()
             .title("Editing on this computer may not show up")
-            .subtitle(
-                "A shared file is bound by itself. Most editors replace a file \
-                 rather than change it, and the desktop keeps seeing the \
-                 original. Share the folder instead if you plan to edit it.",
-            )
+            .subtitle(FILE_SHARE_WARNING)
             .css_classes(vec!["warning"])
             .build();
         note.set_subtitle_lines(0);
@@ -641,9 +831,24 @@ fn confirm_and_apply(
     podman: Arc<Podman>,
     desktop: Desktop,
     updated: DesktopConfig,
+    start_after: bool,
     on_applied: Rc<dyn Fn()>,
     settings_dialog: adw::PreferencesDialog,
 ) {
+    // Only a running desktop loses anything, so only a running desktop asks.
+    if !desktop.state.is_running() {
+        apply_now(
+            parent,
+            podman,
+            desktop,
+            updated,
+            start_after,
+            on_applied,
+            settings_dialog,
+        );
+        return;
+    }
+
     let dialog = adw::AlertDialog::builder()
         .heading("Restart the desktop?")
         .body(
@@ -652,7 +857,14 @@ fn confirm_and_apply(
         )
         .build();
     dialog.add_response("cancel", "Cancel");
-    dialog.add_response("apply", "Apply and Restart");
+    dialog.add_response(
+        "apply",
+        if start_after {
+            "Apply and Restart"
+        } else {
+            "Apply and Stop"
+        },
+    );
     dialog.set_response_appearance("apply", adw::ResponseAppearance::Destructive);
 
     let parent_for_closure = parent.clone();
@@ -664,30 +876,53 @@ fn confirm_and_apply(
         let desktop = desktop.clone();
         let updated = updated.clone();
         let on_applied = on_applied.clone();
-        let nodes = graphics::render_nodes();
-        let interfaces = crate::network::interfaces();
         let parent = parent_for_closure.clone();
         let settings_dialog = settings_dialog.clone();
 
-        runtime::spawn(
-            async move { recreate(podman, desktop, updated, nodes, interfaces).await },
-            move |result| match result {
-                Ok(()) => {
-                    settings_dialog.close();
-                    on_applied();
-                }
-                Err(message) => {
-                    let error = adw::AlertDialog::builder()
-                        .heading("Could not apply the changes")
-                        .body(message)
-                        .build();
-                    error.add_response("close", "Close");
-                    error.present(Some(&parent));
-                }
-            },
+        apply_now(
+            &parent,
+            podman,
+            desktop,
+            updated,
+            start_after,
+            on_applied,
+            settings_dialog,
         );
     });
     dialog.present(Some(parent));
+}
+
+/// Recreates the desktop, and starts it when asked to.
+fn apply_now(
+    parent: &gtk::Widget,
+    podman: Arc<Podman>,
+    desktop: Desktop,
+    updated: DesktopConfig,
+    start_after: bool,
+    on_applied: Rc<dyn Fn()>,
+    settings_dialog: adw::PreferencesDialog,
+) {
+    let nodes = graphics::render_nodes();
+    let interfaces = crate::network::interfaces();
+    let parent = parent.clone();
+
+    runtime::spawn(
+        async move { recreate(podman, desktop, updated, nodes, interfaces, start_after).await },
+        move |result| match result {
+            Ok(()) => {
+                settings_dialog.close();
+                on_applied();
+            }
+            Err(message) => {
+                let error = adw::AlertDialog::builder()
+                    .heading("Could not apply the changes")
+                    .body(message)
+                    .build();
+                error.add_response("close", "Close");
+                error.present(Some(&parent));
+            }
+        },
+    );
 }
 
 /// Stops, removes and recreates a desktop with a new configuration.
@@ -699,6 +934,7 @@ async fn recreate(
     updated: DesktopConfig,
     nodes: Vec<(String, String)>,
     interfaces: Vec<cabin_core::NetInterface>,
+    start_after: bool,
 ) -> Result<(), String> {
     let password = podman
         .desktop_password(&desktop.id)
@@ -707,7 +943,7 @@ async fn recreate(
     let port = desktop.rdp_port.unwrap_or(13389);
     if desktop.state.is_running() {
         podman
-            .stop(&desktop.id, 20)
+            .stop(&desktop.id, STOP_TIMEOUT_SECS)
             .await
             .map_err(|e| format!("could not stop the desktop: {e}"))?;
     }
@@ -720,6 +956,9 @@ async fn recreate(
         .create_desktop(&updated, port, &nodes, &interfaces, &password)
         .await
         .map_err(|e| format!("could not recreate the desktop: {e}"))?;
+    if !start_after {
+        return Ok(());
+    }
     podman
         .start_desktop(&id, &updated.name)
         .await
