@@ -62,7 +62,7 @@ COPY systemd/system/ /etc/systemd/system/
 COPY systemd/user/ /etc/systemd/user/
 
 RUN chmod +x /usr/libexec/cabin/* \
-    && systemctl enable cabin-firstboot.service \
+    && systemctl enable cabin-prepare.service \
     && systemctl --global enable cabin-session.target
 
 ENV CABIN_WIDTH=1920 \

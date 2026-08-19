@@ -5,9 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+ironrdp = { version = "0.17.0", features = ["connector", "session", "graphics", "dvc", "displaycontrol", "svc", "input"] }
+ironrdp-async = "0.10.0"
+ironrdp-tls = { version = "0.2.2", features = ["rustls"] }
+ironrdp-tokio = "0.10.0"
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+tracing-subscriber = { workspace = true }

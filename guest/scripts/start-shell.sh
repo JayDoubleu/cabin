@@ -1,7 +1,14 @@
 #!/usr/bin/bash
-# Runs GNOME Shell on the headless mutter backend. The virtual monitor size is
-# only the starting size: an RDP client that supports the Display Control
-# channel resizes it after it connects.
+# Runs GNOME Shell on the headless mutter backend.
+#
+# By default no virtual monitor is requested here. gnome-remote-desktop creates
+# one for the RDP session, and that monitor is the one the client sees. If the
+# shell also creates its own, that one becomes the primary, the top bar and new
+# windows go to it, and the client is shown an empty second screen. See
+# DESIGN.md section 14.
+#
+# Set CABIN_SHELL_MONITOR to a size such as 1920x1080 to restore the old
+# behaviour for debugging.
 set -euo pipefail
 
 export XDG_SESSION_TYPE=wayland
@@ -15,6 +22,7 @@ if [ ! -e /dev/dri/renderD128 ]; then
     export GALLIUM_DRIVER=llvmpipe
 fi
 
-exec /usr/bin/gnome-shell \
-    --headless \
-    --virtual-monitor "${CABIN_WIDTH}x${CABIN_HEIGHT}"
+if [ -n "${CABIN_SHELL_MONITOR:-}" ]; then
+    exec /usr/bin/gnome-shell --headless --virtual-monitor "${CABIN_SHELL_MONITOR}"
+fi
+exec /usr/bin/gnome-shell --headless

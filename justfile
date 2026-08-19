@@ -43,9 +43,14 @@ guest:
 # Start a throwaway guest and report whether RDP came up.
 guest-test password="testpass" port="13389":
     -{{podman}} rm -f cabin-test
+    @# /dev/fuse is not optional. gnome-remote-desktop mounts a FUSE
+    @# filesystem for clipboard redirection as soon as a client advertises
+    @# the cliprdr channel. Without the device the mount fails and the daemon
+    @# calls abort(), which drops the connection. See DESIGN.md section 14.
     {{podman}} run -d --name cabin-test --systemd=always \
         --publish 127.0.0.1:{{port}}:3389 \
         --env CABIN_PASSWORD={{password}} \
+        --device /dev/fuse \
         --memory 4g --shm-size 512m \
         {{guest_image}}
     @echo "Waiting for the desktop session and the RDP port ..."

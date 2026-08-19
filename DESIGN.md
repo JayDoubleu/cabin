@@ -253,6 +253,11 @@ This is the only part with no ready-made component. It deserves the most care.
 
 ### 6.1 Stack choice
 
+> **Superseded by section 14.** IronRDP cannot connect to
+> `gnome-remote-desktop`, which requires the MS-RDPEGFX graphics pipeline that
+> no published IronRDP crate implements. Read section 14 before acting on this
+> section.
+
 Cabin uses **IronRDP**, the pure-Rust RDP client library from Devolutions. It
 handles the protocol, the security layer, bitmap codecs, the clipboard channel,
 and the Display Control channel.
@@ -479,7 +484,7 @@ just guest          # build the guest image
 | 1 | Guest image serves a GNOME desktop over RDP | The whole idea works | Done, see section 12 |
 | 2 | Flatpak shell with sidebar and stubbed data | Packaging and UI skeleton | Done |
 | 3 | Podman client: list, start, stop, event stream | Real state in the sidebar | Done, see section 13 |
-| 4 | `CabinDisplay` shows guest frames, read-only | The hardest component | Next |
+| 4 | `CabinDisplay` shows guest frames, read-only | The hardest component | **Blocked, see section 14** |
 | 5 | Keyboard and pointer input | Usable desktop |
 | 6 | Fit-to-window and fixed resolutions | The headline feature |
 | 7 | Create, delete, mounts, GPU and socket settings | Feature complete |
@@ -500,9 +505,10 @@ and it needs no Rust at all.
    credentials in a file instead.
 3. **Is a whole-texture upload per frame fast enough at 4K?** Measure before
    optimising. Section 6.2 has the fallback.
-4. **How well does IronRDP interoperate with `gnome-remote-desktop`?** Both
-   implement the same standard, but codec negotiation is where RDP
-   implementations usually disagree. Test early, in milestone 4.
+4. ~~**How well does IronRDP interoperate with `gnome-remote-desktop`?**~~
+   Answered in section 14. CredSSP interoperates. The graphics pipeline does
+   not exist in IronRDP, and the guest requires it, so the connection is
+   refused. Section 6.1 is superseded.
 5. **`polkit.service` does not start in the guest.** Section 12.3 records the
    investigation. GNOME Shell and RDP both work without it. The effect is that
    privileged actions in Settings will refuse. This is open.
@@ -676,3 +682,173 @@ environment variable, so `podman inspect` reveals it. That is the same exposure
 the guest already has, so it adds no new risk, but it is not where the password
 belongs. Section 8 states the intent: the host keyring, through the Secret
 portal. This is still to do.
+
+---
+
+## 14. Milestone 4 investigation: the RDP client stack
+
+This section revises section 6.1. **The recommendation there is wrong for this
+server.** IronRDP cannot connect to `gnome-remote-desktop`, and the reason is
+structural rather than a bug we can work around.
+
+The work below was done against a real guest, and every claim here is from an
+observed run rather than from reading documentation.
+
+### 14.1 What works
+
+CredSSP interoperates correctly. This was the risk called out in open question
+4, and it is settled:
+
+| Test | Result |
+|---|---|
+| Correct password | Passes authentication, reaches licensing |
+| Wrong password | Rejected at the CredSSP stage |
+
+An external FreeRDP client agrees: a wrong password gives
+`ERRCONNECT_LOGON_FAILURE`, and the guest logs
+`transport_accept_nla: client authentication failure`.
+
+### 14.2 Blocker: gnome-remote-desktop requires the Graphics Pipeline
+
+The guest closes the connection with:
+
+```
+[RDP] Client did not advertise support for the Graphics Pipeline, closing connection
+```
+
+The requirement is hard-coded. The daemon binary carries a list of demands and
+no setting relaxes any of them:
+
+- the Graphics Pipeline, MS-RDPEGFX
+- the DRDYNVC dynamic channel
+- desktop resizing
+- 32-bit colour depth
+- fastpath output
+- a pointer cache
+
+**No published IronRDP crate implements MS-RDPEGFX.** Searching every fetched
+crate for the channel name `Microsoft::Windows::RDS::Graphics` returns nothing.
+`ironrdp-session` handles legacy fastpath bitmaps and RemoteFX, and there is no
+graphics pipeline layer above them.
+
+So the client is refused before any pixel is sent. This is not a defect to fix
+in Cabin. It is a missing feature in the library.
+
+Note that the RemoteFX Progressive codec itself does exist, at
+`ironrdp-pdu/src/codecs/rfx/progressive.rs`. The codec is present; the channel
+that carries it is not.
+
+### 14.3 Second finding: IronRDP advertises a capability it does not implement
+
+Before reaching the blocker, the connection deadlocked for a different reason.
+It is worth recording, because it is a genuine IronRDP bug and it will affect
+anyone using the library against a FreeRDP-based server.
+
+`ironrdp-connector` sets `SUPPORT_NET_CHAR_AUTODETECT` in the client early
+capability flags unconditionally, with no way to turn it off. The server takes
+that at its word and begins connect-time network auto-detection, which includes
+a bandwidth measurement. A diagnostic build showed what then happens:
+
+```
+autodetect phase, input len=25,    message_channel_id=Some(1004), io_channel_id=1003
+  decoded as SendDataIndication on channel 1004
+autodetect phase, input len=16347, message_channel_id=Some(1004), io_channel_id=1003
+  decoded as SendDataIndication on channel 1004
+```
+
+The 16347 byte PDU is the bandwidth measurement payload. It arrives on the
+message channel, and `ironrdp-connector` ignores anything on that channel that
+is not an auto-detect request it recognises, then keeps waiting. The server
+waits for a result that never comes. Both sides block, and the connection hangs
+until it times out, roughly 200 seconds later.
+
+Removing that one flag fixes the deadlock. The connection then proceeds
+immediately, and the next PDU correctly arrives on the I/O channel:
+
+```
+autodetect phase, input len=35, message_channel_id=Some(1004), io_channel_id=1003
+  decoded as SendDataIndication on channel 1003
+```
+
+Dropping the flag is safe. The guest treats auto-detection as optional and says
+so: "Client does not support autodetecting network characteristics (RTT
+detection, Bandwidth measurement). High latency connections will suffer!"
+
+Both findings are worth reporting upstream. Neither is worked around in the
+tree, because the blocker in 14.2 makes the point moot for now.
+
+### 14.4 The options
+
+| Option | Cost | Notes |
+|---|---|---|
+| **FreeRDP through FFI** | C FFI, and a build dependency | Proven to work against this exact guest. Implements the graphics pipeline, dynamic resize, and clipboard already. |
+| **Implement MS-RDPEGFX on IronRDP** | Large | The channel protocol, surface and cache management, and capability negotiation. The RemoteFX Progressive codec already exists, so decoding is not the whole job. Best done as an upstream contribution. |
+| **Use a different guest server** | Loses GNOME | A server such as `xrdp` is less strict, but the whole point is a real GNOME session. |
+
+FreeRDP is the pragmatic choice, and it reverses the reasoning in section 6.1.
+That section rejected FreeRDP partly because GNOME Connections only ships a
+private vendored `gtk-frdp`. That argument still holds against using
+`gtk-frdp`, but it does not apply to linking FreeRDP itself, which is a normal
+shared library with a stable public API and a `pkg-config` file.
+
+This is a decision for the project owner and is not taken here.
+
+### 14.5 Guest fixes proven in this round
+
+A host session drove a real FreeRDP client against the guest and captured
+`docs/milestone1-rdp.png`: a genuine GNOME desktop over RDP, with the top bar,
+Files, and Text Editor. Milestone 1 is complete, pixels included.
+
+That run and the follow-up work found four guest defects, all now fixed:
+
+1. **The guest did not survive a restart.** `cabin-firstboot.service` was
+   guarded by a marker in `/var/lib`, which persists, but it wrote
+   `/run/cabin/env`, and `/run` is a tmpfs. The second boot skipped
+   provisioning, the environment file never reappeared, and the whole session
+   failed. The unit is now `cabin-prepare.service`, it runs on every boot, and
+   only the TLS certificate is generated once.
+2. **`/dev/fuse` is required.** `gnome-remote-desktop` mounts a FUSE filesystem
+   for clipboard redirection as soon as a client advertises `cliprdr`. Without
+   the device the mount fails and the daemon calls `abort()`, taking the
+   session with it. It is not a soft failure and it happens on every default
+   connect. The device is now passed in.
+3. **Input was disabled.** `view-only` stayed `true`, so the session ignored
+   every key press and pointer move. The cause is that
+   `grdctl --headless rdp disable-view-only` exits 0 and does nothing. The
+   same is true of `rdp disable-port-negotiation`. Settings are now written
+   with `gsettings` and each write is read back and checked.
+4. **`grdctl --headless rdp enable` is not a settings write.** It is the call
+   that makes the daemon serve. Replacing it with a `gsettings set` of the
+   `enable` key stopped the server binding at all, while the daemon runs
+   happily with that key still reading `false`. It must be the last step, and
+   it must be `grdctl`.
+
+Point 3 was hidden by a shell helper that ended in `|| true`, which discarded
+the exit status of every `grdctl` call. The helper now preserves it. A wrapper
+that swallows errors costs more than it saves.
+
+`grdctl status` reports on `gnome-remote-desktop.service`, not on the headless
+unit that actually serves. It will claim the service is inactive and RDP is
+disabled while the session is working. Do not use it as a health check.
+
+### 14.6 The client must read back the granted resolution
+
+Dynamic resize works, and it is exact except for rounding:
+
+| Requested | Granted |
+|---|---|
+| 1280x720 | 1280x720 |
+| 1024x768 | 1024x768 |
+| 1920x1080 | 1920x1080 |
+| 1703x961 | **1702x960** |
+
+Odd sizes round down to even, as H.264 requires. Section 6.4 already rounds
+before sending, which is right, but the viewer must also read the size back
+from the server rather than assume the request was honoured.
+
+### 14.7 Still unverified
+
+Input has never been proven end to end. `view-only` was `true` for every test
+so far, and the host session could not inject synthetic input, because GNOME 50
+ignores XTEST injection on the host. Now that `view-only` is `false` this needs
+one manual check: connect, and type.

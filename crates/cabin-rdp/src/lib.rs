@@ -14,9 +14,11 @@
 //! plain TLS handshake and answers `HYBRID_REQUIRED_BY_SERVER`. The client
 //! must therefore negotiate CredSSP with NTLM. See DESIGN.md section 12.4.
 
+pub mod connect;
 pub mod frame;
 pub mod session;
 
+pub use connect::{connect, Connection, ConnectionParams};
 pub use frame::{Frame, PixelFormat, Rect};
 pub use session::{Credentials, SessionCommand, SessionEvent, SessionHandle};
 
