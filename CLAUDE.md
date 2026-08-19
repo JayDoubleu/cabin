@@ -46,6 +46,17 @@ Use `just`. Run `just` alone to list every task.
    chooser portal. Adding either would defeat the sandbox design.
 7. **Regenerate `cargo-sources.json` after any `Cargo.lock` change**, with
    `just flatpak-sources`. The Flatpak build is offline and will fail otherwise.
+8. **The client must never advertise `cliprdr`.** `gnome-remote-desktop` mounts
+   a FUSE filesystem when it sees that channel, the mount needs `CAP_SYS_ADMIN`
+   which a rootless container cannot have, and the daemon calls `abort()` when
+   it fails. CLIPRDR is a static channel, so it does not appear in the "Loading
+   Dynamic Virtual Channel" log lines. Disable it by name.
+9. **Do not add bindgen to `cabin-freerdp-sys`.** It was tried and it silently
+   produces opaque structs for everything the client needs. DESIGN.md section
+   15.1 has the detail. The C shim exists for this reason.
+10. **Building `cabin-freerdp-sys` needs FreeRDP 3.** If `freerdp-devel` is not
+    installed, run `just freerdp-sysroot` and export the variables it prints.
+    No root is needed.
 
 ## Environment notes
 

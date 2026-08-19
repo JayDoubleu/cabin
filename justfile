@@ -101,3 +101,31 @@ clean:
 # Create a Cabin-managed demo desktop, so the app has something to list.
 demo:
     cargo test -p cabin-podman --test make_demo -- --ignored --nocapture
+
+# --- FreeRDP ---
+
+# Build a local FreeRDP sysroot without root, for building cabin-freerdp-sys.
+# Use this when freerdp-devel is not installed system wide.
+freerdp-sysroot dest="~/.local/freerdp-sysroot":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dest="$(eval echo {{dest}})"
+    work="$(mktemp -d)"
+    trap 'rm -rf "$work"' EXIT
+    echo "Downloading FreeRDP 3 packages ..."
+    ( cd "$work" && dnf download --quiet freerdp-devel freerdp-libs libwinpr libwinpr-devel \
+        sso-mib-libs uriparser )
+    mkdir -p "$dest"
+    for r in "$work"/*x86_64.rpm; do
+        ( cd "$dest" && rpm2cpio "$r" | cpio -idm --quiet )
+    done
+    echo
+    echo "Sysroot ready at $dest"
+    echo "Export these before building:"
+    echo "  export PKG_CONFIG_PATH=$dest/usr/lib64/pkgconfig"
+    echo "  export PKG_CONFIG_SYSROOT_DIR=$dest"
+    echo "  export LD_LIBRARY_PATH=$dest/usr/lib64"
+
+# Run the live FreeRDP test against a running guest.
+rdp-live:
+    cargo test -p cabin-freerdp-sys --test live_connect -- --ignored --nocapture

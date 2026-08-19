@@ -306,6 +306,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cabin-freerdp-sys"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
+
+[[package]]
 name = "cabin-gtk"
 version = "0.1.0"
 dependencies = [

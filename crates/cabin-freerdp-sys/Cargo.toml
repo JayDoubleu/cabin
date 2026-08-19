@@ -1,0 +1,11 @@
+[package]
+name = "cabin-freerdp-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A small C shim over FreeRDP 3, plus hand-written Rust declarations."
+links = "freerdp3"
+
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"

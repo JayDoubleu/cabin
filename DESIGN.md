@@ -807,11 +807,10 @@ That run and the follow-up work found four guest defects, all now fixed:
    provisioning, the environment file never reappeared, and the whole session
    failed. The unit is now `cabin-prepare.service`, it runs on every boot, and
    only the TLS certificate is generated once.
-2. **`/dev/fuse` is required.** `gnome-remote-desktop` mounts a FUSE filesystem
-   for clipboard redirection as soon as a client advertises `cliprdr`. Without
-   the device the mount fails and the daemon calls `abort()`, taking the
-   session with it. It is not a soft failure and it happens on every default
-   connect. The device is now passed in.
+2. **`/dev/fuse` is required but is NOT sufficient.** This was recorded as
+   fixed in an earlier revision of this document. That was wrong, and section
+   15.2 has the correction. The device is passed in, and the daemon still
+   aborts.
 3. **Input was disabled.** `view-only` stayed `true`, so the session ignored
    every key press and pointer move. The cause is that
    `grdctl --headless rdp disable-view-only` exits 0 and does nothing. The
@@ -852,3 +851,134 @@ Input has never been proven end to end. `view-only` was `true` for every test
 so far, and the host session could not inject synthetic input, because GNOME 50
 ignores XTEST injection on the host. Now that `view-only` is `false` this needs
 one manual check: connect, and type.
+
+---
+
+## 15. The FreeRDP client
+
+Section 14 established that IronRDP cannot talk to `gnome-remote-desktop`.
+FreeRDP is now the client stack. This section records how it is bound and what
+is proven.
+
+### 15.1 A C shim, not bindgen
+
+`cabin-freerdp-sys` is a small C file plus about seventy lines of hand-written
+`extern "C"` declarations. Bindgen was tried first and rejected.
+
+FreeRDP marks nearly every struct member with `ALIGN64`, which expands to
+`DECLSPEC_ALIGN(8)`, a per-member alignment attribute. Bindgen cannot lay that
+out, and rather than failing it **silently degrades the struct to an opaque
+blob**. `rdpContext`, `freerdp` and `rdp_client_entry_points_v1` all came out as
+a single `_address: u8` with none of their fields. Nineteen structs were
+affected, including every one the client needs.
+
+Two red herrings cost time on the way, and are recorded so nobody repeats them:
+
+- `ALIGN64` cannot be overridden from the command line, because `freerdp/api.h`
+  defines it unconditionally. `DECLSPEC_ALIGN` sits behind an `#ifndef` in
+  `winpr/spec.h` and can be neutralised. Doing so fixed the padding in other
+  structs but did **not** make the core structs concrete.
+- Clang now defaults to C23, where winpr expands `WINPR_ATTR_NODISCARD` to
+  `[[nodiscard]]`. That attribute is not valid on a struct member. This is a
+  real hazard for any bindgen user, though it was not the cause here.
+
+The shim sidesteps all of it. Every function takes primitives or an opaque
+pointer, so no FreeRDP layout is reproduced in Rust and the binding is ABI-safe
+by construction. It also drops the libclang build dependency, which keeps the
+Flatpak module simpler.
+
+### 15.2 Correction: the FUSE clipboard crash is not fixed by /dev/fuse
+
+An earlier revision of section 14.5 claimed passing `--device /dev/fuse` fixed
+the daemon crash. **That was wrong.** The test command used to verify it carried
+`-clipboard`, which stops the client advertising `cliprdr`, so the crash path
+was never exercised. The device is necessary but not sufficient.
+
+What actually happens, established by an A/B on the same image:
+
+| Container | `fusermount3` result |
+|---|---|
+| `--device /dev/fuse` | `mount failed: Operation not permitted` |
+| `--device /dev/fuse --cap-add SYS_ADMIN` | succeeds, mount appears |
+
+`CAP_SYS_ADMIN` is the missing piece, and podman's default bounding set excludes
+it. Because it is absent from `CapBnd`, no process inside can acquire it, not
+even setuid `fusermount3`.
+
+**But granting it breaks the guest.** With `--cap-add SYS_ADMIN` the RDP port
+never comes up, because `systemd-logind` and `systemd-userdbd` fail with
+`226/NAMESPACE`. With the capability present, systemd stops skipping the
+namespace setup it knows it cannot do in a rootless container, attempts it, and
+fails. The desktop session never starts.
+
+So both branches are dead ends, and there is no server-side off switch: the
+`org.gnome.desktop.remote-desktop.rdp` schema has nine keys and none of them
+controls the clipboard.
+
+The resolution is on the client. Cabin's own client never advertises `cliprdr`,
+so the guest never attempts the mount. That is a real answer rather than a
+workaround, at the cost of no clipboard sharing for now.
+
+**The consequence is worth stating plainly: the guest is fragile against other
+RDP clients.** Any client that advertises the clipboard, which is default-on
+behaviour for stock `xfreerdp`, Remmina, GNOME Connections and `mstsc`, will
+crash the guest daemon. Until this is resolved, connecting from a phone or
+another computer needs the clipboard disabled on that client.
+
+Aborting on a failed optional-feature mount is an upstream bug. Degrading to no
+clipboard would be correct behaviour, and this is worth a
+`gnome-remote-desktop` issue.
+
+Note also that CLIPRDR is a **static** virtual channel. It never appears in
+FreeRDP's "Loading Dynamic Virtual Channel" log lines, so seeing only `ainput`,
+`rdpgfx`, `disp` and `rdpsnd` there does not mean the clipboard is off. It must
+be disabled by name with `FreeRDP_RedirectClipboard`.
+
+### 15.3 What is proven
+
+The shim connects to a real guest and the graphics pipeline negotiates:
+
+```
+gdi_init_ex: Local framebuffer format  PIXEL_FORMAT_BGRA32
+gdi_init_ex: Remote framebuffer format PIXEL_FORMAT_BGRA32
+Loading Dynamic Virtual Channel rdpgfx
+Loading Dynamic Virtual Channel disp
+channel connected 'Microsoft::Windows::RDS::Graphics'  -> gfx pipeline init done
+channel connected 'Microsoft::Windows::RDS::DisplayControl'
+```
+
+This is the thing IronRDP could not do. The stack choice is settled.
+
+One piece of plumbing is worth knowing: the graphics pipeline delivers surfaces
+to a channel, not through the legacy drawing orders. Unless the client hands
+that channel to the GDI layer with `gdi_graphics_pipeline_init` on the channel
+connected event, FreeRDP decodes frames that never reach `gdi->primary_buffer`,
+and the framebuffer stays blank while the session looks healthy. Relatedly,
+`update->EndPaint` is never called on the graphics pipeline path, so it cannot
+be used to count frames.
+
+### 15.4 Open: the client segfaults once frames flow
+
+The session establishes, all channels connect, and then the process segfaults
+inside FreeRDP's event handling as soon as the guest sends graphics.
+
+Ruled out so far:
+
+- Not the clipboard. Disabling `FreeRDP_RedirectClipboard` fixed a separate,
+  earlier crash where the guest daemon aborted. The session is stable for
+  thirteen seconds now instead of dropping immediately.
+- Not `EndPaint`. It is never called on this path.
+- Not the experimental AV1 codec on its own. Fedora builds FreeRDP with
+  `WITH_GFX_AV1=ON`, and the library warns at runtime that experimental options
+  "might crash the application". Disabling `FreeRDP_GfxCodecAV1` and pinning
+  RemoteFX Progressive did not stop it.
+
+Still to check: whether stock `xfreerdp` still works against the same guest,
+which separates a shim defect from a library or guest problem; and a proper
+backtrace, which needs `gdb`, not currently installed.
+
+The remaining channel settings are also suspect. `rdpdr`, `rdpsnd` and
+`AUDIO_PLAYBACK_DVC` still connect even though the shim sets
+`FreeRDP_DeviceRedirection`, `FreeRDP_AudioPlayback` and friends to false, so
+those settings are either being applied too late or overridden by
+`freerdp_client_load_addins`.
