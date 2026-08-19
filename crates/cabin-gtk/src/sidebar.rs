@@ -197,6 +197,7 @@ impl Sidebar {
             .build();
 
         let id = desktop.id.clone();
+        let name = desktop.name.clone();
         let podman = self.podman.clone();
         let sidebar = self.clone();
         button.connect_clicked(move |button| {
@@ -204,19 +205,28 @@ impl Sidebar {
             // follows rebuilds the row and replaces this button.
             button.set_sensitive(false);
             let id = id.clone();
+            let name = name.clone();
             let podman = podman.clone();
             let sidebar = sidebar.clone();
+            // The button is only borrowed for the closure body, so keep an
+            // owned handle for the reply that arrives later.
+            let button = button.clone();
             runtime::spawn(
                 async move {
                     if running {
                         podman.stop(&id, STOP_TIMEOUT_SECS).await
                     } else {
-                        podman.start(&id).await
+                        podman.start_desktop(&id, &name).await
                     }
                 },
                 move |result| {
                     if let Err(e) = result {
                         tracing::error!("could not change desktop state: {e}");
+                        // A desktop that will not start needs to say why. The
+                        // usual cause, an exhausted inotify limit, is
+                        // invisible otherwise: the container exits 255 with an
+                        // empty log.
+                        show_error(&button, "The desktop did not start", &e.to_string());
                     }
                     sidebar.refresh();
                 },
@@ -274,6 +284,27 @@ impl Sidebar {
             );
         });
         box_.append(&restart);
+
+        let remote = flat_button("Connect from another device", "network-server-symbolic");
+        remote.set_sensitive(desktop.state.is_running());
+        let sidebar = self.clone();
+        let for_remote = desktop.clone();
+        let popover_ref = popover.clone();
+        remote.connect_clicked(move |button| {
+            popover_ref.popdown();
+            let podman = sidebar.podman.clone();
+            let id = for_remote.id.clone();
+            let desktop = for_remote.clone();
+            let button = button.clone();
+            runtime::spawn(
+                async move { podman.desktop_password(&id).await },
+                move |result| match result {
+                    Ok(password) => crate::remote::present(&button, &desktop, password),
+                    Err(e) => tracing::error!("could not read the desktop password: {e}"),
+                },
+            );
+        });
+        box_.append(&remote);
 
         box_.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
@@ -353,6 +384,16 @@ impl Sidebar {
             },
         );
     }
+}
+
+/// Reports a failure the user can act on, rather than only logging it.
+fn show_error(parent: &impl IsA<gtk::Widget>, heading: &str, body: &str) {
+    let dialog = adw::AlertDialog::builder()
+        .heading(heading)
+        .body(body)
+        .build();
+    dialog.add_response("close", "Close");
+    dialog.present(Some(parent));
 }
 
 fn flat_button(label: &str, icon: &str) -> gtk::Button {

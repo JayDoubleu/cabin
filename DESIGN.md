@@ -1275,7 +1275,56 @@ The settings dialogue makes the safe choice the easy one:
 Deleting a desktop asks first and says plainly that everything saved inside it
 goes with it.
 
-### 15.14 Still to do
+### 15.14 Connecting from another device
+
+The RDP port binds to `127.0.0.1` unless the user turns on remote access, which
+asks for confirmation because opening a desktop to the network is not something
+to do by accident.
+
+The connection dialogue shows the address, port, username and password, each
+with a copy button, because these get typed into a phone. The address comes
+from connecting a UDP socket to a documentation address, which fixes the route
+without sending a packet, and it never offers a loopback address.
+
+Two warnings sit alongside, because both would otherwise waste the user's first
+attempt:
+
+1. **The client must have the clipboard turned off.** A client that advertises
+   `cliprdr` crashes the guest session. Section 15.2 explains why, and that it
+   is a fault in `gnome-remote-desktop` rather than in the client.
+2. **The certificate warning is expected.** Each desktop makes its own
+   certificate, so nothing has signed it.
+
+### 15.15 The inotify limit caps how many desktops can run
+
+Every desktop runs systemd, and systemd needs several inotify instances.
+Fedora's default `fs.inotify.max_user_instances` is 128 for the whole user, so
+after a handful of desktops the next one fails.
+
+The failure is invisible without knowing what to look for. systemd cannot even
+allocate its manager object, so it exits before logging anything:
+
+```
+Failed to create control group inotify object: Too many open files
+Failed to allocate manager object: Too many open files
+```
+
+The container dies with status 255 and an **empty log**, and Podman reports the
+start as successful, because it succeeded in handing the container to the
+runtime. Nothing anywhere points at inotify.
+
+Two changes deal with it:
+
+- `start_desktop` waits briefly and confirms the container is still running.
+  Podman's success means the runtime accepted it, not that the guest lives.
+- An exit of 255 with no recorded error is reported as the inotify limit, with
+  the `sysctl` command to raise it and where to make it permanent.
+
+The guess is only a guess, so a real error from Podman is always preferred over
+it. But 255 with an empty log is this failure often enough that naming it is
+far more useful than reporting the number.
+
+### 15.16 Still to do
 - `rdpdr`, `rdpsnd` and `AUDIO_PLAYBACK_DVC` still connect even though the shim
   sets `FreeRDP_DeviceRedirection`, `FreeRDP_AudioPlayback` and friends to
   false, so those settings are applied too late or overridden by

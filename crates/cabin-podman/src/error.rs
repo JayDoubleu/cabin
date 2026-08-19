@@ -24,6 +24,9 @@ pub enum Error {
 
     #[error("no desktop named {0}")]
     NotFound(String),
+
+    #[error("{name} started and stopped immediately.\n\n{likely_cause}")]
+    StartedThenExited { name: String, likely_cause: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

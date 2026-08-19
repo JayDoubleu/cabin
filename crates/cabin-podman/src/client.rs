@@ -99,14 +99,13 @@ impl Podman {
         // The home directory lives in a named volume, so reconfiguring a
         // desktop can recreate the container without destroying the user's
         // files. Podman seeds a new volume from the image on first use.
-        let mut mounts = vec![CreateMount {
-            destination: cabin_core::GUEST_HOME.to_string(),
-            source: cabin_core::home_volume_name(&config.name),
-            kind: "volume".to_string(),
+        let volumes = vec![NamedVolume {
+            name: cabin_core::home_volume_name(&config.name),
+            dest: cabin_core::GUEST_HOME.to_string(),
             options: vec!["rw".to_string()],
         }];
 
-        mounts.extend(config.mounts.iter().map(|m| {
+        let mounts = Vec::from_iter(config.mounts.iter().map(|m| {
             let mut options = vec![m.mode.as_podman_option().to_string()];
             if m.relabel {
                 options.push("z".to_string());
@@ -137,6 +136,7 @@ impl Podman {
             labels: labels::to_labels(config),
             env,
             mounts,
+            volumes,
             devices,
             portmappings: vec![CreatePortMapping {
                 host_ip: config.bind_address().to_string(),
@@ -178,6 +178,35 @@ impl Podman {
         self.send("POST", &format!("{API}/containers/{id}/start"), None)
             .await
             .map(|_| ())
+    }
+
+    /// Starts a desktop and confirms it is still running a moment later.
+    ///
+    /// Podman reports success as soon as the container is handed to the
+    /// runtime, so a guest whose systemd dies on the first millisecond looks
+    /// like a successful start. Without this check the interface shows a
+    /// desktop as running while it is already gone.
+    pub async fn start_desktop(&self, id: &str, name: &str) -> Result<()> {
+        self.start(id).await?;
+
+        // Long enough for an immediate failure to have happened, short enough
+        // not to be felt. A healthy guest reaches multi-user.target in about
+        // 650 ms, but it is already "running" well before that.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        let body = self.get_raw(&format!("{API}/containers/{id}/json")).await?;
+        let inspect: InspectResponse = serde_json::from_slice(&body)?;
+        let Some(state) = inspect.state else {
+            return Ok(());
+        };
+        if state.status == "running" {
+            return Ok(());
+        }
+
+        Err(Error::StartedThenExited {
+            name: name.to_string(),
+            likely_cause: diagnose_early_exit(&state),
+        })
     }
 
     /// Stops a desktop. systemd inside the guest shuts the session down
@@ -252,6 +281,31 @@ impl Default for Podman {
     }
 }
 
+/// Explains why a guest died on start-up, in terms the user can act on.
+///
+/// The inotify case is the one that actually happens. Every desktop runs
+/// systemd, which needs several inotify instances, and Fedora's default limit
+/// of 128 per user is reached after a handful of desktops. systemd then fails
+/// with "Too many open files" and exits before it can log anything, so the
+/// container dies with status 255 and an empty log. Nothing about that points
+/// at inotify unless you already know.
+fn diagnose_early_exit(state: &InspectState) -> String {
+    if !state.error.is_empty() {
+        return state.error.clone();
+    }
+    if state.exit_code == 255 {
+        return "The most likely cause is that this computer has run out of \
+                inotify instances, which every desktop needs. Raise the limit \
+                with:\n\n    \
+                sudo sysctl -w fs.inotify.max_user_instances=1024\n\n\
+                To keep it after a restart, put \
+                fs.inotify.max_user_instances=1024 in \
+                /etc/sysctl.d/99-cabin.conf"
+            .to_string();
+    }
+    format!("The desktop exited with status {}.", state.exit_code)
+}
+
 fn build_limits(config: &DesktopConfig) -> Option<ResourceLimits> {
     let memory = config.memory_mb.map(|mb| Memory {
         limit: (mb * 1024 * 1024) as i64,
@@ -304,6 +358,41 @@ extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_log_and_255_points_at_the_inotify_limit() {
+        let state = InspectState {
+            status: "exited".into(),
+            exit_code: 255,
+            error: String::new(),
+        };
+        let message = diagnose_early_exit(&state);
+        assert!(message.contains("inotify"), "should name the real cause");
+        assert!(
+            message.contains("max_user_instances"),
+            "should give the setting to change"
+        );
+    }
+
+    #[test]
+    fn a_reported_error_is_preferred_over_the_guess() {
+        let state = InspectState {
+            status: "exited".into(),
+            exit_code: 1,
+            error: "no such image".into(),
+        };
+        assert_eq!(diagnose_early_exit(&state), "no such image");
+    }
+
+    #[test]
+    fn other_exit_codes_are_reported_plainly() {
+        let state = InspectState {
+            status: "exited".into(),
+            exit_code: 3,
+            error: String::new(),
+        };
+        assert!(diagnose_early_exit(&state).contains("status 3"));
+    }
 
     #[test]
     fn encodes_filter_json() {

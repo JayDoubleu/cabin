@@ -53,6 +53,7 @@ pub fn present(
     page.add(&build_mounts_group(parent, config.clone()));
     page.add(&build_graphics_group(config.clone()));
     page.add(&build_socket_group(parent, config.clone()));
+    page.add(&build_remote_group(parent, config.clone()));
     dialog.add(&page);
 
     // Applying recreates the container, so it is an explicit action rather
@@ -318,6 +319,62 @@ fn build_socket_group(
     group
 }
 
+/// Whether other devices can reach this desktop.
+fn build_remote_group(
+    parent: &impl IsA<gtk::Widget>,
+    config: Rc<RefCell<DesktopConfig>>,
+) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
+        .title("Remote Access")
+        .description("Connect to this desktop from a phone or another computer.")
+        .build();
+
+    let row = adw::SwitchRow::builder()
+        .title("Allow connections from other devices")
+        .subtitle("Off means only this computer can connect.")
+        .active(config.borrow().expose_on_lan)
+        .build();
+
+    let parent_widget = parent.as_ref().clone();
+    row.connect_active_notify(move |row| {
+        if !row.is_active() {
+            config.borrow_mut().expose_on_lan = false;
+            return;
+        }
+
+        // Going from loopback to the whole network is worth one deliberate
+        // confirmation, because it is not obvious that the desktop becomes
+        // reachable by anything that can route to this machine.
+        let dialog = adw::AlertDialog::builder()
+            .heading("Open this desktop to your network?")
+            .body(
+                "Anything that can reach this computer will be able to attempt a \
+                 connection. The desktop still needs its password, and the \
+                 connection is encrypted, but it will no longer be reachable only \
+                 from here.",
+            )
+            .build();
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("allow", "Allow");
+        dialog.set_response_appearance("allow", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+
+        let config = config.clone();
+        let row = row.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response == "allow" {
+                config.borrow_mut().expose_on_lan = true;
+            } else {
+                row.set_active(false);
+            }
+        });
+        dialog.present(Some(&parent_widget));
+    });
+
+    group.add(&row);
+    group
+}
+
 fn confirm_and_apply(
     parent: &gtk::Widget,
     podman: Arc<Podman>,
@@ -401,7 +458,7 @@ async fn recreate(
         .await
         .map_err(|e| format!("could not recreate the desktop: {e}"))?;
     podman
-        .start(&id)
+        .start_desktop(&id, &updated.name)
         .await
-        .map_err(|e| format!("the desktop was recreated but would not start: {e}"))
+        .map_err(|e| format!("the desktop was recreated but would not start.\n\n{e}"))
 }

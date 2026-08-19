@@ -34,6 +34,12 @@ pub struct CreateContainer {
     pub env: HashMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mounts: Vec<CreateMount>,
+    /// Named volumes. These are NOT the same field as `mounts`, which carries
+    /// OCI mounts whose source is a host path. Putting a volume name there
+    /// makes the container create successfully and then fail to start with
+    /// "No such device".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<NamedVolume>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<Device>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -51,6 +57,16 @@ pub struct CreateMount {
     pub source: String,
     #[serde(rename = "type")]
     pub kind: String,
+    pub options: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NamedVolume {
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Dest")]
+    pub dest: String,
+    #[serde(rename = "Options")]
     pub options: Vec<String>,
 }
 
@@ -116,6 +132,18 @@ pub struct Actor {
 pub struct InspectResponse {
     #[serde(rename = "Config")]
     pub config: InspectConfig,
+    #[serde(rename = "State", default)]
+    pub state: Option<InspectState>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct InspectState {
+    #[serde(rename = "Status", default)]
+    pub status: String,
+    #[serde(rename = "ExitCode", default)]
+    pub exit_code: i32,
+    #[serde(rename = "Error", default)]
+    pub error: String,
 }
 
 #[derive(Debug, Deserialize)]

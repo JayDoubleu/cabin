@@ -5,6 +5,8 @@ mod create;
 mod display;
 mod graphics;
 mod keymap;
+mod netaddr;
+mod remote;
 mod runtime;
 mod settings;
 mod sidebar;

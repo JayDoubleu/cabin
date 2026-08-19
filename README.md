@@ -84,6 +84,19 @@ or the Microsoft Remote Desktop app on iOS and Android.
 The certificate is self-signed and generated per container, so the client warns
 on first connect.
 
+## Running several desktops at once
+
+Every desktop runs systemd, which needs several inotify instances, and the
+default limit is 128 for your whole user account. After a handful of desktops
+the next one fails to start.
+
+Cabin detects this and tells you, but the fix needs root:
+
+```sh
+sudo sysctl -w fs.inotify.max_user_instances=1024
+echo fs.inotify.max_user_instances=1024 | sudo tee /etc/sysctl.d/99-cabin.conf
+```
+
 ## Security
 
 Read this before sharing anything into a desktop.
