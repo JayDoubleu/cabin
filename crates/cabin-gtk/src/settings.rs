@@ -423,6 +423,9 @@ fn build_mount_row(
         .title(&mount.host_path)
         .subtitle(format!("Appears at {}", mount.guest_path))
         .build();
+    // A path is data. One holding an ampersand or an angle bracket would
+    // otherwise be read as markup and the label dropped with a warning.
+    row.set_use_markup(false);
     row.add_prefix(&gtk::Image::from_icon_name(match mount.kind {
         MountKind::Directory => "folder-symbolic",
         MountKind::File => "text-x-generic-symbolic",

@@ -54,11 +54,15 @@ pub struct Image {
 impl Image {
     /// The name to show. An image can carry several, and it can carry none
     /// when a rebuild has left the old one untagged.
+    ///
+    /// No angle brackets. This ends up in interface labels that parse markup,
+    /// where `<untagged>` reads as an unclosed tag and the label is dropped
+    /// with a warning rather than shown.
     pub fn display_name(&self) -> String {
         self.tags
             .first()
             .cloned()
-            .unwrap_or_else(|| format!("<untagged> {}", self.short_id()))
+            .unwrap_or_else(|| format!("Untagged {}", self.short_id()))
     }
 
     pub fn short_id(&self) -> String {
@@ -256,6 +260,16 @@ struct PruneReport {
     size: u64,
 }
 
+/// True for a file that belongs to Cabin's own build rather than to the guest.
+///
+/// A source checkout carries `meson.build` beside the Containerfile, because
+/// that is how the guest files get installed. It is not part of the guest, and
+/// it should reach neither the build context nor a copy the user takes: seeing
+/// it in their own recipe folder invites the question of what it does there.
+pub fn is_build_system_file(name: &str) -> bool {
+    name == "meson.build"
+}
+
 /// Packs a directory into the tar archive that the build endpoint takes.
 ///
 /// File modes are not preserved deliberately. The Containerfile runs `chmod`
@@ -296,6 +310,9 @@ fn append_dir(
             continue;
         }
         if !file_type.is_file() {
+            continue;
+        }
+        if is_build_system_file(&entry.file_name().to_string_lossy()) {
             continue;
         }
 
@@ -393,6 +410,26 @@ mod tests {
     }
 
     #[test]
+    fn the_build_system_file_is_left_out() {
+        // A source checkout carries meson.build beside the Containerfile. It
+        // has nothing to do with the guest and should not be sent to Podman.
+        let dir = std::env::temp_dir().join(format!("cabin-tar-meson-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Containerfile"), b"FROM scratch\n").unwrap();
+        std::fs::write(dir.join("meson.build"), b"install_data()\n").unwrap();
+
+        let archive = build_context(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        let found: Vec<String> = tar::Archive::new(archive.as_slice())
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().display().to_string())
+            .collect();
+        assert_eq!(found, vec!["Containerfile"]);
+    }
+
+    #[test]
     fn packing_the_same_tree_twice_gives_the_same_archive() {
         // Otherwise every build would miss Podman's layer cache.
         let dir = std::env::temp_dir().join(format!("cabin-tar-stable-{}", std::process::id()));
@@ -412,5 +449,17 @@ mod tests {
         let untagged = image(1, &[]);
         assert!(untagged.display_name().contains("012345678"));
         assert_eq!(image(1, &["localhost/x:1"]).display_name(), "localhost/x:1");
+    }
+
+    #[test]
+    fn a_display_name_carries_no_markup() {
+        // These go into labels that parse markup. An angle bracket there is
+        // read as a tag, and the label is dropped with a warning.
+        for image in [image(1, &[]), image(1, &["localhost/x:1"])] {
+            let name = image.display_name();
+            assert!(!name.contains('<'), "{name}");
+            assert!(!name.contains('>'), "{name}");
+            assert!(!name.contains('&'), "{name}");
+        }
     }
 }

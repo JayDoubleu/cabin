@@ -5,6 +5,7 @@ use crate::runtime;
 use adw::prelude::*;
 use cabin_core::{DesktopConfig, GraphicsMode};
 use cabin_podman::Podman;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -63,12 +64,21 @@ pub fn present(
         .active(false)
         .build();
 
-    // A fresh installation has no guest image, and creating a desktop then
+    // Which image the desktop is built from. Only images that exist are
+    // offered, because a desktop cannot be made from one that does not.
+    let image_row = adw::ComboRow::builder()
+        .title("Image")
+        .subtitle("What the desktop starts with.")
+        .build();
+    // The tag for each entry, in the same order as the model.
+    let image_tags: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+
+    // A fresh installation has no image at all, and creating a desktop then
     // fails with "no such image" after everything here has been filled in.
     // Ask Podman now, and offer the way out rather than only the message.
     let image_missing = adw::ActionRow::builder()
-        .title("The guest image is not built yet")
-        .subtitle("A desktop needs it. Building takes several minutes.")
+        .title("No guest image is built yet")
+        .subtitle("A desktop needs one. Building takes several minutes.")
         .css_classes(vec!["warning"])
         .visible(false)
         .build();
@@ -83,6 +93,7 @@ pub fn present(
     group.add(&name_row);
     group.add(&memory_row);
     group.add(&graphics_row);
+    group.add(&image_row);
     group.add(&open_settings);
     group.add(&image_missing);
 
@@ -119,33 +130,48 @@ pub fn present(
 
     let default_image = crate::state::State::new(crate::APP_ID).default_image();
 
-    // Re-run after a build, so the warning clears without reopening.
+    // Re-run after a build, so a new image appears without reopening.
     let row_for_check = image_missing.clone();
+    let combo_for_check = image_row.clone();
+    let tags_for_check = image_tags.clone();
     let dialog_for_check = dialog.clone();
     let name_for_check = name_row.clone();
     let taken_for_check = taken_names.clone();
     let podman_for_check = podman.clone();
-    let image_for_check = default_image.clone();
+    let preferred = default_image.clone();
     let check_image: Rc<dyn Fn()> = Rc::new(move || {
         let row = row_for_check.clone();
+        let combo = combo_for_check.clone();
+        let tags = tags_for_check.clone();
         let dialog = dialog_for_check.clone();
         let name = name_for_check.clone();
         let taken = taken_for_check.clone();
-        let image = image_for_check.clone();
+        let preferred = preferred.clone();
         let podman = podman_for_check.clone();
-        runtime::spawn(
-            async move { podman.image_exists(&image).await },
-            move |result| {
-                // A Podman that cannot answer is not a missing image, so say
-                // nothing rather than send the user to build one they have.
-                let missing = matches!(result, Ok(false));
-                row.set_visible(missing);
-                dialog.set_response_enabled(
-                    "create",
-                    !missing && cabin_core::check_name(&name.text(), &taken).is_ok(),
-                );
-            },
-        );
+        runtime::spawn(async move { podman.list_images().await }, move |result| {
+            // A Podman that cannot answer is not a missing image, so say
+            // nothing rather than send the user to build one they have.
+            let Ok(images) = result else {
+                return;
+            };
+            let choices = buildable_images(&images);
+            row.set_visible(choices.is_empty());
+
+            let labels: Vec<&str> = choices.iter().map(|(l, _)| l.as_str()).collect();
+            combo.set_model(Some(&gtk::StringList::new(&labels)));
+            combo.set_sensitive(!choices.is_empty());
+            // Land on the image last used, so the common case is one
+            // fewer decision.
+            if let Some(index) = choices.iter().position(|(_, tag)| *tag == preferred) {
+                combo.set_selected(index as u32);
+            }
+            tags.replace(choices.into_iter().map(|(_, tag)| tag).collect());
+
+            dialog.set_response_enabled(
+                "create",
+                !tags.borrow().is_empty() && cabin_core::check_name(&name.text(), &taken).is_ok(),
+            );
+        });
     });
     check_image();
 
@@ -170,7 +196,14 @@ pub fn present(
         let name = name_row.text().trim().to_string();
 
         let mut config = DesktopConfig::new(&name);
-        config.image = default_image.clone();
+        config.image = image_tags
+            .borrow()
+            .get(image_row.selected() as usize)
+            .cloned()
+            .unwrap_or_else(|| default_image.clone());
+        // The next desktop starts on the same image, which is nearly always
+        // what is wanted when several are made in a row.
+        crate::state::State::new(crate::APP_ID).set_default_image(&config.image);
         config.memory_mb = Some(memory_row.value() as u64);
         config.graphics = match graphics_row.selected() {
             0 => GraphicsMode::Automatic,
@@ -218,6 +251,26 @@ fn show_error(parent: &gtk::Widget, message: &str) {
         .build();
     dialog.add_response("close", "Close");
     dialog.present(Some(parent));
+}
+
+/// The images a desktop can be made from, as label and tag.
+///
+/// Only Cabin's own, and only those with a name: an untagged image left by a
+/// rebuild cannot be referred to and would not survive the next clean-up.
+fn buildable_images(images: &[cabin_podman::Image]) -> Vec<(String, String)> {
+    let mut choices: Vec<(String, String)> = Vec::new();
+    for image in images.iter().filter(|i| i.is_guest && !i.dangling) {
+        for tag in &image.tags {
+            let label = match crate::recipes::all().into_iter().find(|r| &r.tag == tag) {
+                // Name it the way the recipe list does, so the two agree.
+                Some(recipe) => format!("{} ({})", recipe.name, image.human_size()),
+                None => format!("{tag} ({})", image.human_size()),
+            };
+            choices.push((label, tag.clone()));
+        }
+    }
+    choices.sort_by(|a, b| a.0.cmp(&b.0));
+    choices
 }
 
 /// Suggests a name that is not in use, by adding a number if it has to.

@@ -134,12 +134,20 @@ Use `just`. Run `just` alone to list every task.
     presence of that copy is what makes builds use it. Do not add a setting
     to select between them: presence is the setting, and a second one would
     get out of step with the files.
-29. **Do not make a desktop a Toolbx container.** It was considered and it
+29. **A custom recipe builds `FROM` the base, never from Fedora.** Repeating
+    the base costs 57 seconds and 1.65 GB per image instead of 11 seconds and
+    about 30 MB, and it drifts from the base as Cabin updates.
+30. **Text from Podman or the filesystem is data, not markup.**
+    `AdwPreferencesRow` parses its title and subtitle as Pango markup, so an
+    image called `<untagged> abc` or a path holding an ampersand makes GTK
+    drop the label and warn. Call `set_use_markup(false)` on any row that
+    carries such text.
+31. **Do not make a desktop a Toolbx container.** It was considered and it
     cannot work: toolbox runs with `--pid=host`, and systemd as PID 1 needs
     its own PID namespace. DESIGN.md section 19.4 has the full comparison.
     Use `podman exec` to get a shell, which is what the Open a shell dialogue
     shows.
-30. **Store interface names for remote access, never addresses.** An address
+32. **Store interface names for remote access, never addresses.** An address
     changes with the network, and a stored one would leave the desktop unable
     to start after a DHCP lease changed. Names resolve to addresses when the
     container is created. Loopback is always bound as well.

@@ -191,6 +191,12 @@ fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
         if kind.is_dir() {
             copy_tree(&from, &to)?;
         } else if kind.is_file() {
+            // A source checkout carries meson.build beside the Containerfile.
+            // Copying it into the user's own recipe folder only invites the
+            // question of what it is doing there.
+            if cabin_podman::images::is_build_system_file(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
             std::fs::copy(&from, &to)
                 .map_err(|e| format!("could not copy {}: {e}", from.display()))?;
         }

@@ -79,6 +79,10 @@ impl State {
     }
 
     /// The image a new desktop starts from.
+    pub fn set_default_image(&self, image: &str) {
+        let _ = self.settings.set_string("default-image", image);
+    }
+
     pub fn default_image(&self) -> String {
         self.settings.string("default-image").to_string()
     }

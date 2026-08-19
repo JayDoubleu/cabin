@@ -11,6 +11,7 @@ mod netaddr;
 mod network;
 mod pinning;
 mod recipe;
+mod recipes;
 mod remote;
 mod runtime;
 mod settings;

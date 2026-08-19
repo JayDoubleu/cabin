@@ -13,9 +13,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// Holds the refresh closure, which cannot be built until the widgets it
+/// updates exist, and which those widgets' handlers then need to call.
+type RefreshCell = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+
 /// The image a desktop is built from unless the setting says otherwise.
 pub const DEFAULT_TAG: &str = "localhost/cabin-guest:f44";
 
+/// Opens the image manager.
 /// Opens the image manager.
 pub fn present(
     parent: &impl IsA<gtk::Widget>,
@@ -26,20 +31,40 @@ pub fn present(
 
     let dialog = adw::Dialog::builder()
         .title("Guest Images")
-        .content_width(640)
-        .content_height(560)
+        .content_width(680)
+        .content_height(620)
         .build();
 
     let page = adw::PreferencesPage::new();
 
-    let group = adw::PreferencesGroup::builder()
-        .title("Guest images")
+    // Recipes first. This is the part that answers "what can I make a desktop
+    // from", and the built images below are the consequence of it.
+    let recipe_group = adw::PreferencesGroup::builder()
+        .title("Recipes")
         .description(
-            "A desktop runs from a guest image. Cabin builds it here from the \
-             files it ships with, so nothing is downloaded from anyone else.",
+            "A recipe says what goes into a guest image. Add your own to give a \
+             desktop different software, then pick it when you create one.",
         )
         .build();
+    let recipe_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(vec!["boxed-list"])
+        .build();
+    let add_recipe = gtk::Button::builder()
+        .label("New Recipe")
+        .halign(gtk::Align::Start)
+        .margin_top(6)
+        .build();
+    let recipe_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    recipe_box.append(&recipe_list);
+    recipe_box.append(&add_recipe);
+    recipe_group.add(&recipe_box);
+    page.add(&recipe_group);
 
+    let group = adw::PreferencesGroup::builder()
+        .title("Built images")
+        .description("What is on this computer now.")
+        .build();
     let list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .css_classes(vec!["boxed-list"])
@@ -47,9 +72,22 @@ pub fn present(
     group.add(&list);
     page.add(&group);
 
-    // Cabin's own images only, unless asked otherwise. The host carries
-    // plenty that belongs to other work, and an image manager that offers to
-    // delete those by default is a trap rather than a convenience.
+    let reclaim = gtk::Button::builder()
+        .css_classes(vec!["pill"])
+        .halign(gtk::Align::Center)
+        .margin_top(6)
+        .visible(false)
+        .build();
+    let reclaim_group = adw::PreferencesGroup::new();
+    reclaim_group.add(&reclaim);
+    page.add(&reclaim_group);
+    // What the last refresh found, so the confirmation lists exactly what it
+    // is about to remove instead of describing it in the abstract.
+    let stale_images: Rc<RefCell<Vec<Image>>> = Rc::new(RefCell::new(Vec::new()));
+
+    // Cabin's own images only, unless asked otherwise. The host carries plenty
+    // that belongs to other work, and an image manager that offers to delete
+    // those by default is a trap rather than a convenience.
     let show_all = adw::SwitchRow::builder()
         .title("Show every image on this computer")
         .subtitle("Including images that have nothing to do with Cabin.")
@@ -70,88 +108,49 @@ pub fn present(
     other_holder.add(&other_list);
     page.add(&other_holder);
 
-    // The recipe the image is built from. It sits above the build button
-    // because it is what the build uses, and a user who wants a different
-    // image needs to change this rather than press build again.
-    let recipe_group = adw::PreferencesGroup::builder()
-        .title("Recipe")
-        .description("The Containerfile that says what goes into a guest image.")
-        .build();
-    let recipe_row = adw::ActionRow::builder().build();
-    recipe_row.set_subtitle_lines(0);
-    let recipe_list = gtk::ListBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .css_classes(vec!["boxed-list"])
-        .build();
-    recipe_list.append(&recipe_row);
-    recipe_group.add(&recipe_list);
-    page.add(&recipe_group);
-
-    let recipe_open = gtk::Button::builder()
-        .valign(gtk::Align::Center)
-        .css_classes(vec!["flat"])
-        .build();
-    recipe_row.add_suffix(&recipe_open);
-    let recipe_reset = gtk::Button::builder()
-        .icon_name("edit-undo-symbolic")
-        .valign(gtk::Align::Center)
-        .css_classes(vec!["flat"])
-        .tooltip_text("Go back to the recipe Cabin ships with")
-        .visible(false)
-        .build();
-    recipe_row.add_suffix(&recipe_reset);
-
-    let build = gtk::Button::builder()
-        .css_classes(vec!["suggested-action", "pill"])
-        .build();
-    let reclaim = gtk::Button::builder()
-        .css_classes(vec!["pill"])
-        .visible(false)
-        .build();
-    // What the last refresh found, so the confirmation lists exactly what it
-    // is about to remove instead of describing it in the abstract.
-    let stale_images: Rc<RefCell<Vec<Image>>> = Rc::new(RefCell::new(Vec::new()));
-
-    let actions = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(6)
-        .halign(gtk::Align::Center)
-        .margin_top(12)
-        .build();
-    actions.append(&build);
-    actions.append(&reclaim);
-
-    let build_group = adw::PreferencesGroup::new();
-    build_group.add(&actions);
-    page.add(&build_group);
-
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&adw::HeaderBar::new());
     toolbar.set_content(Some(&page));
     dialog.set_child(Some(&toolbar));
 
-    let refresh = {
+    // One refresh for the whole dialogue. Recipes and images are two views of
+    // the same question, and letting them update separately would show a
+    // recipe as unbuilt beside the image it just built.
+    let refresh: RefreshCell = Rc::new(RefCell::new(None));
+    let refresh_now: Rc<dyn Fn()> = {
+        let refresh = refresh.clone();
+        Rc::new(move || {
+            let held = refresh.borrow().clone();
+            if let Some(f) = held {
+                f();
+            }
+        })
+    };
+
+    let built: Rc<dyn Fn()> = {
+        let recipe_list = recipe_list.clone();
         let list = list.clone();
         let other_list = other_list.clone();
         let other_holder = other_holder.clone();
         let show_all = show_all.clone();
         let reclaim = reclaim.clone();
         let stale_images = stale_images.clone();
-        let build = build.clone();
         let podman = podman.clone();
         let dialog = dialog.clone();
         let on_changed = on_changed.clone();
+        let refresh_now = refresh_now.clone();
         Rc::new(move || {
+            let recipe_list = recipe_list.clone();
             let list = list.clone();
             let other_list = other_list.clone();
             let other_holder = other_holder.clone();
             let show_all = show_all.clone();
             let reclaim = reclaim.clone();
-            let stale_for_rows = stale_images.clone();
-            let build = build.clone();
+            let stale_images = stale_images.clone();
             let podman_for_rows = podman.clone();
             let dialog = dialog.clone();
             let on_changed = on_changed.clone();
+            let refresh_now = refresh_now.clone();
             let podman = podman.clone();
             runtime::spawn(async move { podman.list_images().await }, move |result| {
                 let images = match result {
@@ -161,6 +160,16 @@ pub fn present(
                         Vec::new()
                     }
                 };
+
+                populate_recipes(
+                    &recipe_list,
+                    &images,
+                    podman_for_rows.clone(),
+                    &dialog,
+                    refresh_now.clone(),
+                    on_changed.clone(),
+                );
+
                 let (ours, theirs): (Vec<_>, Vec<_>) =
                     images.iter().cloned().partition(|i| i.is_guest);
                 populate(
@@ -179,18 +188,6 @@ pub fn present(
                 );
                 other_holder.set_visible(show_all.is_active());
 
-                // The label says which of the two jobs the button does,
-                // because building the first image and replacing an
-                // existing one are not the same act.
-                let have = images
-                    .iter()
-                    .any(|i| i.tags.iter().any(|t| t == DEFAULT_TAG));
-                build.set_label(if have {
-                    "Rebuild the Guest Image"
-                } else {
-                    "Build the Guest Image"
-                });
-
                 // Offer the clean-up only when there is something to clean
                 // up, and say what it is worth.
                 let stale: Vec<Image> = images.iter().filter(|i| i.dangling).cloned().collect();
@@ -198,8 +195,7 @@ pub fn present(
                 reclaim.set_visible(!stale.is_empty());
                 if !stale.is_empty() {
                     // The trailing ellipsis is the platform's own way of
-                    // saying that a button asks before it acts. Spelling that
-                    // out in the label would be longer and less familiar.
+                    // saying that a button asks before it acts.
                     reclaim.set_label(&format!(
                         "Delete {} Unused Image{} ({})\u{2026}",
                         stale.len(),
@@ -207,65 +203,17 @@ pub fn present(
                         human_bytes(freed)
                     ));
                 }
-                stale_for_rows.replace(stale);
+                stale_images.replace(stale);
             });
         })
     };
-    refresh();
+    refresh.replace(Some(built));
+    refresh_now();
 
-    // The recipe row does not depend on Podman, so it is updated on its own
-    // rather than waiting for the image list to come back.
-    let show_recipe = {
-        let row = recipe_row.clone();
-        let open = recipe_open.clone();
-        let reset = recipe_reset.clone();
-        Rc::new(move || {
-            let custom = crate::guestdir::has_custom();
-            row.set_title(if custom {
-                "Your own recipe"
-            } else {
-                "The recipe Cabin ships with"
-            });
-            row.set_subtitle(if custom {
-                if crate::guestdir::shipped_has_moved_on() {
-                    "Builds use your copy. Cabin now ships a newer one, which your \
-                     copy does not have."
-                } else {
-                    "Builds use your copy instead of the one Cabin ships."
-                }
-            } else {
-                "Read-only, because it lives inside the installation. Take a copy \
-                 to change it."
-            });
-            open.set_label(if custom { "Edit" } else { "View" });
-            reset.set_visible(custom);
-        })
-    };
-    show_recipe();
-
-    let show_after_recipe = show_recipe.clone();
-    let refresh_after_recipe = refresh.clone();
-    let dialog_for_recipe = dialog.clone();
-    recipe_open.connect_clicked(move |_| {
-        let show = show_after_recipe.clone();
-        let refresh = refresh_after_recipe.clone();
-        crate::recipe::present(&dialog_for_recipe, move || {
-            show();
-            refresh();
-        });
-    });
-
-    let show_after_reset = show_recipe.clone();
-    let dialog_for_reset = dialog.clone();
-    recipe_reset.connect_clicked(move |_| {
-        let show = show_after_reset.clone();
-        crate::recipe::confirm_reset(&dialog_for_reset, move || show());
-    });
-
-    let refresh_for_show_all = refresh.clone();
+    let refresh_for_show_all = refresh_now.clone();
     show_all.connect_active_notify(move |_| refresh_for_show_all());
 
-    let refresh_after_prune = refresh.clone();
+    let refresh_after_prune = refresh_now.clone();
     let dialog_for_prune = dialog.clone();
     let podman_for_prune = podman.clone();
     let on_changed_for_prune = on_changed.clone();
@@ -280,24 +228,243 @@ pub fn present(
         );
     });
 
-    let refresh_after_build = refresh.clone();
-    let dialog_for_build = dialog.clone();
-    let podman_for_build = podman.clone();
-    let on_changed_for_build = on_changed.clone();
-    build.connect_clicked(move |_| {
-        let refresh = refresh_after_build.clone();
-        let on_changed = on_changed_for_build.clone();
-        present_build(
-            &dialog_for_build,
-            podman_for_build.clone(),
-            DEFAULT_TAG,
-            move || {
-                refresh();
-                on_changed();
-            },
-        );
+    let refresh_after_add = refresh_now.clone();
+    let dialog_for_add = dialog.clone();
+    add_recipe.connect_clicked(move |_| {
+        let refresh = refresh_after_add.clone();
+        crate::recipe::present_new(&dialog_for_add, move || refresh());
     });
 
+    dialog.present(Some(parent));
+}
+
+/// One row per recipe, saying whether its image is built and offering to
+/// build it.
+fn populate_recipes(
+    list: &gtk::ListBox,
+    images: &[Image],
+    podman: Arc<Podman>,
+    parent: &adw::Dialog,
+    refresh: Rc<dyn Fn()>,
+    on_changed: Rc<dyn Fn()>,
+) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+
+    let base_built = images
+        .iter()
+        .any(|i| i.tags.iter().any(|t| t == crate::recipes::BASE_TAG));
+
+    for recipe in crate::recipes::all() {
+        let image = images.iter().find(|i| i.tags.contains(&recipe.tag));
+
+        let row = adw::ActionRow::builder().title(&recipe.name).build();
+        // These carry data, not markup. A name or a tag holding an angle
+        // bracket or an ampersand would otherwise be read as markup, and the
+        // label dropped with a warning rather than shown.
+        row.set_use_markup(false);
+        row.set_subtitle_lines(0);
+        row.set_subtitle(&match image {
+            Some(image) => format!("Built, {} \u{b7} {}", image.human_size(), recipe.tag),
+            // A custom recipe builds on the base, so it cannot be built
+            // before the base is. Say that instead of letting Podman report
+            // a missing image the user never asked for.
+            None if recipe.kind == crate::recipes::Kind::Custom && !base_built => {
+                "Not built. Build the Cabin guest image first.".to_string()
+            }
+            None => format!("Not built yet \u{b7} {}", recipe.tag),
+        });
+
+        let build = gtk::Button::builder()
+            .label(if image.is_some() { "Rebuild" } else { "Build" })
+            .valign(gtk::Align::Center)
+            .css_classes(vec![if image.is_some() {
+                "flat"
+            } else {
+                "suggested-action"
+            }])
+            .sensitive(recipe.kind == crate::recipes::Kind::Base || base_built)
+            .build();
+        let parent_for_build = parent.clone();
+        let podman_for_build = podman.clone();
+        let refresh_for_build = refresh.clone();
+        let on_changed_for_build = on_changed.clone();
+        let tag = recipe.tag.clone();
+        let dir = recipe.dir.clone();
+        build.connect_clicked(move |_| {
+            let refresh = refresh_for_build.clone();
+            let on_changed = on_changed_for_build.clone();
+            present_build_from(
+                &parent_for_build,
+                podman_for_build.clone(),
+                &tag,
+                dir.clone(),
+                move || {
+                    refresh();
+                    on_changed();
+                },
+            );
+        });
+        row.add_suffix(&build);
+        row.add_suffix(&recipe_menu(
+            &recipe,
+            parent,
+            refresh.clone(),
+            podman.clone(),
+            image.map(|i| i.id.clone()),
+        ));
+        list.append(&row);
+    }
+}
+
+/// The per-recipe menu: view or edit, and remove.
+fn recipe_menu(
+    recipe: &crate::recipes::Recipe,
+    parent: &adw::Dialog,
+    refresh: Rc<dyn Fn()>,
+    podman: Arc<Podman>,
+    _built: Option<String>,
+) -> gtk::MenuButton {
+    let popover = gtk::Popover::new();
+    let box_ = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(2)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(6)
+        .margin_end(6)
+        .build();
+
+    let open = flat_button(
+        if recipe.editable() {
+            "Edit recipe"
+        } else {
+            "View recipe"
+        },
+        "text-x-generic-symbolic",
+    );
+    let parent_for_open = parent.clone();
+    let refresh_for_open = refresh.clone();
+    let dir_for_open = recipe.dir.clone();
+    let popover_ref = popover.clone();
+    open.connect_clicked(move |_| {
+        popover_ref.popdown();
+        let refresh = refresh_for_open.clone();
+        crate::recipe::present_path(&parent_for_open, dir_for_open.clone(), move || refresh());
+    });
+    box_.append(&open);
+
+    match recipe.kind {
+        crate::recipes::Kind::Base => {
+            // The base is either the shipped tree or the user's copy of it,
+            // and the actions differ. Both live here rather than in a second
+            // place the user has to find.
+            let label = if crate::guestdir::has_custom() {
+                "Use the recipe Cabin ships with"
+            } else {
+                "Take a copy to change it"
+            };
+            let action = flat_button(label, "edit-copy-symbolic");
+            let parent_for_action = parent.clone();
+            let refresh_for_action = refresh.clone();
+            let popover_ref = popover.clone();
+            action.connect_clicked(move |_| {
+                popover_ref.popdown();
+                let refresh = refresh_for_action.clone();
+                if crate::guestdir::has_custom() {
+                    crate::recipe::confirm_reset(&parent_for_action, move || refresh());
+                } else {
+                    let refresh = refresh.clone();
+                    crate::recipe::customise(&parent_for_action, Rc::new(move || refresh()));
+                }
+            });
+            box_.append(&action);
+        }
+        crate::recipes::Kind::Custom => {
+            box_.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            let remove = flat_button("Delete recipe", "user-trash-symbolic");
+            remove.add_css_class("destructive-action");
+            let parent_for_remove = parent.clone();
+            let refresh_for_remove = refresh.clone();
+            let name = recipe.name.clone();
+            let tag = recipe.tag.clone();
+            let popover_ref = popover.clone();
+            let podman = podman.clone();
+            remove.connect_clicked(move |_| {
+                popover_ref.popdown();
+                confirm_delete_recipe(
+                    &parent_for_remove,
+                    podman.clone(),
+                    name.clone(),
+                    tag.clone(),
+                    refresh_for_remove.clone(),
+                );
+            });
+            box_.append(&remove);
+        }
+    }
+
+    popover.set_child(Some(&box_));
+    gtk::MenuButton::builder()
+        .icon_name("view-more-symbolic")
+        .valign(gtk::Align::Center)
+        .css_classes(vec!["flat"])
+        .popover(&popover)
+        .build()
+}
+
+fn flat_button(label: &str, icon: &str) -> gtk::Button {
+    let content = adw::ButtonContent::builder()
+        .label(label)
+        .icon_name(icon)
+        .halign(gtk::Align::Start)
+        .build();
+    gtk::Button::builder()
+        .child(&content)
+        .css_classes(vec!["flat"])
+        .build()
+}
+
+/// Deleting a recipe asks about its image separately, because the two are not
+/// the same thing and a desktop may still be running from the image.
+fn confirm_delete_recipe(
+    parent: &adw::Dialog,
+    podman: Arc<Podman>,
+    name: String,
+    tag: String,
+    refresh: Rc<dyn Fn()>,
+) {
+    let dialog = adw::AlertDialog::builder()
+        .heading(format!("Delete the {name} recipe?"))
+        .body(
+            "The recipe's files are removed. The image it built is left alone, \
+             so desktops made from it keep working. You can delete the image \
+             separately.",
+        )
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("delete", "Delete");
+    dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+
+    let parent_for_response = parent.clone();
+    dialog.connect_response(None, move |_, response| {
+        if response != "delete" {
+            return;
+        }
+        let _ = (&podman, &tag);
+        if let Err(message) = crate::recipes::delete(&name) {
+            let error = adw::AlertDialog::builder()
+                .heading("Could not delete the recipe")
+                .body(message)
+                .build();
+            error.add_response("close", "Close");
+            error.present(Some(&parent_for_response));
+            return;
+        }
+        refresh();
+    });
     dialog.present(Some(parent));
 }
 
@@ -327,6 +494,8 @@ fn populate(
             .title(image.display_name())
             .subtitle(format!("{} · {}", image.human_size(), image.short_id()))
             .build();
+        // The name comes from Podman, so it is data rather than markup.
+        row.set_use_markup(false);
         if image.tags.iter().any(|t| t == DEFAULT_TAG) {
             let badge = gtk::Label::builder()
                 .label("In use by Cabin")
@@ -519,7 +688,7 @@ pub fn present_build(
     tag: &str,
     on_done: impl Fn() + 'static,
 ) {
-    let Some((context_dir, source)) = crate::guestdir::active() else {
+    let Some((context_dir, _)) = crate::guestdir::active() else {
         let error = adw::AlertDialog::builder()
             .heading("The guest files are missing")
             .body(format!(
@@ -532,14 +701,18 @@ pub fn present_build(
         error.present(Some(parent));
         return;
     };
-    tracing::info!(
-        "building from the {} recipe at {}",
-        match source {
-            crate::guestdir::Source::Shipped => "shipped",
-            crate::guestdir::Source::Custom => "customised",
-        },
-        context_dir.display()
-    );
+    present_build_from(parent, podman, tag, context_dir, on_done);
+}
+
+/// Builds `tag` from the context in `context_dir`, showing its output.
+pub fn present_build_from(
+    parent: &impl IsA<gtk::Widget>,
+    podman: Arc<Podman>,
+    tag: &str,
+    context_dir: std::path::PathBuf,
+    on_done: impl Fn() + 'static,
+) {
+    tracing::info!("building {tag} from {}", context_dir.display());
 
     let dialog = adw::Dialog::builder()
         .title("Building the Guest Image")

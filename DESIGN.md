@@ -2002,3 +2002,78 @@ a marker and a file in a subdirectory, builds it, and runs the image to check
 both arrived. The subdirectory matters: a context that packed only the top
 level would build a guest with no scripts, and that failure would appear much
 later and look like something else.
+
+---
+
+## 21. Named recipes, and choosing one
+
+### 21.1 A recipe per image
+
+Section 20 gave the base recipe a writable copy. That answers "change the
+guest" but not "have more than one guest". A user who wants a desktop with a
+different toolchain should not have to choose which single guest everything
+uses.
+
+A recipe is now a named build context. The base is one of them, and the user
+may add more.
+
+| | Base | Custom |
+|---|---|---|
+| Where | `<datadir>/cabin/guest`, or the copy in `<config>/cabin/guest` | `<config>/cabin/images/<name>` |
+| Tag | `localhost/cabin-guest:f44` | `localhost/cabin-guest-<name>:latest` |
+| Starts from | `registry.fedoraproject.org/fedora:44` | the base tag |
+
+**A custom recipe builds on the base rather than repeating it.** This is the
+decision the feature rests on. Repeating the base would mean every custom image
+rebuilt the whole guest, and would drift from the base as Cabin updates.
+Building on it keeps only the difference. Measured on the development host,
+adding one package to the base:
+
+| | Time | Added to disk |
+|---|---|---|
+| Full guest build | 57 s | 1.65 GB |
+| Layer on the base | 11 s | about 30 MB |
+
+The starter recipe a new image gets is therefore `FROM` the base tag, with the
+Cabin label and a commented example. It carries the label so the image manager
+lists it, exactly as the base does.
+
+The name goes in the tag, so an image can be traced back to the recipe that
+made it and `podman images` is readable without Cabin. Podman's tag rules
+therefore apply to the name, and `recipes::check_name` enforces them as it is
+typed: lower case, starting with a letter. Rejecting here means the failure is
+about the name rather than about a request the user never saw.
+
+Deleting a recipe leaves the image it built. The two are not the same thing,
+and a desktop may still be running from the image.
+
+### 21.2 Choosing an image for a desktop
+
+The New Desktop dialogue offers the images that exist, named the way the recipe
+list names them. Only Cabin's own images appear, and only those with a tag: an
+untagged image left by a rebuild cannot be referred to and would not survive
+the next clean-up.
+
+The choice is remembered, so making several desktops on the same image is one
+decision rather than several. When nothing is built the dialogue says so and
+offers to build, rather than letting the desktop fail afterwards, which is what
+section 19.1 corrected.
+
+A custom recipe cannot be built before the base is, because it starts `FROM`
+it. The recipe row says that rather than letting Podman report a missing image
+the user never asked for.
+
+### 21.3 Data in a label is not markup
+
+`AdwPreferencesRow` parses its title and subtitle as Pango markup. An untagged
+image was shown as `<untagged> abf4cebddb04`, which reads as an unclosed tag,
+so GTK dropped the label and logged a warning for every such row.
+
+Two fixes, because either alone leaves a hole. The name no longer uses angle
+brackets, and every row whose text comes from Podman or the filesystem sets
+`use-markup` to false. The second matters more than the first: a shared folder
+row takes a host path as its title, and a path holding an ampersand would have
+failed the same way. That one had not been noticed.
+
+The rule is that anything from outside the program is data. A label that parses
+it as markup will one day be handed something that is not.

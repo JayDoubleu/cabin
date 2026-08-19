@@ -7,13 +7,26 @@
 
 use crate::guestdir::{self, Source};
 use adw::prelude::*;
+use std::path::PathBuf;
 use std::rc::Rc;
 
-/// Shows the recipe, editable when it belongs to the user.
+/// Shows the active base recipe.
 pub fn present(parent: &impl IsA<gtk::Widget>, on_changed: impl Fn() + 'static) {
-    let Some((dir, source)) = guestdir::active() else {
+    let Some((dir, _)) = guestdir::active() else {
         missing(parent);
         return;
+    };
+    present_path(parent, dir, on_changed);
+}
+
+/// Shows the recipe in `dir`, editable unless it is the shipped tree.
+pub fn present_path(parent: &impl IsA<gtk::Widget>, dir: PathBuf, on_changed: impl Fn() + 'static) {
+    // The shipped tree is the only one that cannot be written, and it is the
+    // only one that is not under the user's own directory.
+    let source = if guestdir::shipped().as_deref() == Some(dir.as_path()) {
+        Source::Shipped
+    } else {
+        Source::Custom
     };
     let path = dir.join("Containerfile");
     let text = match std::fs::read_to_string(&path) {
@@ -70,7 +83,7 @@ pub fn present(parent: &impl IsA<gtk::Widget>, on_changed: impl Fn() + 'static) 
         .build();
 
     if source == Source::Shipped {
-        banner.set_button_label(Some("Customise"));
+        banner.set_button_label(Some("Take a Copy"));
         let parent_widget = parent.as_ref().clone();
         let dialog_ref = dialog.clone();
         let on_changed_ref = on_changed.clone();
@@ -251,4 +264,77 @@ fn missing(parent: &impl IsA<gtk::Widget>) {
         .build();
     error.add_response("close", "Close");
     error.present(Some(parent));
+}
+
+/// Asks for a name, creates the recipe, and opens it ready to edit.
+pub fn present_new(parent: &impl IsA<gtk::Widget>, on_changed: impl Fn() + 'static) {
+    let on_changed: Rc<dyn Fn()> = Rc::new(on_changed);
+    let taken: Vec<String> = crate::recipes::all().into_iter().map(|r| r.name).collect();
+
+    let dialog = adw::AlertDialog::builder()
+        .heading("New Recipe")
+        .body(
+            "A recipe builds a guest image. This one starts from the image              Cabin ships, so only what you add is built, and you can pick it              when you create a desktop.",
+        )
+        .build();
+
+    let name_row = adw::EntryRow::builder().title("Name").build();
+    let group = adw::PreferencesGroup::new();
+    group.add(&name_row);
+    dialog.set_extra_child(Some(&group));
+
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("create", "Create");
+    dialog.set_response_appearance("create", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("create"));
+    dialog.set_close_response("cancel");
+
+    // Checked as it is typed. An AdwAlertDialog closes on any response, so a
+    // name rejected on the click costs the user the dialogue.
+    let dialog_for_check = dialog.clone();
+    let group_for_check = group.clone();
+    let taken_for_check = taken.clone();
+    let check = move |entry: &adw::EntryRow| match crate::recipes::check_name(
+        &entry.text(),
+        &taken_for_check,
+    ) {
+        Ok(()) => {
+            entry.remove_css_class("error");
+            group_for_check.set_description(None);
+            dialog_for_check.set_response_enabled("create", true);
+        }
+        Err(why) => {
+            entry.add_css_class("error");
+            group_for_check.set_description(Some(&why));
+            dialog_for_check.set_response_enabled("create", false);
+        }
+    };
+    name_row.connect_changed(check.clone());
+    check(&name_row);
+
+    let parent_widget = parent.as_ref().clone();
+    dialog.connect_response(None, move |_, response| {
+        if response != "create" {
+            return;
+        }
+        match crate::recipes::create(&name_row.text()) {
+            Ok(recipe) => {
+                on_changed();
+                // Straight into the editor. A recipe that only says FROM is
+                // not why anyone made one.
+                let again = on_changed.clone();
+                present_path(&parent_widget, recipe.dir, move || again());
+            }
+            Err(message) => {
+                let error = adw::AlertDialog::builder()
+                    .heading("Could not create the recipe")
+                    .body(message)
+                    .build();
+                error.add_response("close", "Close");
+                error.present(Some(&parent_widget));
+            }
+        }
+    });
+
+    dialog.present(Some(parent));
 }

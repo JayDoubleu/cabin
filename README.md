@@ -161,6 +161,16 @@ worth visiting after a few rebuilds. Each rebuild leaves the previous image
 untagged and still over a gigabyte, and the manager offers to clear them once
 you have seen the list.
 
+### Several guest images
+
+Guest Images lists recipes. Cabin ships one, and you can add your own with New
+Recipe. A new recipe builds on the one Cabin ships, so only what you add is
+built: adding a package takes about ten seconds and a few tens of megabytes,
+not a full rebuild.
+
+Build it, and it appears in the New Desktop dialogue as something to choose. So
+you can keep one desktop plain and another with your toolchain in it.
+
 ### Changing what goes into a desktop
 
 The image is built from a Containerfile, which Guest Images shows you. The copy
