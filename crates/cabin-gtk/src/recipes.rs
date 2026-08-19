@@ -29,12 +29,19 @@ pub enum Kind {
 #[derive(Debug, Clone)]
 pub struct Recipe {
     /// What the user calls it.
+    ///
+    /// Short on purpose. It goes in a dropdown and in a list row, both of
+    /// which truncate, and anything qualifying the name belongs beside it
+    /// rather than inside it.
     pub name: String,
     /// The build context.
     pub dir: PathBuf,
     /// The image tag it builds.
     pub tag: String,
     pub kind: Kind,
+    /// True when the base is the user's copy rather than the shipped tree.
+    /// Shown as a mark on the row, not as part of the name.
+    pub customised: bool,
 }
 
 impl Recipe {
@@ -54,13 +61,11 @@ fn custom_root() -> PathBuf {
 /// The base recipe: the shipped tree, or the user's copy of it.
 pub fn base() -> Option<Recipe> {
     guestdir::active().map(|(dir, source)| Recipe {
-        name: match source {
-            guestdir::Source::Shipped => "Cabin guest".to_string(),
-            guestdir::Source::Custom => "Cabin guest (yours)".to_string(),
-        },
+        name: "Cabin guest".to_string(),
         dir,
         tag: BASE_TAG.to_string(),
         kind: Kind::Base,
+        customised: source == guestdir::Source::Custom,
     })
 }
 
@@ -80,6 +85,7 @@ pub fn custom() -> Vec<Recipe> {
                 dir: e.path(),
                 name,
                 kind: Kind::Custom,
+                customised: true,
             }
         })
         .collect();
@@ -123,6 +129,23 @@ pub fn check_name(name: &str, taken: &[String]) -> Result<(), String> {
         return Err(format!("A recipe called {name} already exists."));
     }
     Ok(())
+}
+
+/// The image a new desktop is offered first.
+///
+/// Stored as a tag rather than a recipe name, because it is a desktop's image
+/// that is being chosen and an image can outlive the recipe that made it.
+pub fn default_tag() -> String {
+    let stored = crate::state::State::new(crate::APP_ID).default_image();
+    if stored.is_empty() {
+        BASE_TAG.to_string()
+    } else {
+        stored
+    }
+}
+
+pub fn set_default_tag(tag: &str) {
+    crate::state::State::new(crate::APP_ID).set_default_image(tag);
 }
 
 /// What a new recipe is built on.
@@ -209,6 +232,7 @@ pub fn create(name: &str, basis: Basis) -> Result<Recipe, String> {
         dir,
         name,
         kind: Kind::Custom,
+        customised: true,
     })
 }
 

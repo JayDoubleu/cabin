@@ -269,11 +269,11 @@ fn missing(parent: &impl IsA<gtk::Widget>) {
 /// What each way of starting a recipe costs, measured on the development host
 /// by adding one package to the base.
 const BASIS_DESCRIPTIONS: &[&str] = &[
-    "Adds to the Cabin desktop. Builds in seconds and follows Cabin's updates. \
-     Right for adding software.",
-    "Copies every line of Cabin's recipe, with notes on what each one is for. \
-     Builds in minutes and stops following Cabin's updates. Right for changing \
-     the desktop itself.",
+    "Adds to the Cabin desktop. Builds in seconds and keeps up with Cabin's \
+     updates. Right for adding software.",
+    "Copies every line of Cabin's recipe, with notes on what each is for. \
+     Builds in minutes and stops following Cabin's updates. Right for \
+     changing the desktop itself.",
 ];
 
 /// Asks for a name, creates the recipe, and opens it ready to edit.
@@ -297,18 +297,32 @@ pub fn present_new(parent: &impl IsA<gtk::Widget>, on_changed: impl Fn() + 'stat
         .title("Start from")
         .model(&gtk::StringList::new(&[
             "The Cabin guest image",
-            "A full copy of the Cabin recipe",
+            "A full copy of the recipe",
         ]))
-        .subtitle(BASIS_DESCRIPTIONS[0])
         .build();
+    // use_subtitle puts the chosen option on its own line. Sharing the row
+    // with the title leaves it about eight characters wide, which turns
+    // "The Cabin guest image" into "The Cab...".
+    basis_row.set_use_subtitle(true);
     basis_row.set_subtitle_lines(0);
-    basis_row.connect_selected_notify(|row| {
-        row.set_subtitle(BASIS_DESCRIPTIONS[(row.selected() as usize).min(1)]);
+
+    // The explanation needs the full width, so it is a row of its own rather
+    // than the combo's subtitle.
+    let basis_note = adw::ActionRow::builder()
+        .title(BASIS_DESCRIPTIONS[0])
+        .css_classes(vec!["dim-label"])
+        .build();
+    basis_note.set_title_lines(0);
+    basis_note.set_use_markup(false);
+    let note_for_basis = basis_note.clone();
+    basis_row.connect_selected_notify(move |row| {
+        note_for_basis.set_title(BASIS_DESCRIPTIONS[(row.selected() as usize).min(1)]);
     });
 
     let group = adw::PreferencesGroup::new();
     group.add(&name_row);
     group.add(&basis_row);
+    group.add(&basis_note);
     dialog.set_extra_child(Some(&group));
 
     dialog.add_response("cancel", "Cancel");

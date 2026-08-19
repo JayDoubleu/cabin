@@ -142,17 +142,21 @@ Use `just`. Run `just` alone to list every task.
     thing telling them which line holds the session up. If you add something
     load-bearing, mark it and say how it fails. The label is the one that
     fails quietly: the image builds and then appears nowhere in Cabin.
-31. **Text from Podman or the filesystem is data, not markup.**
+31. **A name must fit a dropdown.** `AdwComboRow` shows the selected item on
+    the title's line, which leaves a few characters in a dialogue, so set
+    `use-subtitle` for anything longer than a word. Keep qualifiers such as
+    "your copy" or "default" out of the name and put them beside the row.
+32. **Text from Podman or the filesystem is data, not markup.**
     `AdwPreferencesRow` parses its title and subtitle as Pango markup, so an
     image called `<untagged> abc` or a path holding an ampersand makes GTK
     drop the label and warn. Call `set_use_markup(false)` on any row that
     carries such text.
-32. **Do not make a desktop a Toolbx container.** It was considered and it
+33. **Do not make a desktop a Toolbx container.** It was considered and it
     cannot work: toolbox runs with `--pid=host`, and systemd as PID 1 needs
     its own PID namespace. DESIGN.md section 19.4 has the full comparison.
     Use `podman exec` to get a shell, which is what the Open a shell dialogue
     shows.
-33. **Store interface names for remote access, never addresses.** An address
+34. **Store interface names for remote access, never addresses.** An address
     changes with the network, and a stored one would leave the desktop unable
     to start after a DHCP lease changed. Names resolve to addresses when the
     container is created. Loopback is always bound as well.

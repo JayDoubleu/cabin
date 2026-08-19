@@ -66,14 +66,20 @@ pub fn present(
 
     // Which image the desktop is built from. Only images that exist are
     // offered, because a desktop cannot be made from one that does not.
+    // use_subtitle puts the chosen image on its own line. Without it the name
+    // shares the row with the title and is truncated to "Cabin guest (de...",
+    // which is the one thing the row exists to show.
     let image_row = adw::ComboRow::builder().title("Image").build();
-    // Which image the chosen name refers to, kept beside the choice rather
-    // than inside it so the dropdown stays readable.
+    image_row.set_use_subtitle(true);
+    image_row.set_subtitle_lines(0);
+    // Which image that name refers to, kept out of the name so the name stays
+    // short enough for a dropdown.
     let detail_row = adw::ActionRow::builder()
         .title("From")
         .css_classes(vec!["property"])
         .build();
     detail_row.set_use_markup(false);
+    detail_row.set_subtitle_lines(0);
     // The tag for each entry, in the same order as the model.
     let image_tags: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
 
@@ -133,7 +139,7 @@ pub fn present(
     name_row.connect_changed(check.clone());
     check(&name_row);
 
-    let default_image = crate::state::State::new(crate::APP_ID).default_image();
+    let default_image = crate::recipes::default_tag();
 
     // Re-run after a build, so a new image appears without reopening.
     let row_for_check = image_missing.clone();
@@ -144,7 +150,8 @@ pub fn present(
     let name_for_check = name_row.clone();
     let taken_for_check = taken_names.clone();
     let podman_for_check = podman.clone();
-    let preferred = default_image.clone();
+    // The image chosen in the image manager, or Cabin's own when none was.
+    let preferred = crate::recipes::default_tag();
     let check_image: Rc<dyn Fn()> = Rc::new(move || {
         let row = row_for_check.clone();
         let combo = combo_for_check.clone();
@@ -222,9 +229,9 @@ pub fn present(
             .get(image_row.selected() as usize)
             .cloned()
             .unwrap_or_else(|| default_image.clone());
-        // The next desktop starts on the same image, which is nearly always
-        // what is wanted when several are made in a row.
-        crate::state::State::new(crate::APP_ID).set_default_image(&config.image);
+        // The default is not changed here. It is set on purpose in the image
+        // manager, and a desktop made once from a different image should not
+        // quietly become the answer for every desktop after it.
         config.memory_mb = Some(memory_row.value() as u64);
         config.graphics = match graphics_row.selected() {
             0 => GraphicsMode::Automatic,
@@ -302,20 +309,25 @@ fn buildable_images(images: &[cabin_podman::Image]) -> Vec<Choice> {
                 .map(|r| r.name.clone())
                 .unwrap_or_else(|| tag.clone());
             choices.push(Choice {
-                label: if is_base {
-                    format!("{name} (default)")
+                // The name only. Anything qualifying it goes in the row
+                // below, because this string also has to fit a dropdown.
+                label: name,
+                detail: if is_base {
+                    format!(
+                        "{} \u{b7} {tag} \u{b7} shipped with Cabin",
+                        image.human_size()
+                    )
                 } else {
-                    name
+                    format!("{} \u{b7} {tag}", image.human_size())
                 },
-                detail: format!("{} \u{b7} {tag}", image.human_size()),
                 tag: tag.clone(),
             });
         }
     }
 
-    // The image Cabin ships is always first and always says so. It is the one
-    // that works without anything else having been built, so it is the answer
-    // whenever the user has no reason to prefer another.
+    // The image Cabin ships comes first. It is the one that works without
+    // anything else having been built, so it is the answer whenever the user
+    // has no reason to prefer another.
     choices.sort_by(|a, b| {
         let not_base = |c: &Choice| c.tag != crate::recipes::BASE_TAG;
         not_base(a)

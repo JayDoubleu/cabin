@@ -31,7 +31,7 @@ pub fn present(
 
     let dialog = adw::Dialog::builder()
         .title("Guest Images")
-        .content_width(680)
+        .content_width(720)
         .content_height(620)
         .build();
 
@@ -255,6 +255,7 @@ fn populate_recipes(
     let base_built = images
         .iter()
         .any(|i| i.tags.iter().any(|t| t == crate::recipes::BASE_TAG));
+    let default_tag = crate::recipes::default_tag();
 
     for recipe in crate::recipes::all() {
         let image = images.iter().find(|i| i.tags.contains(&recipe.tag));
@@ -265,6 +266,21 @@ fn populate_recipes(
         // label dropped with a warning rather than shown.
         row.set_use_markup(false);
         row.set_subtitle_lines(0);
+        // Anything qualifying the name goes beside it. Putting it in the name
+        // makes the name too long for the dropdown that also shows it.
+        for (text, style) in [
+            (recipe.customised.then_some("Your copy"), "dim-label"),
+            ((recipe.tag == default_tag).then_some("Default"), "accent"),
+        ] {
+            let Some(text) = text else { continue };
+            row.add_suffix(
+                &gtk::Label::builder()
+                    .label(text)
+                    .css_classes(vec!["caption", style])
+                    .valign(gtk::Align::Center)
+                    .build(),
+            );
+        }
         row.set_subtitle(&match image {
             Some(image) => format!("Built, {} \u{b7} {}", image.human_size(), recipe.tag),
             // A custom recipe builds on the base, so it cannot be built
@@ -312,7 +328,7 @@ fn populate_recipes(
             parent,
             refresh.clone(),
             podman.clone(),
-            image.map(|i| i.id.clone()),
+            image.is_some(),
         ));
         list.append(&row);
     }
@@ -324,7 +340,7 @@ fn recipe_menu(
     parent: &adw::Dialog,
     refresh: Rc<dyn Fn()>,
     podman: Arc<Podman>,
-    _built: Option<String>,
+    built: bool,
 ) -> gtk::MenuButton {
     let popover = gtk::Popover::new();
     let box_ = gtk::Box::builder()
@@ -354,6 +370,20 @@ fn recipe_menu(
         crate::recipe::present_path(&parent_for_open, dir_for_open.clone(), move || refresh());
     });
     box_.append(&open);
+
+    // Only an image that exists can be the one a new desktop starts on.
+    if built && recipe.tag != crate::recipes::default_tag() {
+        let make_default = flat_button("Use for new desktops", "starred-symbolic");
+        let refresh_for_default = refresh.clone();
+        let tag = recipe.tag.clone();
+        let popover_ref = popover.clone();
+        make_default.connect_clicked(move |_| {
+            popover_ref.popdown();
+            crate::recipes::set_default_tag(&tag);
+            refresh_for_default();
+        });
+        box_.append(&make_default);
+    }
 
     match recipe.kind {
         crate::recipes::Kind::Base => {

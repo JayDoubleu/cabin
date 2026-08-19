@@ -166,7 +166,11 @@ you have seen the list.
 Guest Images lists recipes. Cabin ships one, and you can add your own with New
 Recipe. Build it, and it appears in the New Desktop dialogue as something to
 choose, so you can keep one desktop plain and another with your toolchain in
-it. Cabin's own image is always offered and marked as the default.
+it.
+
+New desktops start on Cabin's own image until you say otherwise. Any built
+image can be made the default from its menu in Guest Images, and the row says
+which one it is.
 
 A new recipe starts one of two ways:
 

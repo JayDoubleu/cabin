@@ -2108,7 +2108,43 @@ A full copy brings the whole tree, because the base Containerfile copies the
 scripts and units from beside it. A copy of the one file would build nothing,
 and the failure would name a missing path rather than the missing copy.
 
-### 21.4 Data in a label is not markup
+### 21.4 Names have to fit where they are shown
+
+Two truncations, one cause. A name was carrying its own qualifiers, and the
+place showing it was narrower than the name had become.
+
+`Cabin guest (yours) (default)` appeared in the New Desktop dropdown as
+`Cabin guest (yours) (de...`. The base recipe is now called `Cabin guest`
+whatever its state. Whether it is the user's copy, and whether it is the
+default, are marks beside the row rather than words inside the name. A name
+appears in a list row and in a dropdown, and both truncate.
+
+The second truncation was the widget rather than the text. `AdwComboRow` puts
+the selected item on the same line as the title, which leaves it a few
+characters wide in a dialogue: `The Cabin guest image` came out as
+`The Cab...`. Setting `use-subtitle` moves the selection to its own line, and
+anything explanatory moves to a row of its own. That is the general fix
+wherever a combo carries something longer than a word.
+
+The tag and size that were in the image name are now in a row beneath the
+choice. The name has to be short enough for a dropdown; the tag is what makes
+it unambiguous, and it has the width to be readable there.
+
+### 21.5 The default image is chosen, not inferred
+
+A new desktop starts on the image marked as the default, which is Cabin's own
+until the user says otherwise. The image manager sets it, from the menu on any
+recipe whose image is built, and marks the row.
+
+It is stored as a tag rather than a recipe name, because it is a desktop's
+image being chosen and an image can outlive the recipe that made it.
+
+Creating a desktop from a different image does not change the default. An
+earlier version remembered the last image used, which is reasonable on its own
+and wrong beside an explicit setting: choosing a default in one place and
+having it silently replaced from another leaves the setting meaning nothing.
+
+### 21.6 Data in a label is not markup
 
 `AdwPreferencesRow` parses its title and subtitle as Pango markup. An untagged
 image was shown as `<untagged> abf4cebddb04`, which reads as an unclosed tag,
