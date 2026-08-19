@@ -110,3 +110,16 @@ pub struct Actor {
     #[serde(rename = "Attributes", default)]
     pub attributes: HashMap<String, String>,
 }
+
+/// The parts of a container inspect response that Cabin reads.
+#[derive(Debug, Deserialize)]
+pub struct InspectResponse {
+    #[serde(rename = "Config")]
+    pub config: InspectConfig,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InspectConfig {
+    #[serde(rename = "Env", default)]
+    pub env: Vec<String>,
+}

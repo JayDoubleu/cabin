@@ -5,6 +5,16 @@
 # the host and would run nested. Detect the toolbox and reach the host podman.
 podman := if path_exists("/run/.toolboxenv") == "true" { "flatpak-spawn --host podman" } else { "podman" }
 
+# cabin-freerdp-sys links FreeRDP 3. If freerdp-devel is not installed system
+# wide, "just freerdp-sysroot" builds a local one and these point the build at
+# it. When the sysroot is absent, pkg-config falls back to the system.
+sysroot := env_var_or_default("CABIN_FREERDP_SYSROOT", env_var("HOME") / ".local/freerdp-sysroot")
+have_sysroot := path_exists(sysroot / "usr/lib64/pkgconfig")
+
+export PKG_CONFIG_PATH := if have_sysroot == "true" { sysroot / "usr/lib64/pkgconfig" } else { env_var_or_default("PKG_CONFIG_PATH", "") }
+export PKG_CONFIG_SYSROOT_DIR := if have_sysroot == "true" { sysroot } else { env_var_or_default("PKG_CONFIG_SYSROOT_DIR", "") }
+export LD_LIBRARY_PATH := if have_sysroot == "true" { sysroot / "usr/lib64" } else { env_var_or_default("LD_LIBRARY_PATH", "") }
+
 app_id := "io.github.jaydoubleu.Cabin"
 manifest := "build-aux/" + app_id + ".yaml"
 guest_image := "localhost/cabin-guest:f44"
@@ -126,6 +136,7 @@ freerdp-sysroot dest="~/.local/freerdp-sysroot":
     echo "  export PKG_CONFIG_SYSROOT_DIR=$dest"
     echo "  export LD_LIBRARY_PATH=$dest/usr/lib64"
 
-# Run the live FreeRDP test against a running guest.
+# Run every live test that needs a running guest.
 rdp-live:
     cargo test -p cabin-freerdp-sys --test live_connect -- --ignored --nocapture
+    cargo test -p cabin-rdp --test live_session -- --ignored --nocapture --test-threads=1

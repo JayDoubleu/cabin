@@ -1,14 +1,14 @@
 //! `CabinDisplay`: the widget that shows a guest desktop.
 //!
-//! # Status
+//! Frames arrive from the session thread as packed BGRA and become a
+//! `GdkMemoryTexture`. The widget letterboxes, so the guest keeps its aspect
+//! ratio in any window shape.
 //!
-//! The widget draws a placeholder and owns the resize debounce. The frame
-//! upload path is milestone 4. See DESIGN.md section 6.
-//!
-//! The debounce matters and is implemented now, because without it dragging a
-//! window edge sends a resize request per frame, and the guest re-lays out
-//! continuously. See DESIGN.md section 6.4.
+//! The resize debounce matters, because without it dragging a window edge
+//! sends a resize request per frame and the guest re-lays out continuously.
+//! See DESIGN.md section 6.4.
 
+use cabin_rdp::Frame;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
@@ -22,6 +22,10 @@ mod imp {
 
     #[derive(Default)]
     pub struct CabinDisplay {
+        /// The most recent frame, ready to draw.
+        pub texture: RefCell<Option<gtk::gdk::MemoryTexture>>,
+        /// Sends commands to the session thread, when one is attached.
+        pub commands: RefCell<Option<std::sync::mpsc::Sender<cabin_rdp::SessionCommand>>>,
         /// The guest framebuffer size. Zero until the first frame arrives.
         pub guest_size: Cell<(u32, u32)>,
         /// True when the guest should follow the window size.
@@ -65,10 +69,32 @@ mod imp {
             let width = widget.width() as f32;
             let height = widget.height() as f32;
 
-            // Placeholder until the frame path exists. A flat fill keeps the
-            // letterbox behaviour visible while the layout is developed.
+            // The letterbox bars. Painting them every time avoids leaving
+            // stale pixels when the aspect ratio changes.
             let bounds = gtk::graphene::Rect::new(0.0, 0.0, width, height);
             snapshot.append_color(&gtk::gdk::RGBA::new(0.09, 0.09, 0.11, 1.0), &bounds);
+
+            let texture = self.texture.borrow();
+            let Some(texture) = texture.as_ref() else {
+                return;
+            };
+
+            let (guest_w, guest_h) = self.guest_size.get();
+            if guest_w == 0 || guest_h == 0 {
+                return;
+            }
+
+            // Keep the guest's aspect ratio and centre it.
+            let scale = (width / guest_w as f32).min(height / guest_h as f32);
+            let drawn_w = guest_w as f32 * scale;
+            let drawn_h = guest_h as f32 * scale;
+            let area = gtk::graphene::Rect::new(
+                (width - drawn_w) / 2.0,
+                (height - drawn_h) / 2.0,
+                drawn_w,
+                drawn_h,
+            );
+            snapshot.append_texture(texture, &area);
         }
     }
 }
@@ -112,6 +138,53 @@ impl CabinDisplay {
         self.imp().guest_size.get()
     }
 
+    /// Attaches a session, so the widget can send input and resize requests.
+    pub fn set_command_sender(&self, sender: std::sync::mpsc::Sender<cabin_rdp::SessionCommand>) {
+        self.imp().commands.replace(Some(sender));
+    }
+
+    /// Detaches the session, so no further input is sent.
+    pub fn clear_command_sender(&self) {
+        self.imp().commands.replace(None);
+    }
+
+    /// Shows a new frame.
+    ///
+    /// The frame is packed BGRA with no row padding, which is what
+    /// `GdkMemoryTexture` expects when given a stride of width * 4.
+    pub fn set_frame(&self, frame: Frame) {
+        debug_assert!(
+            frame.is_consistent(),
+            "frame size does not match its buffer"
+        );
+
+        let imp = self.imp();
+        let bytes = gtk::glib::Bytes::from_owned(frame.data);
+        let texture = gtk::gdk::MemoryTexture::new(
+            frame.width as i32,
+            frame.height as i32,
+            gtk::gdk::MemoryFormat::B8g8r8a8,
+            &bytes,
+            frame.width as usize * 4,
+        );
+
+        let previous = imp.guest_size.replace((frame.width, frame.height));
+        imp.texture.replace(Some(texture));
+
+        // A guest-driven size change means the fit request was granted, or the
+        // guest resized itself. Either way the letterbox needs recomputing.
+        if previous != (frame.width, frame.height) {
+            self.queue_resize();
+        }
+        self.queue_draw();
+    }
+
+    fn send(&self, command: cabin_rdp::SessionCommand) {
+        if let Some(sender) = self.imp().commands.borrow().as_ref() {
+            let _ = sender.send(command);
+        }
+    }
+
     fn cancel_pending_resize(&self) {
         if let Some(id) = self.imp().pending_resize.take() {
             id.remove();
@@ -137,8 +210,10 @@ impl CabinDisplay {
 
     fn request_guest_resize(&self, width: u32, height: u32) {
         let (width, height) = cabin_rdp::session::clamp_resolution(width, height);
-        // Milestone 4 sends SessionCommand::Resize here.
         tracing::debug!("guest resize requested: {width}x{height}");
+        // The guest rounds odd sizes down and may grant something else, so the
+        // granted size is read back from the next frame rather than assumed.
+        self.send(cabin_rdp::SessionCommand::Resize { width, height });
     }
 
     /// Maps a point in widget space to guest framebuffer space.

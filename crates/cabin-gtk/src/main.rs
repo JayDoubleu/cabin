@@ -6,6 +6,7 @@ mod display;
 mod graphics;
 mod runtime;
 mod sidebar;
+mod viewer;
 mod window;
 
 use adw::prelude::*;

@@ -484,7 +484,7 @@ just guest          # build the guest image
 | 1 | Guest image serves a GNOME desktop over RDP | The whole idea works | Done, see section 12 |
 | 2 | Flatpak shell with sidebar and stubbed data | Packaging and UI skeleton | Done |
 | 3 | Podman client: list, start, stop, event stream | Real state in the sidebar | Done, see section 13 |
-| 4 | `CabinDisplay` shows guest frames, read-only | The hardest component | Frames reach Rust, see section 15. Widget still to do |
+| 4 | `CabinDisplay` shows guest frames, read-only | The hardest component | Done, see section 15 |
 | 5 | Keyboard and pointer input | Usable desktop |
 | 6 | Fit-to-window and fixed resolutions | The headline feature |
 | 7 | Create, delete, mounts, GPU and socket settings | Feature complete |
@@ -1018,13 +1018,40 @@ that a per-desktop setting, so a desktop given the Intel node may well
 negotiate AVC444 while a software-rendered one uses progressive. The client
 must handle both, and must not hard-code the progressive path.
 
-### 15.6 Still to do
+### 15.6 The session thread
 
-- The framebuffer reaches Rust. It does not yet reach a `GdkTexture` or the
-  `CabinDisplay` widget. That is the remaining part of milestone 4.
+FreeRDP is not thread safe and every call must come from the thread that
+created the client, so a session owns a dedicated thread. The interface never
+touches a FreeRDP pointer.
+
+```
+  session thread                          GTK main thread
+  ┌──────────────────────┐                ┌────────────────────────┐
+  │ cabin_rdp_poll       │                │ spawn_future_local     │
+  │ framebuffer copy     │ ─ Frame ─────► │   display.set_frame    │
+  │                      │  (bounded, 1)  │     GdkMemoryTexture   │
+  │ apply(command)       │ ◄─ command ──  │   input, resize        │
+  └──────────────────────┘   (mpsc)       └────────────────────────┘
+```
+
+The frame channel holds one item. A stale frame has no value, so a slow
+interface should make the session wait rather than build a queue.
+
+The framebuffer is copied rather than borrowed, and the copy strips row
+padding. FreeRDP's buffer belongs to FreeRDP, is reused between frames and is
+reallocated on resize, so it cannot cross a thread by reference.
+`GdkMemoryTexture` then takes the packed buffer with a stride of `width * 4`.
+
+### 15.7 Still to do
 - `rdpdr`, `rdpsnd` and `AUDIO_PLAYBACK_DVC` still connect even though the shim
   sets `FreeRDP_DeviceRedirection`, `FreeRDP_AudioPlayback` and friends to
   false, so those settings are applied too late or overridden by
   `freerdp_client_load_addins`. Harmless today, but it is unwanted surface.
 - `cabin_rdp_request_resize` sends a monitor layout over Display Control but
-  has not been exercised against a guest.
+  has not been exercised against a guest. Two things to expect when it is:
+  the guest rounds odd dimensions **down** to even, so a request for 1703x961
+  is granted as 1702x960 and the client must read the granted size back rather
+  than assume; and a layout change driven over Display Control produces no
+  confirmation dialogue. If the "Keep these display settings?" dialogue ever
+  appears during a resize test, the change went through `DisplayConfig` instead
+  and will revert itself after twenty seconds.

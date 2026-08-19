@@ -151,6 +151,23 @@ impl Podman {
         Ok(created.id)
     }
 
+    /// Reads the RDP password for a desktop.
+    ///
+    /// The password lives in the container environment, because the guest
+    /// needs it at boot. That means `podman inspect` reveals it. DESIGN.md
+    /// section 13.4 records that the host keyring is where it belongs.
+    pub async fn desktop_password(&self, id: &str) -> Result<String> {
+        let body = self.get_raw(&format!("{API}/containers/{id}/json")).await?;
+        let inspect: InspectResponse = serde_json::from_slice(&body)?;
+        inspect
+            .config
+            .env
+            .iter()
+            .find_map(|entry| entry.strip_prefix("CABIN_PASSWORD="))
+            .map(str::to_string)
+            .ok_or_else(|| Error::NotFound(format!("no password recorded for {id}")))
+    }
+
     pub async fn start(&self, id: &str) -> Result<()> {
         self.send("POST", &format!("{API}/containers/{id}/start"), None)
             .await

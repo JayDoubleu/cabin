@@ -26,6 +26,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         .build();
 
     let podman = Arc::new(Podman::new());
+    let podman_for_viewer = podman.clone();
     let sidebar = Sidebar::new(podman);
 
     let sidebar_toolbar = adw::ToolbarView::new();
@@ -36,20 +37,30 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         .child(&sidebar_toolbar)
         .build();
 
-    // Selecting a desktop will open a session in milestone 4. For now it
-    // reports what it would connect to, which is enough to verify the list
-    // carries the right port and state.
-    sidebar.connect_selected(|desktop| {
-        tracing::info!(
-            "selected {} ({:?}), rdp port {:?}",
-            desktop.name,
-            desktop.state,
-            desktop.rdp_port
+    let (content, display) = build_content();
+
+    // Selecting a running desktop opens a session and starts drawing it.
+    let podman_for_select = podman_for_viewer;
+    sidebar.connect_selected(move |desktop| {
+        if !desktop.state.is_running() {
+            tracing::info!("{} is not running", desktop.name);
+            return;
+        }
+        let display = display.clone();
+        let podman = podman_for_select.clone();
+        let id = desktop.id.clone();
+        let desktop = desktop.clone();
+        crate::runtime::spawn(
+            async move { podman.desktop_password(&id).await },
+            move |result| match result {
+                Ok(password) => crate::viewer::attach(&display, &desktop, password),
+                Err(e) => tracing::error!("could not read the desktop password: {e}"),
+            },
         );
     });
 
     split.set_sidebar(Some(&sidebar_page));
-    split.set_content(Some(&build_content()));
+    split.set_content(Some(&content));
     window.set_content(Some(&split));
 
     // Podman is reachable or it is not. Tell the user at start-up rather
@@ -60,7 +71,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     window
 }
 
-fn build_content() -> adw::NavigationPage {
+fn build_content() -> (adw::NavigationPage, CabinDisplay) {
     let display = CabinDisplay::new();
     display.set_hexpand(true);
     display.set_vexpand(true);
@@ -73,10 +84,11 @@ fn build_content() -> adw::NavigationPage {
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&display));
 
-    adw::NavigationPage::builder()
+    let page = adw::NavigationPage::builder()
         .title("Desktop")
         .child(&toolbar)
-        .build()
+        .build();
+    (page, display)
 }
 
 fn build_display_menu(display: &CabinDisplay) -> gtk::MenuButton {
