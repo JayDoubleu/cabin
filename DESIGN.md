@@ -1324,16 +1324,59 @@ The guess is only a guess, so a real error from Podman is always preferred over
 it. But 255 with an empty log is this failure often enough that naming it is
 far more useful than reporting the number.
 
-### 15.16 What is not finished
+### 15.16 Exposing a container runtime
+
+Binding the host socket works, and it was more involved than mounting a file.
+
+**SELinux blocks it by default.** The socket is labelled `user_tmp_t`, which a
+confined container may not open. The symptom is misleading: every access is
+denied including `stat`, so `ls` reports the file as absent rather than
+forbidden, and even root inside the guest is refused. Cabin sets
+`security_opt: label=disable`, and only for the desktops that ask for a host
+socket.
+
+**The socket arrives owned by root.** In a rootless container the host user maps
+to container root, so a socket owned by the host user appears as root's, and the
+desktop user cannot open it. Rather than change anything on the host, or make
+the user reach for `sudo`, the guest proxies it: a socket unit listens on
+`/run/cabin/container.sock` owned by the desktop user and forwards to the bound
+socket with `systemd-socket-proxyd`, which ships with systemd. `CONTAINER_HOST`
+and `DOCKER_HOST` both point at the proxy, so tools work with no configuration.
+
+Both variables are set for the Podman socket, because most tooling reads
+`DOCKER_HOST` even when talking to Podman.
+
+Verified: a desktop with the host Podman socket runs `podman info` as the
+desktop user, with no `sudo`, and gets back the host's own hostname.
+
+### 15.17 Nested Podman does not work yet, and is not offered
+
+The dialogue does not list it. An option that quietly fails is worse than an
+option that is absent.
+
+It came close, and the remaining problems are recorded so the next attempt
+starts further along:
+
+1. **`newuidmap` cannot write a uid_map.** Rootless Podman inside a rootless
+   container has no privilege to map a range for a child namespace. Emptying
+   `/etc/subuid` and `/etc/subgid` fixes this: Podman then falls back to
+   "rootless single mapping", where everything runs as one user. Setting
+   `userns = "host"` in `containers.conf` does **not** help, because that
+   governs the containers Podman runs, not Podman's own set-up.
+2. **`fuse-overlayfs` needs `CAP_SYS_ADMIN`.** The `vfs` driver needs no mount
+   and is the only one that works. It is slower and uses more disk.
+3. **Networking needs `/dev/net/tun`.** Without it pasta fails with "Failed to
+   set up tap device in namespace". The device is passed in for this policy.
+4. **Still unresolved:** the storage database records `overlay` and then
+   refuses the configured `vfs` driver on a later run, and the inotify limit in
+   section 15.15 bites again from inside the guest.
+
+The code paths for the policy are correct and stay in the tree. Only the choice
+is withheld.
+
+### 15.18 What is not finished
 
 An audit of the tree against this document, rather than a list from memory.
-
-**The container runtime setting does nothing.** `SocketPolicy` round trips
-through the labels and the dialogue offers all four choices, but
-`create_desktop` never reads it. Nested Podman is not set up, and neither host
-socket is mounted. The failure is at least in the safe direction, since the
-dangerous options do not happen either, but the dialogue currently promises
-something the code does not do. This is the largest gap.
 
 **The TLS certificate is not pinned.** Section 8 says Cabin pins the
 fingerprint on first connect and warns if it changes. It does not:

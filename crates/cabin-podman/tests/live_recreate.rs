@@ -259,3 +259,117 @@ async fn a_shared_folder_reaches_the_container() {
 
     let _ = podman.remove(&id, true).await;
 }
+
+/// Nested Podman must actually run a container inside the desktop. The setting
+/// existed in the interface for a while before it did anything, so this test
+/// asks the guest to prove it rather than trusting the configuration.
+#[tokio::test]
+#[ignore = "nested Podman does not work yet, see DESIGN.md section 15.17"]
+async fn nested_podman_can_run_a_container() {
+    use cabin_core::SocketPolicy;
+
+    let podman = Podman::new();
+    let name = "cabin-nested-test";
+    let _ = podman.remove(name, true).await;
+
+    let mut config = DesktopConfig::new(name);
+    config.graphics = GraphicsMode::Software;
+    config.socket = SocketPolicy::Nested;
+
+    let id = podman
+        .create_desktop(&config, 13992, &[], "nested-test")
+        .await
+        .expect("create");
+    podman
+        .start_desktop(&id, name)
+        .await
+        .expect("the desktop should start");
+
+    // Run a container inside the desktop, as the desktop user.
+    let output = host_podman(&[
+        "exec",
+        "-u",
+        "cabin",
+        name,
+        "sh",
+        "-c",
+        "export XDG_RUNTIME_DIR=/run/user/1000; podman run --rm \
+         registry.fedoraproject.org/fedora:44 echo nested-ok 2>&1 | tail -3",
+    ]);
+    let text = String::from_utf8_lossy(&output.stdout);
+    let errors = String::from_utf8_lossy(&output.stderr);
+    println!("guest said: {}", text.trim());
+    if !errors.trim().is_empty() {
+        println!("stderr: {}", errors.trim());
+    }
+
+    assert!(
+        text.contains("nested-ok"),
+        "podman inside the desktop did not run a container.\nstdout: {text}\nstderr: {errors}"
+    );
+
+    podman.stop(&id, 20).await.ok();
+    let _ = podman.remove(&id, true).await;
+}
+
+/// Exposing the host Podman socket must let the desktop drive the host's
+/// containers. This is the dangerous option, so it had better either work or
+/// not be offered.
+#[tokio::test]
+#[ignore = "needs a running podman.socket and the cabin-guest image"]
+async fn the_host_podman_socket_reaches_the_desktop() {
+    use cabin_core::SocketPolicy;
+
+    let podman = Podman::new();
+    let name = "cabin-hostsock-test";
+    let _ = podman.remove(name, true).await;
+
+    let mut config = DesktopConfig::new(name);
+    config.graphics = GraphicsMode::Software;
+    config.socket = SocketPolicy::HostPodman;
+
+    let id = podman
+        .create_desktop(&config, 13991, &[], "hostsock-test")
+        .await
+        .expect("create");
+    podman
+        .start_desktop(&id, name)
+        .await
+        .expect("the desktop should start");
+
+    let host_name =
+        String::from_utf8_lossy(&host_podman(&["info", "--format", "{{.Host.Hostname}}"]).stdout)
+            .trim()
+            .to_string();
+    assert!(!host_name.is_empty(), "could not read the host name");
+
+    // The desktop user must reach the host podman with no sudo and no
+    // configuration, using only the environment Cabin set. The proxy is socket
+    // activated and the session is still starting, so allow a few attempts.
+    let mut seen = String::new();
+    for _ in 0..12 {
+        let output = host_podman(&[
+            "exec",
+            "-u",
+            "cabin",
+            name,
+            "sh",
+            "-c",
+            "podman info --format '{{.Host.Hostname}}' 2>&1 | tail -2",
+        ]);
+        seen = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if seen.contains(&host_name) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    println!("desktop sees podman on: {seen}");
+    assert!(
+        seen.contains(&host_name),
+        "the desktop should reach the host podman ({host_name}), got {seen:?}"
+    );
+
+    podman.stop(&id, 20).await.ok();
+    let _ = podman.remove(&id, true).await;
+}

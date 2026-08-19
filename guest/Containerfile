@@ -28,6 +28,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         adwaita-icon-theme adwaita-cursor-theme \
         openssl passwd sudo shadow-utils procps-ng iproute \
         vim-minimal less git \
+        podman podman-compose fuse-overlayfs \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
@@ -49,11 +50,16 @@ RUN systemctl mask \
 
 # The desktop user. The password is replaced at first boot from the
 # CABIN_PASSWORD environment variable.
+# Subordinate IDs let the desktop user run rootless Podman of its own. The
+# range is inside the container's own user namespace, so it costs nothing on
+# the host.
 RUN useradd --uid ${CABIN_UID} --create-home --shell /bin/bash \
         --groups wheel ${CABIN_USER} \
     && echo "${CABIN_USER}:cabin" | chpasswd \
     && echo "${CABIN_USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/90-cabin \
     && chmod 0440 /etc/sudoers.d/90-cabin \
+    && echo "${CABIN_USER}:100000:65536" > /etc/subuid \
+    && echo "${CABIN_USER}:100000:65536" > /etc/subgid \
     && loginctl enable-linger ${CABIN_USER} 2>/dev/null || \
        (mkdir -p /var/lib/systemd/linger && touch /var/lib/systemd/linger/${CABIN_USER})
 
@@ -63,6 +69,7 @@ COPY systemd/user/ /etc/systemd/user/
 
 RUN chmod +x /usr/libexec/cabin/* \
     && systemctl enable cabin-prepare.service \
+    && systemctl enable cabin-host-socket.socket \
     && systemctl --global enable cabin-session.target
 
 ENV CABIN_WIDTH=1920 \

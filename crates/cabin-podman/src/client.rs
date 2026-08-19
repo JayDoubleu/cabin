@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use crate::http;
 use crate::model::*;
-use cabin_core::{labels, Desktop, DesktopConfig, State, LABEL_MANAGED};
+use cabin_core::{labels, Desktop, DesktopConfig, SocketPolicy, State, LABEL_MANAGED};
 use std::collections::HashMap;
 
 /// The libpod API version prefix. Podman keeps this stable.
@@ -92,6 +92,14 @@ impl Podman {
     ) -> Result<String> {
         let mut env = HashMap::new();
         env.insert("CABIN_PASSWORD".to_string(), password.to_string());
+        // Whatever the socket policy needs the guest to know.
+        for (key, value) in config.socket.guest_env() {
+            env.insert(key, value);
+        }
+        if config.socket.is_nested() {
+            // Tells the guest's first boot to prepare rootless Podman storage.
+            env.insert("CABIN_NESTED_PODMAN".to_string(), "1".to_string());
+        }
         env.insert("CABIN_WIDTH".to_string(), config.width.to_string());
         env.insert("CABIN_HEIGHT".to_string(), config.height.to_string());
         env.insert("CABIN_RDP_PORT".to_string(), GUEST_RDP_PORT.to_string());
@@ -105,7 +113,7 @@ impl Podman {
             options: vec!["rw".to_string()],
         }];
 
-        let mounts = Vec::from_iter(config.mounts.iter().map(|m| {
+        let mut mounts = Vec::from_iter(config.mounts.iter().map(|m| {
             let mut options = vec![m.mode.as_podman_option().to_string()];
             if m.relabel {
                 options.push("z".to_string());
@@ -118,7 +126,25 @@ impl Podman {
             }
         }));
 
-        let devices = config
+        // Bind the host container socket in, when the user asked for it and
+        // accepted the warning. See DESIGN.md section 7.2.
+        if let Some(guest_path) = config.socket.guest_socket_path() {
+            if let Some(host_path) = self.host_socket_for(config.socket) {
+                mounts.push(CreateMount {
+                    destination: guest_path.to_string(),
+                    source: host_path,
+                    kind: "bind".to_string(),
+                    options: vec!["rw".to_string()],
+                });
+            } else {
+                tracing::warn!(
+                    "{:?} was requested but no such socket exists on this host",
+                    config.socket
+                );
+            }
+        }
+
+        let mut devices: Vec<Device> = config
             .graphics
             .resolve(render_nodes)
             .map(|path| {
@@ -127,6 +153,11 @@ impl Podman {
                 }]
             })
             .unwrap_or_default();
+        for path in config.socket.required_devices() {
+            devices.push(Device {
+                path: (*path).to_string(),
+            });
+        }
 
         let resource_limits = build_limits(config);
 
@@ -145,6 +176,10 @@ impl Podman {
                 protocol: "tcp".to_string(),
             }],
             systemd: "always".to_string(),
+            selinux_opts: config
+                .socket
+                .needs_selinux_disabled()
+                .then(|| vec!["disable".to_string()]),
             resource_limits,
             stop_signal: SIGRTMIN_3,
         };
@@ -257,6 +292,22 @@ impl Podman {
             },
         )
         .await
+    }
+
+    /// Finds the host socket for a policy, if it is actually there.
+    ///
+    /// A missing socket is not an error at create time. Reporting it as one
+    /// would block a desktop from being made at all, when the user may simply
+    /// not have started that service yet.
+    fn host_socket_for(&self, policy: SocketPolicy) -> Option<String> {
+        let candidate = match policy {
+            SocketPolicy::HostPodman => self.socket.clone(),
+            SocketPolicy::HostDocker => "/var/run/docker.sock".to_string(),
+            SocketPolicy::None | SocketPolicy::Nested => return None,
+        };
+        std::path::Path::new(&candidate)
+            .exists()
+            .then_some(candidate)
     }
 
     async fn get_raw(&self, path: &str) -> Result<Vec<u8>> {

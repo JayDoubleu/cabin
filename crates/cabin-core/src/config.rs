@@ -49,7 +49,77 @@ pub enum SocketPolicy {
     HostDocker,
 }
 
+/// Where a host socket is bound inside the guest.
+///
+/// The host user maps to container root, so this lands owned by root and the
+/// desktop user cannot reach it. The guest proxies it to
+/// [`GUEST_PROXY_SOCKET`], which the desktop user owns.
+pub const GUEST_HOST_SOCKET: &str = "/run/host-container.sock";
+
+/// The socket the desktop user actually talks to.
+pub const GUEST_PROXY_SOCKET: &str = "/run/cabin/container.sock";
+
 impl SocketPolicy {
+    /// The host socket to bind into the guest, if any.
+    ///
+    /// Returns `(host path, guest path)`. The host path is resolved by the
+    /// caller for Podman, because it lives under the runtime directory.
+    pub fn guest_socket_path(self) -> Option<&'static str> {
+        match self {
+            Self::HostPodman | Self::HostDocker => Some(GUEST_HOST_SOCKET),
+            Self::None | Self::Nested => None,
+        }
+    }
+
+    /// True when the container must run without SELinux labelling.
+    ///
+    /// The host socket is labelled `user_tmp_t`, which a confined container
+    /// cannot open. Without this the mount appears and every access is denied,
+    /// including `stat`, which reads as the file being absent.
+    pub fn needs_selinux_disabled(self) -> bool {
+        self.guest_socket_path().is_some()
+    }
+
+    /// Environment for the guest, so the usual tools find the right socket.
+    ///
+    /// `CONTAINER_HOST` is what Podman reads and `DOCKER_HOST` is what the
+    /// Docker CLI and most libraries read. Setting both means a tool inside
+    /// the desktop works without the user configuring anything.
+    pub fn guest_env(self) -> Vec<(String, String)> {
+        match self {
+            Self::HostPodman => vec![
+                (
+                    "CONTAINER_HOST".into(),
+                    format!("unix://{GUEST_PROXY_SOCKET}"),
+                ),
+                ("DOCKER_HOST".into(), format!("unix://{GUEST_PROXY_SOCKET}")),
+            ],
+            Self::HostDocker => {
+                vec![("DOCKER_HOST".into(), format!("unix://{GUEST_PROXY_SOCKET}"))]
+            }
+            // Nested Podman uses its own socket inside the guest, so the
+            // defaults are already right.
+            Self::None | Self::Nested => Vec::new(),
+        }
+    }
+
+    /// True when the guest needs its own container storage prepared.
+    pub fn is_nested(self) -> bool {
+        matches!(self, Self::Nested)
+    }
+
+    /// Devices the guest needs for this policy.
+    ///
+    /// Nested Podman sets up networking with pasta, which needs a tun device.
+    /// Without it the inner container starts and then fails with "Failed to
+    /// set up tap device in namespace".
+    pub fn required_devices(self) -> &'static [&'static str] {
+        match self {
+            Self::Nested => &["/dev/net/tun"],
+            _ => &[],
+        }
+    }
+
     /// True when the user must confirm a warning before this applies.
     pub fn needs_warning(self) -> bool {
         matches!(self, Self::HostPodman | Self::HostDocker)
@@ -178,6 +248,64 @@ mod tests {
     #[test]
     fn software_passes_no_device() {
         assert_eq!(GraphicsMode::Software.resolve(&nodes()), None);
+    }
+
+    #[test]
+    fn only_the_host_options_bind_a_socket() {
+        assert_eq!(SocketPolicy::None.guest_socket_path(), None);
+        assert_eq!(SocketPolicy::Nested.guest_socket_path(), None);
+        assert_eq!(
+            SocketPolicy::HostPodman.guest_socket_path(),
+            Some(GUEST_HOST_SOCKET)
+        );
+        assert_eq!(
+            SocketPolicy::HostDocker.guest_socket_path(),
+            Some(GUEST_HOST_SOCKET)
+        );
+    }
+
+    #[test]
+    fn nested_podman_needs_a_tun_device() {
+        assert_eq!(SocketPolicy::Nested.required_devices(), &["/dev/net/tun"]);
+        assert!(SocketPolicy::None.required_devices().is_empty());
+        assert!(SocketPolicy::HostPodman.required_devices().is_empty());
+    }
+
+    #[test]
+    fn only_the_host_options_relax_selinux() {
+        assert!(SocketPolicy::HostPodman.needs_selinux_disabled());
+        assert!(SocketPolicy::HostDocker.needs_selinux_disabled());
+        assert!(!SocketPolicy::None.needs_selinux_disabled());
+        assert!(!SocketPolicy::Nested.needs_selinux_disabled());
+    }
+
+    #[test]
+    fn tools_are_pointed_at_the_proxy_not_the_raw_socket() {
+        // The raw socket is owned by root inside the guest. Pointing tools at
+        // it directly would give permission denied to the desktop user.
+        for policy in [SocketPolicy::HostPodman, SocketPolicy::HostDocker] {
+            for (_, value) in policy.guest_env() {
+                assert!(
+                    value.contains(GUEST_PROXY_SOCKET),
+                    "{policy:?} should use the proxy, got {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_podman_socket_also_answers_to_docker_host() {
+        // Most tooling reads DOCKER_HOST even when talking to Podman, so
+        // setting only CONTAINER_HOST would leave the docker CLI broken.
+        let env = SocketPolicy::HostPodman.guest_env();
+        assert!(env.iter().any(|(k, _)| k == "CONTAINER_HOST"));
+        assert!(env.iter().any(|(k, _)| k == "DOCKER_HOST"));
+    }
+
+    #[test]
+    fn the_safe_options_set_no_environment() {
+        assert!(SocketPolicy::None.guest_env().is_empty());
+        assert!(SocketPolicy::Nested.guest_env().is_empty());
     }
 
     #[test]

@@ -1,0 +1,17 @@
+[Unit]
+Description=Host container socket, reachable by the desktop user
+# Only when Cabin bound a host socket in. Without this the unit fails on every
+# desktop that did not ask for one.
+ConditionPathExists=/run/host-container.sock
+
+[Socket]
+# The bound socket arrives owned by root, because the host user maps to
+# container root in a rootless container. The desktop user cannot open it. This
+# proxy presents the same socket under an address the desktop user owns.
+ListenStream=/run/cabin/container.sock
+SocketUser=cabin
+SocketGroup=cabin
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target

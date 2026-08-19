@@ -26,6 +26,7 @@ CABIN_PASSWORD="$(env_of_pid1 CABIN_PASSWORD)";   CABIN_PASSWORD="${CABIN_PASSWO
 # DESIGN.md: a shell-created monitor becomes the primary, and the client is
 # then shown the other one, which is empty.
 CABIN_SHELL_MONITOR="$(env_of_pid1 CABIN_SHELL_MONITOR)"
+CABIN_NESTED_PODMAN="$(env_of_pid1 CABIN_NESTED_PODMAN)"
 
 install -d -m 0755 /run/cabin
 install -d -m 0700 -o "${CABIN_USER}" -g "${CABIN_USER}" /var/lib/cabin
@@ -42,6 +43,37 @@ if [ ! -f /var/lib/cabin/tls/rdp.crt ]; then
         -keyout /var/lib/cabin/tls/rdp.key >/dev/null 2>&1
     chown "${CABIN_USER}:${CABIN_USER}" /var/lib/cabin/tls/rdp.crt /var/lib/cabin/tls/rdp.key
     chmod 0600 /var/lib/cabin/tls/rdp.key
+fi
+
+# Rootless Podman inside a rootless container cannot mount fuse-overlayfs,
+# because that needs CAP_SYS_ADMIN which the outer container does not have.
+# The vfs driver needs no mount at all. It is slower and uses more disk, and it
+# is the only driver that works here.
+if [ -n "${CABIN_NESTED_PODMAN}" ]; then
+    # Podman inside a rootless container cannot call newuidmap: writing a
+    # uid_map for a child namespace needs privileges the outer container does
+    # not have, and it fails with "Operation not permitted". Removing the
+    # subordinate ID ranges puts Podman into single UID mode, where it never
+    # calls newuidmap at all. Everything inside then runs as one user, which is
+    # the only arrangement that works here.
+    : > /etc/subuid
+    : > /etc/subgid
+
+    # fuse-overlayfs needs a mount, which needs CAP_SYS_ADMIN, which a rootless
+    # container does not have. vfs needs no mount. It is slower and uses more
+    # disk, and it is the only driver available. ignore_chown_errors goes with
+    # single UID mode, where the usual ownership changes cannot be made.
+    conf_dir="/home/${CABIN_USER}/.config/containers"
+    install -d -m 0755 -o "${CABIN_USER}" -g "${CABIN_USER}" \
+        "/home/${CABIN_USER}/.config" "${conf_dir}"
+    cat > "${conf_dir}/storage.conf" <<'STORAGEEOF'
+[storage]
+driver = "vfs"
+
+[storage.options]
+ignore_chown_errors = "true"
+STORAGEEOF
+    chown "${CABIN_USER}:${CABIN_USER}" "${conf_dir}/storage.conf"
 fi
 
 cat > /run/cabin/env <<ENVEOF

@@ -46,6 +46,11 @@ pub struct CreateContainer {
     pub portmappings: Vec<CreatePortMapping>,
     /// systemd runs as PID 1, so the container needs the systemd integration.
     pub systemd: String,
+    /// Turns off SELinux labelling for this container. Only set when a host
+    /// container socket is bound in, because its label is not one a confined
+    /// container may open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selinux_opts: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_limits: Option<ResourceLimits>,
     pub stop_signal: i32,

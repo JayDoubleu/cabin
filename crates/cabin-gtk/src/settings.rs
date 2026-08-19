@@ -13,16 +13,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 /// The socket options, in the order they appear, safest first.
+///
+/// `SocketPolicy::Nested` is deliberately absent. Rootless Podman inside a
+/// rootless container does not work yet, and offering a choice that quietly
+/// fails is worse than not offering it. DESIGN.md section 15.17 records how
+/// far it got.
 const SOCKET_CHOICES: &[(SocketPolicy, &str, &str)] = &[
     (
         SocketPolicy::None,
         "None",
         "No container runtime inside this desktop.",
-    ),
-    (
-        SocketPolicy::Nested,
-        "Podman inside the desktop",
-        "Recommended. The desktop runs its own rootless Podman.",
     ),
     (
         SocketPolicy::HostPodman,

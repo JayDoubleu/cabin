@@ -1,0 +1,11 @@
+[Unit]
+Description=Host container socket proxy
+Requires=cabin-host-socket.socket
+After=cabin-host-socket.socket
+ConditionPathExists=/run/host-container.sock
+
+[Service]
+# systemd-socket-proxyd ships with systemd, so this needs nothing extra in the
+# image.
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd /run/host-container.sock
+PrivateTmp=no
