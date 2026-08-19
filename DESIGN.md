@@ -417,8 +417,9 @@ The create dialogue asks for a name, a base image, a memory limit, a CPU limit,
 and a home volume size. Everything else takes a default and is changed later in
 Settings.
 
-Cabin builds the base image on first use if it is absent, and shows build
-output in a progress page.
+The guest image is built by Cabin itself, on the machine that runs it. Section
+19 has the detail. The create dialogue checks for it and offers to build it,
+rather than letting the desktop fail with "no such image".
 
 ### 7.5 Remote access and network selection
 
@@ -1822,3 +1823,96 @@ desktop list is showing. Three details matter:
   than left to look like a fault.
 - Turning the option on acts at once when a fixed resolution is already
   chosen, rather than waiting for the user to pick the same one again.
+
+---
+
+## 19. Guest images
+
+### 19.1 The image is ours, and it is built here
+
+A desktop runs from `localhost/cabin-guest:f44`, which `guest/Containerfile`
+builds from `registry.fedoraproject.org/fedora:44`. That base is the only
+upstream dependency. Everything above it, the GNOME session, the systemd
+units, the `cabin` user and the RDP configuration, is in this repository.
+
+The image is never published. There is no registry account, no build pipeline
+and no signing key, so pulling one would mean trusting something nobody has set
+up. Building locally avoids all of that, at the cost of several minutes on
+first use.
+
+That cost has to be paid somewhere visible. Until this section was written it
+was paid by the first desktop failing with:
+
+```
+Podman returned 404: no such image: localhost/cabin-guest:f44: image not known
+```
+
+which is accurate and names the wrong thing: the image, not the fix. Worse,
+section 7.4 claimed Cabin already built the image on first use, and it never
+did. That claim was aspirational and read as a description.
+
+### 19.2 Managing images
+
+The main menu opens a list of the images on the host: name, size and short id,
+with the one Cabin uses marked. From there an image can be built, rebuilt or
+deleted.
+
+**The build context ships with the application.** `guest/` installs to
+`<datadir>/cabin/guest`, and `guestdir::find` looks there, at `/app/share` for
+the Flatpak, beside the executable, and finally in the source tree so that
+`just run` works without installing. A directory only counts when it holds a
+Containerfile, or a partly installed one would be chosen over a complete one
+and the build would fail for a reason that points nowhere.
+
+**The context is a tar built in memory.** File modes are deliberately not
+preserved: the Containerfile runs `chmod` on everything it copies, so the
+archive does not need them, and leaving them out means the build behaves the
+same however the files were checked out. Entries are sorted, so the same tree
+always produces the same archive and Podman's layer cache is not defeated by
+the order the filesystem happens to return.
+
+**Build output is streamed.** A guest image takes minutes, and a progress
+display that only appears at the end is not a progress display. The build
+endpoint reports a failure inside a stream that still ends with 200, so the
+error is read out of the body rather than from the status.
+
+Deleting is worth having for a reason that only showed up once the list
+existed. The development host had four untagged 1.6 GB images, left behind by
+earlier rebuilds, using 6.4 GB that nothing accounted for. Podman refuses to
+delete an image a container still uses, and Cabin shows that refusal rather
+than forcing past it.
+
+### 19.3 Opening a shell in a desktop
+
+`podman exec -it -u cabin -w /home/cabin <name> bash` gives a shell inside a
+running desktop, as the user the desktop runs as, in its home directory. Both
+flags matter: without `-u` the shell is root, which owns none of the files in
+that home directory, and without `-w` it starts at `/`.
+
+Cabin shows this command and copies it. It does not run it. Starting a terminal
+on the host needs `--talk-name=org.freedesktop.Flatpak`, which the sandbox
+design rules out, so offering a button that only worked outside the Flatpak
+would be worse than offering none.
+
+### 19.4 Toolbox integration was considered and rejected
+
+The idea was to make a Cabin desktop double as a Toolbx container, so
+`toolbox enter` would reach it. Inspecting a real toolbox container settles it.
+
+| | `fedora-toolbox-44` as it runs | A Cabin desktop needs |
+|---|---|---|
+| PID 1 | `toolbox init-container` | `systemd` |
+| PID namespace | host | its own |
+| Privileged | yes | no, rootless |
+| SELinux | `label=disable unmask=all` | enforcing |
+| Home | the host home bind mounted | portal-chosen paths only |
+| Host root | `/` at `/run/host` | nothing |
+| Network | host | its own, with a published port |
+
+The PID namespace alone decides it: systemd as PID 1 needs its own, and toolbox
+uses the host's. The rest compounds it. Toolbox exists to dissolve the boundary
+between container and host, which is the opposite of what a Cabin desktop is
+for, so a container that was both would be neither.
+
+The goal behind the request, reaching a desktop from a terminal, is met by
+19.3 with none of that cost.

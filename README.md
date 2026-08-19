@@ -146,6 +146,29 @@ host. Running Podman inside the desktop would be the safe alternative, and it
 does not work yet, so it is not offered. DESIGN.md section 15.17 records how
 far it got.
 
+### The guest image
+
+A desktop runs from an image Cabin builds on your machine, from
+`guest/Containerfile`, on top of the official Fedora container base. Nothing is
+downloaded from anywhere else, and nothing is published.
+
+Build it from the main menu, under Guest Images, or with `just guest`. The
+first build takes several minutes. The same place lists what is on the host and
+removes images you no longer want, which is worth checking after a few
+rebuilds: each one leaves the previous image untagged and it still occupies
+over a gigabyte.
+
+### Opening a shell in a desktop
+
+Each desktop's menu has "Open a shell", which gives you the command:
+
+```sh
+podman exec -it -u cabin -w /home/cabin <desktop> bash
+```
+
+Cabin shows the command rather than running it, because launching a terminal on
+your computer would need a permission it deliberately does not ask for.
+
 ### Shared files and folders
 
 A desktop can be given host folders and single files. Both are Podman bind

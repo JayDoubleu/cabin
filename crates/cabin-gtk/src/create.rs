@@ -63,11 +63,28 @@ pub fn present(
         .active(false)
         .build();
 
+    // A fresh installation has no guest image, and creating a desktop then
+    // fails with "no such image" after everything here has been filled in.
+    // Ask Podman now, and offer the way out rather than only the message.
+    let image_missing = adw::ActionRow::builder()
+        .title("The guest image is not built yet")
+        .subtitle("A desktop needs it. Building takes several minutes.")
+        .css_classes(vec!["warning"])
+        .visible(false)
+        .build();
+    let build_now = gtk::Button::builder()
+        .label("Build")
+        .valign(gtk::Align::Center)
+        .css_classes(vec!["suggested-action"])
+        .build();
+    image_missing.add_suffix(&build_now);
+
     let group = adw::PreferencesGroup::new();
     group.add(&name_row);
     group.add(&memory_row);
     group.add(&graphics_row);
     group.add(&open_settings);
+    group.add(&image_missing);
 
     dialog.set_extra_child(Some(&group));
     dialog.add_response("cancel", "Cancel");
@@ -81,11 +98,15 @@ pub fn present(
     // point costs the user the whole dialogue and everything else they set.
     let dialog_for_name = dialog.clone();
     let group_for_name = group.clone();
+    let missing_row = image_missing.clone();
+    let taken_names = taken.clone();
     let check = move |entry: &adw::EntryRow| match cabin_core::check_name(&entry.text(), &taken) {
         Ok(()) => {
             entry.remove_css_class("error");
             group_for_name.set_description(None);
-            dialog_for_name.set_response_enabled("create", true);
+            // Create can be off for two reasons, and clearing one must not
+            // clear the other.
+            dialog_for_name.set_response_enabled("create", !missing_row.is_visible());
         }
         Err(why) => {
             entry.add_css_class("error");
@@ -97,6 +118,49 @@ pub fn present(
     check(&name_row);
 
     let default_image = crate::state::State::new(crate::APP_ID).default_image();
+
+    // Re-run after a build, so the warning clears without reopening.
+    let row_for_check = image_missing.clone();
+    let dialog_for_check = dialog.clone();
+    let name_for_check = name_row.clone();
+    let taken_for_check = taken_names.clone();
+    let podman_for_check = podman.clone();
+    let image_for_check = default_image.clone();
+    let check_image: Rc<dyn Fn()> = Rc::new(move || {
+        let row = row_for_check.clone();
+        let dialog = dialog_for_check.clone();
+        let name = name_for_check.clone();
+        let taken = taken_for_check.clone();
+        let image = image_for_check.clone();
+        let podman = podman_for_check.clone();
+        runtime::spawn(
+            async move { podman.image_exists(&image).await },
+            move |result| {
+                // A Podman that cannot answer is not a missing image, so say
+                // nothing rather than send the user to build one they have.
+                let missing = matches!(result, Ok(false));
+                row.set_visible(missing);
+                dialog.set_response_enabled(
+                    "create",
+                    !missing && cabin_core::check_name(&name.text(), &taken).is_ok(),
+                );
+            },
+        );
+    });
+    check_image();
+
+    let check_after_build = check_image.clone();
+    let podman_for_build = podman.clone();
+    let build_parent = parent.as_ref().clone();
+    build_now.connect_clicked(move |_| {
+        let recheck = check_after_build.clone();
+        crate::images::present_build(
+            &build_parent,
+            podman_for_build.clone(),
+            crate::images::DEFAULT_TAG,
+            move || recheck(),
+        );
+    });
     let parent_widget = parent.as_ref().clone();
     dialog.connect_response(None, move |dialog, response| {
         if response != "create" {

@@ -42,6 +42,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     let sidebar_toolbar = adw::ToolbarView::new();
     let sidebar_header = adw::HeaderBar::new();
     sidebar_header.set_title_widget(Some(&adw::WindowTitle::new("Cabin", "")));
+    sidebar_header.pack_end(&build_main_menu(&window, podman.clone(), sidebar.clone()));
     sidebar_toolbar.add_top_bar(&sidebar_header);
     sidebar_toolbar.set_content(Some(&sidebar.widget));
 
@@ -168,6 +169,52 @@ fn open(viewer: &Rc<Viewer>, podman: &Arc<Podman>, desktop: Desktop) {
             }
         },
     );
+}
+
+/// The application menu, for what belongs to Cabin rather than to a desktop.
+fn build_main_menu(
+    window: &adw::ApplicationWindow,
+    podman: Arc<Podman>,
+    sidebar: Rc<Sidebar>,
+) -> gtk::MenuButton {
+    let popover = gtk::Popover::new();
+    let box_ = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(2)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(6)
+        .margin_end(6)
+        .build();
+
+    let images = gtk::Button::builder()
+        .child(
+            &adw::ButtonContent::builder()
+                .label("Guest Images")
+                .icon_name("drive-harddisk-symbolic")
+                .halign(gtk::Align::Start)
+                .build(),
+        )
+        .css_classes(vec!["flat"])
+        .build();
+
+    let window_for_images = window.clone();
+    let popover_ref = popover.clone();
+    images.connect_clicked(move |_| {
+        popover_ref.popdown();
+        let refresh_target = sidebar.clone();
+        crate::images::present(&window_for_images, podman.clone(), move || {
+            refresh_target.refresh()
+        });
+    });
+    box_.append(&images);
+
+    popover.set_child(Some(&box_));
+    gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .tooltip_text("Main menu")
+        .popover(&popover)
+        .build()
 }
 
 /// Reports a missing Podman socket with the command that fixes it.

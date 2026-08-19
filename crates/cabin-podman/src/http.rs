@@ -39,7 +39,31 @@ pub async fn request(
 
 /// Sends a request and hands each line of the response body to `on_line`.
 /// Used for the event feed, which never completes.
-pub async fn stream_lines<F>(socket: &str, path: &str, mut on_line: F) -> Result<()>
+pub async fn stream_lines<F>(socket: &str, path: &str, on_line: F) -> Result<()>
+where
+    F: FnMut(&str),
+{
+    stream_request(socket, "GET", path, None, on_line).await
+}
+
+/// The body of a request that is not JSON.
+pub struct RawBody<'a> {
+    pub content_type: &'a str,
+    pub bytes: &'a [u8],
+}
+
+/// Sends a request and hands each line of the response body to `on_line`.
+///
+/// Building an image needs this: the request carries a tar archive and the
+/// reply is a stream of progress lines that must be shown as they arrive
+/// rather than collected and shown at the end.
+pub async fn stream_request<F>(
+    socket: &str,
+    method: &str,
+    path: &str,
+    body: Option<RawBody<'_>>,
+    mut on_line: F,
+) -> Result<()>
 where
     F: FnMut(&str),
 {
@@ -51,7 +75,7 @@ where
         })?;
     let mut reader = BufReader::new(stream);
 
-    write_request(reader.get_mut(), "GET", path, None).await?;
+    write_raw_request(reader.get_mut(), method, path, body).await?;
 
     let status = read_status_line(&mut reader).await?;
     let headers = read_headers(&mut reader).await?;
@@ -72,8 +96,8 @@ where
         }
         let trimmed = line.trim();
         // In a chunked stream the size lines are interleaved with the payload.
-        // Podman sends one JSON object per chunk, so skipping anything that is
-        // not JSON is enough here.
+        // Podman sends JSON objects, so skipping anything that is not one is
+        // enough to drop the sizes.
         if trimmed.is_empty() || (chunked && !trimmed.starts_with('{')) {
             continue;
         }
@@ -87,17 +111,30 @@ async fn write_request(
     path: &str,
     body: Option<&[u8]>,
 ) -> Result<()> {
+    let body = body.map(|bytes| RawBody {
+        content_type: "application/json",
+        bytes,
+    });
+    write_raw_request(stream, method, path, body).await
+}
+
+async fn write_raw_request(
+    stream: &mut UnixStream,
+    method: &str,
+    path: &str,
+    body: Option<RawBody<'_>>,
+) -> Result<()> {
     let mut head = format!(
         "{method} {path} HTTP/1.1\r\nHost: d\r\nAccept: application/json\r\nConnection: close\r\n"
     );
-    if let Some(b) = body {
-        head.push_str("Content-Type: application/json\r\n");
-        head.push_str(&format!("Content-Length: {}\r\n", b.len()));
+    if let Some(b) = &body {
+        head.push_str(&format!("Content-Type: {}\r\n", b.content_type));
+        head.push_str(&format!("Content-Length: {}\r\n", b.bytes.len()));
     }
     head.push_str("\r\n");
     stream.write_all(head.as_bytes()).await?;
-    if let Some(b) = body {
-        stream.write_all(b).await?;
+    if let Some(b) = &body {
+        stream.write_all(b.bytes).await?;
     }
     stream.flush().await?;
     Ok(())

@@ -19,6 +19,7 @@ conf.set('APP_ID',  app_id)
 conf.set('VERSION', meson.project_version())
 
 subdir('data')
+subdir('guest')
 subdir('po')
 
 if get_option('buildtype') == 'release'

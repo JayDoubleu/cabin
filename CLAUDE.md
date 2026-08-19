@@ -117,7 +117,17 @@ Use `just`. Run `just` alone to list every task.
     Podman fixes a container's configuration at create time and Cabin keeps
     that configuration in the labels, so there is no save that keeps the
     desktop running. Do not add a button that implies there is.
-26. **Store interface names for remote access, never addresses.** An address
+26. **The guest image is built here, never pulled.** `guest/` installs to
+    `<datadir>/cabin/guest` and ships with the application, because the build
+    context has to be readable at run time. Keep `guest/meson.build` in step
+    with the files in `guest/`, or the Flatpak builds an image from an
+    incomplete tree.
+27. **Do not make a desktop a Toolbx container.** It was considered and it
+    cannot work: toolbox runs with `--pid=host`, and systemd as PID 1 needs
+    its own PID namespace. DESIGN.md section 19.4 has the full comparison.
+    Use `podman exec` to get a shell, which is what the Open a shell dialogue
+    shows.
+28. **Store interface names for remote access, never addresses.** An address
     changes with the network, and a stored one would leave the desktop unable
     to start after a DHCP lease changed. Names resolve to addresses when the
     container is created. Loopback is always bound as well.

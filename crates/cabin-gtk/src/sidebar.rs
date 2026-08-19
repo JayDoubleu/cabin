@@ -410,6 +410,16 @@ impl Sidebar {
         });
         box_.append(&restart);
 
+        let shell = flat_button("Open a shell", "utilities-terminal-symbolic");
+        shell.set_sensitive(desktop.state.is_running());
+        let for_shell = desktop.clone();
+        let popover_ref = popover.clone();
+        shell.connect_clicked(move |button| {
+            popover_ref.popdown();
+            crate::shell::present(button, &for_shell);
+        });
+        box_.append(&shell);
+
         let remote = flat_button("Connect from another device", "network-server-symbolic");
         remote.set_sensitive(desktop.state.is_running());
         let sidebar = self.clone();

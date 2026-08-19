@@ -42,6 +42,18 @@ where
     });
 }
 
+/// Runs a future to completion on the Tokio runtime, from a plain thread.
+///
+/// The image build needs this. It runs on its own thread so that packing the
+/// build context, which reads files, does not block the main loop, and it
+/// still has to await the Podman request from there.
+pub fn block_on<F, T>(future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    runtime().block_on(future)
+}
+
 /// Runs a future that produces many values, calling `on_item` for each one on
 /// the GTK main thread. Used for the Podman event feed.
 pub fn spawn_stream<F, T>(future: F, mut on_item: impl FnMut(T) + 'static)

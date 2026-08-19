@@ -12,7 +12,9 @@
 pub mod client;
 pub mod error;
 pub mod http;
+pub mod images;
 pub mod model;
 
 pub use client::Podman;
 pub use error::{Error, Result};
+pub use images::Image;

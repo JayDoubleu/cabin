@@ -1,0 +1,386 @@
+//! Guest image management.
+//!
+//! Cabin's guest image is built on this machine, never downloaded. A fresh
+//! installation therefore has no image, and the first desktop fails with
+//! "no such image" unless something offers to build it. This dialogue is that
+//! something. See DESIGN.md section 19.
+
+use crate::runtime;
+use adw::prelude::*;
+use cabin_podman::{Image, Podman};
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
+
+/// The image a desktop is built from unless the setting says otherwise.
+pub const DEFAULT_TAG: &str = "localhost/cabin-guest:f44";
+
+/// Opens the image manager.
+pub fn present(
+    parent: &impl IsA<gtk::Widget>,
+    podman: Arc<Podman>,
+    on_changed: impl Fn() + 'static,
+) {
+    let on_changed: Rc<dyn Fn()> = Rc::new(on_changed);
+
+    let dialog = adw::Dialog::builder()
+        .title("Guest Images")
+        .content_width(640)
+        .content_height(560)
+        .build();
+
+    let page = adw::PreferencesPage::new();
+
+    let group = adw::PreferencesGroup::builder()
+        .title("Images on this computer")
+        .description(
+            "A desktop runs from a guest image. Cabin builds it here from the \
+             files it ships with, so nothing is downloaded from anyone else.",
+        )
+        .build();
+
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(vec!["boxed-list"])
+        .build();
+    group.add(&list);
+    page.add(&group);
+
+    let build = gtk::Button::builder()
+        .css_classes(vec!["suggested-action", "pill"])
+        .halign(gtk::Align::Center)
+        .margin_top(12)
+        .build();
+    let build_group = adw::PreferencesGroup::new();
+    build_group.add(&build);
+    page.add(&build_group);
+
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&adw::HeaderBar::new());
+    toolbar.set_content(Some(&page));
+    dialog.set_child(Some(&toolbar));
+
+    let refresh = {
+        let list = list.clone();
+        let build = build.clone();
+        let podman = podman.clone();
+        let dialog = dialog.clone();
+        let on_changed = on_changed.clone();
+        Rc::new(move || {
+            let list = list.clone();
+            let build = build.clone();
+            let podman_for_rows = podman.clone();
+            let dialog = dialog.clone();
+            let on_changed = on_changed.clone();
+            let podman = podman.clone();
+            runtime::spawn(async move { podman.list_images().await }, move |result| {
+                let images = match result {
+                    Ok(images) => images,
+                    Err(e) => {
+                        tracing::error!("could not list images: {e}");
+                        Vec::new()
+                    }
+                };
+                populate(
+                    &list,
+                    &images,
+                    podman_for_rows.clone(),
+                    &dialog,
+                    on_changed.clone(),
+                );
+                // The label says which of the two jobs the button does,
+                // because building the first image and replacing an
+                // existing one are not the same act.
+                let have = images
+                    .iter()
+                    .any(|i| i.tags.iter().any(|t| t == DEFAULT_TAG));
+                build.set_label(if have {
+                    "Rebuild the Guest Image"
+                } else {
+                    "Build the Guest Image"
+                });
+            });
+        })
+    };
+    refresh();
+
+    let refresh_after_build = refresh.clone();
+    let dialog_for_build = dialog.clone();
+    let podman_for_build = podman.clone();
+    let on_changed_for_build = on_changed.clone();
+    build.connect_clicked(move |_| {
+        let refresh = refresh_after_build.clone();
+        let on_changed = on_changed_for_build.clone();
+        present_build(
+            &dialog_for_build,
+            podman_for_build.clone(),
+            DEFAULT_TAG,
+            move || {
+                refresh();
+                on_changed();
+            },
+        );
+    });
+
+    dialog.present(Some(parent));
+}
+
+fn populate(
+    list: &gtk::ListBox,
+    images: &[Image],
+    podman: Arc<Podman>,
+    parent: &adw::Dialog,
+    on_changed: Rc<dyn Fn()>,
+) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+
+    if images.is_empty() {
+        list.append(
+            &adw::ActionRow::builder()
+                .title("No images yet")
+                .subtitle("Build the guest image to make your first desktop.")
+                .build(),
+        );
+        return;
+    }
+
+    for image in images {
+        let row = adw::ActionRow::builder()
+            .title(image.display_name())
+            .subtitle(format!("{} · {}", image.human_size(), image.short_id()))
+            .build();
+        if image.tags.iter().any(|t| t == DEFAULT_TAG) {
+            let badge = gtk::Label::builder()
+                .label("In use by Cabin")
+                .css_classes(vec!["caption", "accent"])
+                .valign(gtk::Align::Center)
+                .build();
+            row.add_suffix(&badge);
+        }
+
+        let remove = gtk::Button::builder()
+            .icon_name("user-trash-symbolic")
+            .valign(gtk::Align::Center)
+            .css_classes(vec!["flat"])
+            .tooltip_text("Delete this image")
+            .build();
+        let podman = podman.clone();
+        let parent = parent.clone();
+        let on_changed = on_changed.clone();
+        let name = image.display_name();
+        let target = image
+            .tags
+            .first()
+            .cloned()
+            .unwrap_or_else(|| image.id.clone());
+        remove.connect_clicked(move |_| {
+            confirm_delete(
+                &parent,
+                podman.clone(),
+                name.clone(),
+                target.clone(),
+                on_changed.clone(),
+            );
+        });
+        row.add_suffix(&remove);
+        list.append(&row);
+    }
+}
+
+fn confirm_delete(
+    parent: &adw::Dialog,
+    podman: Arc<Podman>,
+    name: String,
+    target: String,
+    on_changed: Rc<dyn Fn()>,
+) {
+    let dialog = adw::AlertDialog::builder()
+        .heading(format!("Delete {name}?"))
+        .body(
+            "The image will have to be built again before it can make another \
+             desktop. Desktops that already exist are not affected.",
+        )
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("delete", "Delete");
+    dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+
+    let parent_for_response = parent.clone();
+    dialog.connect_response(None, move |_, response| {
+        if response != "delete" {
+            return;
+        }
+        let podman = podman.clone();
+        let target = target.clone();
+        let on_changed = on_changed.clone();
+        let parent = parent_for_response.clone();
+        runtime::spawn(
+            async move { podman.remove_image(&target, false).await },
+            move |result| {
+                if let Err(e) = result {
+                    // Podman refuses while a container still uses the image,
+                    // and that refusal is the useful part of the message.
+                    let error = adw::AlertDialog::builder()
+                        .heading("Could not delete the image")
+                        .body(e.to_string())
+                        .build();
+                    error.add_response("close", "Close");
+                    error.present(Some(&parent));
+                }
+                on_changed();
+            },
+        );
+    });
+    dialog.present(Some(parent));
+}
+
+/// Runs a build, showing its output as it arrives.
+pub fn present_build(
+    parent: &impl IsA<gtk::Widget>,
+    podman: Arc<Podman>,
+    tag: &str,
+    on_done: impl Fn() + 'static,
+) {
+    let Some(context_dir) = crate::guestdir::find() else {
+        let error = adw::AlertDialog::builder()
+            .heading("The guest files are missing")
+            .body(format!(
+                "Cabin builds the guest image from files it ships with, and \
+                 could not find them.\n\nIt looked in:\n{}",
+                crate::guestdir::searched()
+            ))
+            .build();
+        error.add_response("close", "Close");
+        error.present(Some(parent));
+        return;
+    };
+
+    let dialog = adw::Dialog::builder()
+        .title("Building the Guest Image")
+        .content_width(760)
+        .content_height(560)
+        .can_close(false)
+        .build();
+
+    let output = gtk::TextView::builder()
+        .editable(false)
+        .monospace(true)
+        .cursor_visible(false)
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .left_margin(12)
+        .right_margin(12)
+        .top_margin(12)
+        .bottom_margin(12)
+        .build();
+    let buffer = output.buffer();
+
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .vexpand(true)
+        .child(&output)
+        .build();
+
+    let status = gtk::Label::builder()
+        .label("Starting. This takes several minutes the first time.")
+        .css_classes(vec!["dim-label"])
+        .xalign(0.0)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(6)
+        .margin_bottom(6)
+        .build();
+
+    let close = gtk::Button::builder()
+        .label("Close")
+        .css_classes(vec!["pill"])
+        .halign(gtk::Align::Center)
+        .margin_top(6)
+        .margin_bottom(12)
+        .sensitive(false)
+        .build();
+
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    box_.append(&scroller);
+    box_.append(&status);
+    box_.append(&close);
+
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&adw::HeaderBar::new());
+    toolbar.set_content(Some(&box_));
+    dialog.set_child(Some(&toolbar));
+
+    let dialog_for_close = dialog.clone();
+    close.connect_clicked(move |_| {
+        dialog_for_close.close();
+    });
+
+    dialog.present(Some(parent));
+
+    // Build output arrives on a Tokio thread and the buffer belongs to the
+    // main one, so it crosses the same way frames do.
+    let (sender, receiver) = async_channel::bounded::<Result<String, String>>(64);
+    let tag = tag.to_string();
+    let podman_for_build = podman.clone();
+    std::thread::Builder::new()
+        .name("cabin-image-build".into())
+        .spawn(move || {
+            let context = match cabin_podman::images::build_context(&context_dir) {
+                Ok(context) => context,
+                Err(e) => {
+                    let _ = sender.send_blocking(Err(e.to_string()));
+                    return;
+                }
+            };
+            let outcome = runtime::block_on(async {
+                let relay = sender.clone();
+                podman_for_build
+                    .build_image(&tag, context, |line| {
+                        let _ = relay.send_blocking(Ok(line.to_string()));
+                    })
+                    .await
+            });
+            let _ = match outcome {
+                Ok(()) => sender.send_blocking(Ok(String::from("\u{0}done"))),
+                Err(e) => sender.send_blocking(Err(e.to_string())),
+            };
+        })
+        .expect("could not start the build thread");
+
+    let on_done = Rc::new(on_done);
+    let finished = Rc::new(RefCell::new(false));
+    gtk::glib::spawn_future_local(async move {
+        while let Ok(item) = receiver.recv().await {
+            match item {
+                // A private marker rather than a second channel, so ordering
+                // with the output is guaranteed.
+                Ok(line) if line == "\u{0}done" => {
+                    status.set_label("Finished. The guest image is ready.");
+                    status.remove_css_class("dim-label");
+                    status.add_css_class("success");
+                    *finished.borrow_mut() = true;
+                }
+                Ok(line) => {
+                    let mut end = buffer.end_iter();
+                    buffer.insert(&mut end, &line);
+                    // Follow the output, which is the only reason to show it.
+                    let mark = buffer.create_mark(None, &buffer.end_iter(), false);
+                    output.scroll_to_mark(&mark, 0.0, false, 0.0, 0.0);
+                }
+                Err(message) => {
+                    let mut end = buffer.end_iter();
+                    buffer.insert(&mut end, &format!("\n{message}\n"));
+                    status.set_label("The build failed. The output above says why.");
+                    status.remove_css_class("dim-label");
+                    status.add_css_class("error");
+                    *finished.borrow_mut() = true;
+                }
+            }
+        }
+        dialog.set_can_close(true);
+        close.set_sensitive(true);
+        on_done();
+    });
+}
