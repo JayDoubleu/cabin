@@ -4,6 +4,7 @@ mod app;
 mod create;
 mod display;
 mod graphics;
+mod keymap;
 mod runtime;
 mod sidebar;
 mod viewer;

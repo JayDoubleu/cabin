@@ -31,6 +31,10 @@ const CHANGED: f64 = 0.05;
 /// Observed 0.0000101 returning to the starting state, and the clock tick is
 /// worth about 0.00001. This sits two orders of magnitude above both.
 const UNCHANGED: f64 = 0.001;
+/// A popover covers far less of the screen than the overview does. The
+/// calendar measured 0.0123, so this keeps a sixfold margin below the signal
+/// while staying two hundred times above the once-a-minute clock tick.
+const POPOVER_CHANGED: f64 = 0.002;
 
 struct Session {
     commands: Sender<SessionCommand>,
@@ -88,6 +92,29 @@ impl Session {
             }
         }
         self.latest.clone().expect("no frame arrived")
+    }
+
+    fn move_to(&self, x: u32, y: u32) {
+        self.commands
+            .send(SessionCommand::PointerMove { x, y })
+            .expect("the session should accept a move");
+    }
+
+    fn click(&self, x: u32, y: u32, button: u8) {
+        // Move first. Some targets only react once the pointer is over them.
+        self.commands
+            .send(SessionCommand::PointerMove { x, y })
+            .expect("the session should accept a move");
+        for pressed in [true, false] {
+            self.commands
+                .send(SessionCommand::PointerButton {
+                    x,
+                    y,
+                    button,
+                    pressed,
+                })
+                .expect("the session should accept a button");
+        }
     }
 
     fn tap(&self, scancode: u16, extended: bool) {
@@ -177,5 +204,50 @@ fn super_key_toggles_the_overview_and_returns() {
     assert!(
         round_trip < UNCHANGED,
         "the guest did not return to its starting state ({round_trip:.6})"
+    );
+}
+
+/// Proves a click reaches the guest at the coordinates it was sent to.
+///
+/// The target is the top bar clock, which sits at the centre of the top edge
+/// and opens the calendar popover. That makes the test a position check as
+/// well as a button check: a click sent to the wrong place, for instance the
+/// (0, 0) that an earlier version of the code always sent, changes nothing.
+#[test]
+#[ignore = "needs a running guest from 'just guest-test'"]
+fn clicking_the_clock_opens_the_calendar() {
+    let mut session = Session::open(13389);
+    let quiet = Duration::from_millis(1500);
+
+    // Park the pointer somewhere inert first. The top bar highlights whatever
+    // the pointer is over, so a baseline taken with the pointer on the clock
+    // would differ from the final frame by that highlight alone.
+    session.move_to(40, 400);
+    let start = session.settle(quiet);
+    let (width, _) = (start.width, start.height);
+
+    // The clock is centred horizontally and sits inside the top bar.
+    session.click(width / 2, 14, 1);
+    let opened = session.settle(quiet);
+    let opening = changed_fraction(&start, &opened);
+    println!("calendar opened: {opening:.6}");
+    assert!(
+        opening > POPOVER_CHANGED,
+        "clicking the clock changed {opening:.6}, so the click did not land"
+    );
+
+    // Click the clock again to close it. Using a second click rather than
+    // Escape keeps this a pure pointer test, and it exercises the toggle in
+    // both directions.
+    session.click(width / 2, 14, 1);
+    // Move off the clock again, so the comparison is not defeated by the
+    // hover highlight the pointer leaves behind.
+    session.move_to(40, 400);
+    let closed = session.settle(quiet);
+    let round_trip = changed_fraction(&start, &closed);
+    println!("round trip after a second click: {round_trip:.6}");
+    assert!(
+        round_trip < UNCHANGED,
+        "the calendar did not close cleanly ({round_trip:.6})"
     );
 }

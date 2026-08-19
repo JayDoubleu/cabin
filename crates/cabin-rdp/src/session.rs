@@ -42,7 +42,12 @@ pub enum SessionCommand {
         x: u32,
         y: u32,
     },
+    /// A button event carries the pointer position, because RDP has no
+    /// separate notion of "where the pointer already is": every pointer PDU
+    /// states its own coordinates.
     PointerButton {
+        x: u32,
+        y: u32,
         button: u8,
         pressed: bool,
     },

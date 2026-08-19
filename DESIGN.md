@@ -485,7 +485,7 @@ just guest          # build the guest image
 | 2 | Flatpak shell with sidebar and stubbed data | Packaging and UI skeleton | Done |
 | 3 | Podman client: list, start, stop, event stream | Real state in the sidebar | Done, see section 13 |
 | 4 | `CabinDisplay` shows guest frames, read-only | The hardest component | Done, see section 15 |
-| 5 | Keyboard and pointer input | Usable desktop | Keyboard verified, see section 15.9. Pointer plumbed, untested |
+| 5 | Keyboard and pointer input | Usable desktop | Done, see sections 15.9 to 15.11 |
 | 6 | Fit-to-window and fixed resolutions | The headline feature | Done, verified against the guest |
 | 7 | Create, delete, mounts, GPU and socket settings | Feature complete |
 | 8 | Clipboard, audio, connection profiles for other devices | Polish |
@@ -1152,7 +1152,63 @@ a 700 ms quiet period the frame is captured mid-animation and the round trip
 reads about 0.025 instead of 0, which looks exactly like a real failure. The
 test waits 1500 ms and the comment says why.
 
-### 15.10 Still to do
+### 15.10 The pointer, and the button transposition
+
+The pointer path is verified the same way. The target is the top bar clock,
+which makes the test a **position** check as well as a button check: a click
+sent to the wrong place changes nothing.
+
+```
+calendar opened:                  0.012299
+round trip after a second click:  0.000000
+```
+
+A popover covers far less of the screen than the overview, so it has its own
+threshold of 0.002. That keeps a sixfold margin below the measured signal while
+staying two hundred times above the clock tick.
+
+Two things this test caught, both real:
+
+1. **Clicks were being sent to (0, 0).** `SessionCommand::PointerButton`
+   carried no coordinates, and the client passed zeros. RDP has no notion of
+   "where the pointer already is": every pointer PDU states its own position.
+   The variant now carries `x` and `y`.
+2. **The pointer leaves a hover highlight.** The top bar highlights whatever
+   the pointer is over, so a frame captured with the pointer resting on the
+   clock differs from the baseline by that highlight alone, about 0.0013. The
+   test parks the pointer somewhere inert before both captures. This is not
+   noise, it is real state, and widening the threshold would have hidden it.
+
+**The button numbering disagrees between GTK and RDP**, and only for the middle
+and right buttons:
+
+| Button | GTK | RDP flag | Value |
+|---|---|---|---|
+| left | 1 | `PTR_FLAGS_BUTTON1` | `0x1000` |
+| middle | 2 | `PTR_FLAGS_BUTTON3` | `0x4000` |
+| right | 3 | `PTR_FLAGS_BUTTON2` | `0x2000` |
+
+Because the left button agrees, a smoke test that only left-clicks passes while
+paste-on-middle-click opens a context menu. The values are not a straight swap
+of the names either, so any arithmetic mapping is silently wrong. `button_flag`
+writes the arms out, and a unit test asserts that the obvious arithmetic scheme
+would disagree with it.
+
+### 15.11 Keycodes
+
+RDP carries PC/AT set 1 scancodes, while GTK reports X11 hardware keycodes,
+which on Linux are evdev codes offset by eight.
+
+The main block needs no table: evdev numbered its keys from the AT scancodes in
+the first place, so evdev 1 is Escape and the AT scancode for Escape is `0x01`,
+and that identity holds to the end of the keypad at evdev 83. Above that the
+keys live in the `0xE0` prefixed set and `keymap.rs` carries a small table for
+the arrows, navigation keys and Super.
+
+An unmapped key is dropped rather than approximated. Sending a wrong scancode
+would type the wrong character, which is worse than typing nothing.
+
+### 15.12 Still to do
 - `rdpdr`, `rdpsnd` and `AUDIO_PLAYBACK_DVC` still connect even though the shim
   sets `FreeRDP_DeviceRedirection`, `FreeRDP_AudioPlayback` and friends to
   false, so those settings are applied too late or overridden by
@@ -1162,8 +1218,8 @@ test waits 1500 ms and the comment says why.
   constraining the pane to even dimensions so the case never arose. Exercising
   it needs the application to request an odd width directly. It is a one-pixel
   concern.
-- The keyboard path is verified end to end, in section 15.9. The pointer path
-  is plumbed but never exercised, and the button mapping in particular is
-  worth a test: GTK numbers middle as 2 and right as 3, while RDP is the other
-  way round.
+- Input is verified in sections 15.9 and 15.10. What is not covered is the
+  widget's own event controllers: the tests drive `SessionCommand` directly,
+  so the GTK controllers and the keycode mapping are unit tested but never
+  exercised together against a guest.
 - Audio, clipboard and connection profiles for other devices remain unstarted.

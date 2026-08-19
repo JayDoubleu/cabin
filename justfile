@@ -136,6 +136,10 @@ freerdp-sysroot dest="~/.local/freerdp-sysroot":
     echo "  export PKG_CONFIG_SYSROOT_DIR=$dest"
     echo "  export LD_LIBRARY_PATH=$dest/usr/lib64"
 
+# Run one live test by name, for iterating.
+rdp-one name:
+    cargo test -p cabin-rdp --test live_input {{name}} -- --ignored --nocapture
+
 # Run every live test that needs a running guest.
 rdp-live:
     cargo test -p cabin-freerdp-sys --test live_connect -- --ignored --nocapture

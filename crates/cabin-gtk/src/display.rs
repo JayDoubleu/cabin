@@ -49,7 +49,11 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
             self.fit_to_window.set(true);
-            self.obj().set_focusable(true);
+            let widget = self.obj();
+            // The widget must take focus, or key events go to the sidebar.
+            widget.set_focusable(true);
+            widget.set_can_focus(true);
+            widget.attach_input_controllers();
         }
 
         fn dispose(&self) {
@@ -180,6 +184,87 @@ impl CabinDisplay {
             self.queue_resize();
         }
         self.queue_draw();
+    }
+
+    /// Attaches the keyboard, pointer and scroll controllers.
+    ///
+    /// Every handler converts to guest coordinates first and drops the event
+    /// when the pointer is over a letterbox bar, so the guest never sees a
+    /// click that came from outside its screen.
+    fn attach_input_controllers(&self) {
+        let keys = gtk::EventControllerKey::new();
+        let widget = self.clone();
+        keys.connect_key_pressed(move |_, _, keycode, _| {
+            widget.send_key(keycode as u16, true);
+            gtk::glib::Propagation::Stop
+        });
+        let widget = self.clone();
+        keys.connect_key_released(move |_, _, keycode, _| {
+            widget.send_key(keycode as u16, false);
+        });
+        self.add_controller(keys);
+
+        let motion = gtk::EventControllerMotion::new();
+        let widget = self.clone();
+        motion.connect_motion(move |_, x, y| {
+            if let Some((gx, gy)) = widget.widget_to_guest(x, y) {
+                widget.send(cabin_rdp::SessionCommand::PointerMove { x: gx, y: gy });
+            }
+        });
+        self.add_controller(motion);
+
+        let click = gtk::GestureClick::new();
+        // 0 means "any button", so middle and right arrive too.
+        click.set_button(0);
+        let widget = self.clone();
+        click.connect_pressed(move |gesture, _, x, y| {
+            widget.grab_focus();
+            widget.send_button(gesture.current_button() as u8, x, y, true);
+        });
+        let widget = self.clone();
+        click.connect_released(move |gesture, _, x, y| {
+            widget.send_button(gesture.current_button() as u8, x, y, false);
+        });
+        self.add_controller(click);
+
+        let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+        let widget = self.clone();
+        scroll.connect_scroll(move |_, dx, dy| {
+            // RDP counts wheel notches in units of 120, and its vertical sign
+            // is the opposite of GTK's.
+            widget.send(cabin_rdp::SessionCommand::PointerScroll {
+                horizontal: (dx * 120.0) as i16,
+                vertical: (-dy * 120.0) as i16,
+            });
+            gtk::glib::Propagation::Stop
+        });
+        self.add_controller(scroll);
+    }
+
+    fn send_key(&self, hardware_keycode: u16, pressed: bool) {
+        // An unmapped key is dropped rather than guessed at, so the guest never
+        // receives a scancode that means something else.
+        let Some((scancode, extended)) = crate::keymap::to_scancode(hardware_keycode) else {
+            tracing::trace!("no scancode for keycode {hardware_keycode}");
+            return;
+        };
+        self.send(cabin_rdp::SessionCommand::KeyPress {
+            scancode,
+            extended,
+            pressed,
+        });
+    }
+
+    fn send_button(&self, button: u8, x: f64, y: f64, pressed: bool) {
+        let Some((gx, gy)) = self.widget_to_guest(x, y) else {
+            return;
+        };
+        self.send(cabin_rdp::SessionCommand::PointerButton {
+            x: gx,
+            y: gy,
+            button,
+            pressed,
+        });
     }
 
     fn send(&self, command: cabin_rdp::SessionCommand) {

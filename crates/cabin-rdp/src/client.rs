@@ -254,6 +254,28 @@ fn start(params: &ConnectionParams) -> Result<Client> {
     Ok(client)
 }
 
+/// Maps a GTK button number to an RDP button flag.
+///
+/// The two disagree, and only on the middle and right buttons:
+///
+/// | Button | GTK | RDP flag |
+/// |---|---|---|
+/// | left | 1 | `PTR_FLAGS_BUTTON1` |
+/// | middle | 2 | `PTR_FLAGS_BUTTON3` |
+/// | right | 3 | `PTR_FLAGS_BUTTON2` |
+///
+/// Because the left button agrees, a smoke test that only left-clicks passes
+/// while paste-on-middle-click opens a context menu. The arms are written out
+/// rather than computed, since the flag values are not a straight swap either.
+fn button_flag(button: u8) -> Option<u32> {
+    match button {
+        1 => Some(sys::PTR_FLAGS_BUTTON1),
+        2 => Some(sys::PTR_FLAGS_BUTTON3),
+        3 => Some(sys::PTR_FLAGS_BUTTON2),
+        _ => None,
+    }
+}
+
 /// Applies one command. Returns false when the session should end.
 fn apply(client: &Client, command: SessionCommand) -> bool {
     match command {
@@ -267,15 +289,20 @@ fn apply(client: &Client, command: SessionCommand) -> bool {
         SessionCommand::PointerMove { x, y } => {
             client.send_pointer(x, y, sys::PTR_FLAGS_MOVE);
         }
-        SessionCommand::PointerButton { button, pressed } => {
-            let button_flag = match button {
-                1 => sys::PTR_FLAGS_BUTTON1,
-                2 => sys::PTR_FLAGS_BUTTON3, // middle is button 3 in RDP
-                3 => sys::PTR_FLAGS_BUTTON2, // right is button 2 in RDP
-                _ => return true,
+        SessionCommand::PointerButton {
+            x,
+            y,
+            button,
+            pressed,
+        } => {
+            let Some(button_flag) = button_flag(button) else {
+                return true;
             };
             let flags = button_flag | if pressed { sys::PTR_FLAGS_DOWN } else { 0 };
-            client.send_pointer(0, 0, flags);
+            // The coordinates matter. An earlier version sent (0, 0) here, so
+            // every click landed in the top left corner regardless of where
+            // the user clicked.
+            client.send_pointer(x, y, flags);
         }
         SessionCommand::PointerScroll {
             horizontal,
@@ -313,12 +340,59 @@ mod tests {
         assert!(cstring("fine").is_ok());
     }
 
+    /// The flag values, copied from freerdp/input.h with its own comments:
+    ///   PTR_FLAGS_BUTTON1 0x1000 /* left */
+    ///   PTR_FLAGS_BUTTON2 0x2000 /* right */
+    ///   PTR_FLAGS_BUTTON3 0x4000 /* middle */
     #[test]
-    fn maps_gtk_buttons_to_rdp_buttons() {
-        // GTK numbers middle as 2 and right as 3. RDP is the other way round,
-        // which is an easy thing to get backwards.
-        assert_eq!(sys::PTR_FLAGS_BUTTON1, 0x1000);
-        assert_eq!(sys::PTR_FLAGS_BUTTON2, 0x2000);
-        assert_eq!(sys::PTR_FLAGS_BUTTON3, 0x4000);
+    fn button_flags_match_the_protocol() {
+        assert_eq!(sys::PTR_FLAGS_BUTTON1, 0x1000, "BUTTON1 is left");
+        assert_eq!(sys::PTR_FLAGS_BUTTON2, 0x2000, "BUTTON2 is right");
+        assert_eq!(sys::PTR_FLAGS_BUTTON3, 0x4000, "BUTTON3 is middle");
+    }
+
+    #[test]
+    fn left_click_maps_straight_through() {
+        assert_eq!(button_flag(1), Some(sys::PTR_FLAGS_BUTTON1));
+    }
+
+    #[test]
+    fn middle_and_right_are_transposed() {
+        // This is the whole point of the function. GTK middle is 2, and RDP
+        // middle is BUTTON3. Getting it wrong sends paste to the context menu.
+        assert_eq!(
+            button_flag(2),
+            Some(sys::PTR_FLAGS_BUTTON3),
+            "GTK 2 is middle"
+        );
+        assert_eq!(
+            button_flag(3),
+            Some(sys::PTR_FLAGS_BUTTON2),
+            "GTK 3 is right"
+        );
+    }
+
+    #[test]
+    fn mapping_is_not_a_shift_of_the_button_number() {
+        // 1 -> 0x1000, 2 -> 0x4000, 3 -> 0x2000. Any arithmetic scheme that
+        // looks plausible gets middle and right the wrong way round.
+        let naive = |b: u8| 0x1000u32 << (b - 1);
+        assert_eq!(button_flag(1), Some(naive(1)));
+        assert_ne!(
+            button_flag(2),
+            Some(naive(2)),
+            "arithmetic would be wrong here"
+        );
+        assert_ne!(
+            button_flag(3),
+            Some(naive(3)),
+            "arithmetic would be wrong here"
+        );
+    }
+
+    #[test]
+    fn unknown_buttons_are_dropped() {
+        assert_eq!(button_flag(0), None);
+        assert_eq!(button_flag(8), None);
     }
 }
