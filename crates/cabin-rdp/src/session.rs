@@ -31,8 +31,11 @@ pub enum SessionCommand {
         width: u32,
         height: u32,
     },
+    /// A PC/AT scancode. `extended` selects the 0xE0 prefixed set, which
+    /// carries the arrow keys, the Super keys and the right-hand modifiers.
     KeyPress {
         scancode: u16,
+        extended: bool,
         pressed: bool,
     },
     PointerMove {
@@ -110,6 +113,17 @@ impl SessionHandle {
     pub async fn next_event(&mut self) -> Option<SessionEvent> {
         self.events.recv().await
     }
+}
+
+/// PC/AT scancodes for the keys Cabin sends itself.
+///
+/// RDP carries scancodes, not keysyms, so these are protocol constants rather
+/// than anything platform specific.
+pub mod scancode {
+    /// Escape. Closes the Activities overview.
+    pub const ESCAPE: u16 = 0x01;
+    /// The left Super key. Toggles the Activities overview. Extended.
+    pub const LEFT_SUPER: u16 = 0x5B;
 }
 
 /// Rounds a size for the Display Control channel.

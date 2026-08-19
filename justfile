@@ -140,3 +140,4 @@ freerdp-sysroot dest="~/.local/freerdp-sysroot":
 rdp-live:
     cargo test -p cabin-freerdp-sys --test live_connect -- --ignored --nocapture
     cargo test -p cabin-rdp --test live_session -- --ignored --nocapture --test-threads=1
+    cargo test -p cabin-rdp --test live_input -- --ignored --nocapture --test-threads=1

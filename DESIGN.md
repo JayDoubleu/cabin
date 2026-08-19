@@ -485,7 +485,7 @@ just guest          # build the guest image
 | 2 | Flatpak shell with sidebar and stubbed data | Packaging and UI skeleton | Done |
 | 3 | Podman client: list, start, stop, event stream | Real state in the sidebar | Done, see section 13 |
 | 4 | `CabinDisplay` shows guest frames, read-only | The hardest component | Done, see section 15 |
-| 5 | Keyboard and pointer input | Usable desktop |
+| 5 | Keyboard and pointer input | Usable desktop | Keyboard verified, see section 15.9. Pointer plumbed, untested |
 | 6 | Fit-to-window and fixed resolutions | The headline feature | Done, verified against the guest |
 | 7 | Create, delete, mounts, GPU and socket settings | Feature complete |
 | 8 | Clipboard, audio, connection profiles for other devices | Polish |
@@ -1101,7 +1101,58 @@ Shell screenshot D-Bus API for unlisted callers, so a Wayland window can be
 neither captured nor clicked from a script. The frame path should not care, but
 the render path has not been eyeballed on native Wayland and should be once.
 
-### 15.9 Still to do
+### 15.9 Proving that input works
+
+Input is verified headlessly, through Cabin's own client, with no display and
+no third party RDP client. `crates/cabin-rdp/tests/live_input.rs` is the test.
+
+**Do not assert on typed text.** A host session measured both approaches
+against a real guest, as a fraction of pixels changed:
+
+| Action | Changed fraction |
+|---|---|
+| 17 characters appended to existing text | 0.00026 |
+| 5 characters typed into an empty editor | 0.0013 |
+| 21 characters typed into an empty editor | 0.0018 |
+| Escape with the overview already closed | 0.000000 |
+| Super, opening the Activities overview | 0.399 |
+
+Text is three orders of magnitude weaker than a shell state change, and it
+depends on the font, theme and scaling. Worse, ink does not scale with the
+number of characters: five characters produced 0.0013 and twenty one produced
+only 0.0018, because the caret and layout dominate. So "assert the ink grew"
+is not available either.
+
+**The idle noise floor is exactly zero.** Consecutive frames from a quiescent
+guest are bit identical, so no tolerance band is needed. The one periodic
+change is the top bar clock, worth about twenty pixels once a minute.
+
+**Assert the round trip.** Toggling the overview twice proves three things at
+once: the keystroke arrived, the guest acted on it, and the frame path
+delivered both transitions. Measured on this tree:
+
+```
+negative control, escape as a no-op: 0.000000
+overview opened:                     0.360391
+overview closed:                     0.360391
+round trip back to the start:        0.000000
+```
+
+The thresholds are 0.05 for a change and 0.001 for no change, which leaves at
+least a fortyfold margin on every assertion.
+
+The negative control matters as much as the positive one. If `XSendEvent` or
+any other part of a harness silently stops working, a test that only asserts
+"something changed" fails in a way indistinguishable from a broken frame path.
+Asserting that an inert keystroke changes **nothing** catches a test that
+passes because something unrelated is repainting.
+
+**One timing trap.** The overview close animation runs for over a second. With
+a 700 ms quiet period the frame is captured mid-animation and the round trip
+reads about 0.025 instead of 0, which looks exactly like a real failure. The
+test waits 1500 ms and the comment says why.
+
+### 15.10 Still to do
 - `rdpdr`, `rdpsnd` and `AUDIO_PLAYBACK_DVC` still connect even though the shim
   sets `FreeRDP_DeviceRedirection`, `FreeRDP_AudioPlayback` and friends to
   false, so those settings are applied too late or overridden by
@@ -1111,6 +1162,8 @@ the render path has not been eyeballed on native Wayland and should be once.
   constraining the pane to even dimensions so the case never arose. Exercising
   it needs the application to request an odd width directly. It is a one-pixel
   concern.
-- Input is plumbed through to the guest but has never been exercised from the
-  widget. Section 15.8 describes the harness it needs.
+- The keyboard path is verified end to end, in section 15.9. The pointer path
+  is plumbed but never exercised, and the button mapping in particular is
+  worth a test: GTK numbers middle as 2 and right as 3, while RDP is the other
+  way round.
 - Audio, clipboard and connection profiles for other devices remain unstarted.

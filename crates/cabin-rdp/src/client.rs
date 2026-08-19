@@ -149,9 +149,11 @@ impl Client {
         unsafe { sys::cabin_rdp_send_pointer(self.0, x, y, flags) };
     }
 
-    fn send_key(&self, scancode: u16, pressed: bool) {
+    fn send_key(&self, scancode: u16, extended: bool, pressed: bool) {
         // SAFETY: valid handle.
-        unsafe { sys::cabin_rdp_send_key(self.0, scancode as u32, 0, pressed as i32) };
+        unsafe {
+            sys::cabin_rdp_send_key(self.0, scancode as u32, extended as i32, pressed as i32)
+        };
     }
 
     fn send_wheel(&self, delta: i16, horizontal: bool) {
@@ -286,8 +288,12 @@ fn apply(client: &Client, command: SessionCommand) -> bool {
                 client.send_wheel(horizontal, true);
             }
         }
-        SessionCommand::KeyPress { scancode, pressed } => {
-            client.send_key(scancode, pressed);
+        SessionCommand::KeyPress {
+            scancode,
+            extended,
+            pressed,
+        } => {
+            client.send_key(scancode, extended, pressed);
         }
         SessionCommand::ClipboardOffer { .. } => {
             // Deliberately ignored. Advertising the clipboard crashes the guest
