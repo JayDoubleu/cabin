@@ -98,6 +98,18 @@ fn connects_and_receives_frames() {
         "the framebuffer looks empty, so nothing was really painted"
     );
 
+    // Dump the framebuffer so the result can be looked at, not just counted.
+    // CABIN_DUMP is opt-in so the ordinary test run writes nothing.
+    if let Ok(path) = std::env::var("CABIN_DUMP") {
+        let mut raw = Vec::with_capacity(pixels.len());
+        raw.extend_from_slice(&w.to_le_bytes());
+        raw.extend_from_slice(&h.to_le_bytes());
+        raw.extend_from_slice(&stride.to_le_bytes());
+        raw.extend_from_slice(pixels);
+        std::fs::write(&path, raw).expect("could not write the dump");
+        println!("wrote {path}");
+    }
+
     // SAFETY: valid handle.
     unsafe { cabin_rdp_disconnect(client.0) };
 }

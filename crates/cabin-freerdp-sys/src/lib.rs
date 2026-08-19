@@ -57,7 +57,12 @@ extern "C" {
 
     pub fn cabin_rdp_frame_count(client: *mut cabin_rdp) -> u64;
     pub fn cabin_rdp_request_resize(client: *mut cabin_rdp, width: u32, height: u32) -> c_int;
-    pub fn cabin_rdp_send_key(client: *mut cabin_rdp, scancode: u32, extended: c_int, down: c_int) -> c_int;
+    pub fn cabin_rdp_send_key(
+        client: *mut cabin_rdp,
+        scancode: u32,
+        extended: c_int,
+        down: c_int,
+    ) -> c_int;
     pub fn cabin_rdp_send_unicode(client: *mut cabin_rdp, code: u16, down: c_int) -> c_int;
     pub fn cabin_rdp_send_pointer(client: *mut cabin_rdp, x: u32, y: u32, flags: u32) -> c_int;
     pub fn cabin_rdp_send_wheel(client: *mut cabin_rdp, delta: i32, horizontal: c_int) -> c_int;
@@ -94,7 +99,10 @@ mod tests {
             assert!(!client.is_null());
             let (mut w, mut h, mut s) = (0u32, 0u32, 0u32);
             let buf = cabin_rdp_framebuffer(client, &mut w, &mut h, &mut s);
-            assert!(buf.is_null(), "there should be no framebuffer before connecting");
+            assert!(
+                buf.is_null(),
+                "there should be no framebuffer before connecting"
+            );
             cabin_rdp_free(client);
         }
     }

@@ -54,7 +54,13 @@ Use `just`. Run `just` alone to list every task.
 9. **Do not add bindgen to `cabin-freerdp-sys`.** It was tried and it silently
    produces opaque structs for everything the client needs. DESIGN.md section
    15.1 has the detail. The C shim exists for this reason.
-10. **Building `cabin-freerdp-sys` needs FreeRDP 3.** If `freerdp-devel` is not
+10. **`update->DesktopResize` must be set.** FreeRDP calls it without a null
+    check when the graphics pipeline sends `ResetGraphics`, which happens on
+    every connection. Leaving it unset segfaults the moment frames arrive.
+11. **Do not hard-code a codec.** The guest sends RemoteFX Progressive only
+    because the container has no GPU. Give a desktop a render node and it may
+    negotiate AVC444 instead.
+12. **Building `cabin-freerdp-sys` needs FreeRDP 3.** If `freerdp-devel` is not
     installed, run `just freerdp-sysroot` and export the variables it prints.
     No root is needed.
 

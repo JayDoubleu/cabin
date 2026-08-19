@@ -484,7 +484,7 @@ just guest          # build the guest image
 | 1 | Guest image serves a GNOME desktop over RDP | The whole idea works | Done, see section 12 |
 | 2 | Flatpak shell with sidebar and stubbed data | Packaging and UI skeleton | Done |
 | 3 | Podman client: list, start, stop, event stream | Real state in the sidebar | Done, see section 13 |
-| 4 | `CabinDisplay` shows guest frames, read-only | The hardest component | **Blocked, see section 14** |
+| 4 | `CabinDisplay` shows guest frames, read-only | The hardest component | Frames reach Rust, see section 15. Widget still to do |
 | 5 | Keyboard and pointer input | Usable desktop |
 | 6 | Fit-to-window and fixed resolutions | The headline feature |
 | 7 | Create, delete, mounts, GPU and socket settings | Feature complete |
@@ -957,28 +957,74 @@ and the framebuffer stays blank while the session looks healthy. Relatedly,
 `update->EndPaint` is never called on the graphics pipeline path, so it cannot
 be used to count frames.
 
-### 15.4 Open: the client segfaults once frames flow
+### 15.4 Resolved: the missing DesktopResize callback
 
-The session establishes, all channels connect, and then the process segfaults
-inside FreeRDP's event handling as soon as the guest sends graphics.
+The client segfaulted inside FreeRDP as soon as the guest sent graphics. The
+cause was a null function pointer of my own making.
 
-Ruled out so far:
+`update->DesktopResize` is a callback the client must supply. The graphics
+pipeline changes the desktop size through a `ResetGraphics` PDU, and FreeRDP
+invokes `DesktopResize` **without checking it for null**. Leaving it unset is
+therefore a null call on the first `ResetGraphics`, which arrives immediately
+after the surface is created. Setting it fixed the crash outright:
 
-- Not the clipboard. Disabling `FreeRDP_RedirectClipboard` fixed a separate,
-  earlier crash where the guest daemon aborted. The session is stable for
-  thirteen seconds now instead of dropping immediately.
-- Not `EndPaint`. It is never called on this path.
-- Not the experimental AV1 codec on its own. Fedora builds FreeRDP with
-  `WITH_GFX_AV1=ON`, and the library warns at runtime that experimental options
-  "might crash the application". Disabling `FreeRDP_GfxCodecAV1` and pinning
-  RemoteFX Progressive did not stop it.
+```
+connected
+frames=1  size=1920x1080  stride=7680
+non-black pixels: 2073600
+```
 
-Still to check: whether stock `xfreerdp` still works against the same guest,
-which separates a shim defect from a library or guest problem; and a proper
-backtrace, which needs `gdb`, not currently installed.
+`docs/milestone4-cabin-client.png` is that framebuffer: a real GNOME desktop
+with the top bar and clock, captured through Cabin's own client rather than
+through `xfreerdp`.
 
-The remaining channel settings are also suspect. `rdpdr`, `rdpsnd` and
-`AUDIO_PLAYBACK_DVC` still connect even though the shim sets
-`FreeRDP_DeviceRedirection`, `FreeRDP_AudioPlayback` and friends to false, so
-those settings are either being applied too late or overridden by
-`freerdp_client_load_addins`.
+The implementation is the standard one: read `FreeRDP_DesktopWidth` and
+`FreeRDP_DesktopHeight` from settings and call `gdi_resize`.
+
+Three hypotheses were wrong on the way, and are recorded so the reasoning is
+not repeated:
+
+- **Not the experimental AV1 codec.** Fedora builds FreeRDP with
+  `WITH_GFX_AV1=ON` and the library warns at runtime that it "might crash the
+  application", which was a compelling but false lead. Section 15.5 explains
+  why AV1 is never even selected.
+- **Not the surface lifecycle.** With dynamic resolution enabled the guest
+  creates surface 0, sends one frame, deletes both the encoding context and the
+  surface, issues a second `ResetGraphics`, and creates surface 1, all within
+  about 100 ms. That looked like an obvious use-after-free. Disabling dynamic
+  resolution reduces it to a single clean surface with no teardown, and the
+  crash still happened, which cleared it.
+- **Not `EndPaint`.** It is never called on the graphics pipeline path.
+
+### 15.5 The codec is RemoteFX Progressive, and that is a property of the host
+
+Worth knowing before optimising anything. The client advertises H.264 and the
+guest acknowledges it:
+
+```
+CapsAdvertise: ... Client cap flags: H264 (AVC444): true, H264 (AVC420): true
+```
+
+Yet every frame on the wire is `RDPGFX_CODECID_CAPROGRESSIVE`, and nothing
+else: no AVC444, no AVC420, no AV1, no RFX, no planar, no NSC.
+
+The reason is that the container has no GPU. With no render node there is no
+hardware H.264 encoder, so `gnome-remote-desktop` falls back to its CPU
+progressive encoder.
+
+The consequence for Cabin is direct: **the codec depends on whether a render
+node is passed into the container, not on the protocol.** Section 7.3 makes
+that a per-desktop setting, so a desktop given the Intel node may well
+negotiate AVC444 while a software-rendered one uses progressive. The client
+must handle both, and must not hard-code the progressive path.
+
+### 15.6 Still to do
+
+- The framebuffer reaches Rust. It does not yet reach a `GdkTexture` or the
+  `CabinDisplay` widget. That is the remaining part of milestone 4.
+- `rdpdr`, `rdpsnd` and `AUDIO_PLAYBACK_DVC` still connect even though the shim
+  sets `FreeRDP_DeviceRedirection`, `FreeRDP_AudioPlayback` and friends to
+  false, so those settings are applied too late or overridden by
+  `freerdp_client_load_addins`. Harmless today, but it is unwanted surface.
+- `cabin_rdp_request_resize` sends a monitor layout over Display Control but
+  has not been exercised against a guest.

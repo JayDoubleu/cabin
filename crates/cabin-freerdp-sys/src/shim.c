@@ -44,6 +44,18 @@ static struct cabin_rdp* owner_of(rdpContext* context)
 
 static BOOL cabin_end_paint(rdpContext* context);
 
+/* Called when the server changes the desktop size, which the graphics pipeline
+ * does through ResetGraphics. FreeRDP invokes this without checking it for
+ * null, so leaving it unset is a null call and an immediate segfault as soon as
+ * the first ResetGraphics arrives. That is not optional plumbing. */
+static BOOL cabin_desktop_resize(rdpContext* context)
+{
+	rdpSettings* settings = context->settings;
+	const UINT32 width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
+	const UINT32 height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+	return gdi_resize(context->gdi, width, height);
+}
+
 /* Accept the guest's self-signed certificate.
  *
  * Cabin generates one certificate per container and the user never sees a
@@ -178,6 +190,7 @@ static BOOL cabin_post_connect(freerdp* instance)
 	 * display breaks if that one is dropped. */
 	self->original_end_paint = instance->context->update->EndPaint;
 	instance->context->update->EndPaint = cabin_end_paint;
+	instance->context->update->DesktopResize = cabin_desktop_resize;
 
 	self->connected = 1;
 	return TRUE;
