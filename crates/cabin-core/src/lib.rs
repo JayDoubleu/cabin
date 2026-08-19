@@ -8,7 +8,10 @@ pub mod config;
 pub mod labels;
 pub mod mount;
 
-pub use config::{check_name, DesktopConfig, Exposure, GraphicsMode, NetInterface, SocketPolicy};
+pub use config::{
+    check_name, DesktopConfig, Exposure, GraphicsMode, NetInterface, SocketPolicy,
+    GUEST_SELINUX_TYPE,
+};
 pub use mount::{Mount, MountKind, MountMode};
 
 /// The prefix on every label that Cabin writes.

@@ -46,15 +46,30 @@ pub struct CreateContainer {
     pub portmappings: Vec<CreatePortMapping>,
     /// systemd runs as PID 1, so the container needs the systemd integration.
     pub systemd: String,
-    /// Turns off SELinux labelling for this container. Only set when a host
-    /// container socket is bound in, because its label is not one a confined
-    /// container may open.
+    /// The SELinux label for this container, as `--security-opt label=` takes
+    /// it. See `cabin_core::GUEST_SELINUX_TYPE` for why it is not the default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selinux_opts: Option<Vec<String>>,
+    /// The same label again, which Podman needs in order to keep it.
+    ///
+    /// `selinux_opts` alone is accepted and then discarded: the systemd
+    /// integration rewrites the type to `container_init_t`, and a container
+    /// running `/sbin/init` gets that integration whether it asks for it or
+    /// not. The annotation is what survives, and it is what `podman run`
+    /// itself sends beside the option. Sending one without the other silently
+    /// produces the default label.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub annotations: std::collections::BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_limits: Option<ResourceLimits>,
     pub stop_signal: i32,
 }
+
+/// The annotation Podman reads the container's SELinux label back from.
+///
+/// `podman run` sends this beside `--security-opt label=`, and the label does
+/// not stick without it.
+pub const PODMAN_LABEL_ANNOTATION: &str = "io.podman.annotations.label";
 
 #[derive(Debug, Serialize)]
 pub struct CreateMount {

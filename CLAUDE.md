@@ -170,7 +170,11 @@ Use `just`. Run `just` alone to list every task.
     rather than a policy one, and no AVC is logged because the rule is
     `dontaudit`. Do not "fix" this with `label=disable`: the type keeps the
     container confined and keeps its MCS categories, and disabling labelling
-    gives up both.
+    gives up both. The label needs `selinux_opts` **and** the
+    `io.podman.annotations.label` annotation. The option alone is accepted and
+    then discarded, because the systemd integration rewrites the type and a
+    container running `/sbin/init` always gets that integration. Nothing
+    errors, so only the label on a real container shows it.
 36. **The guest's home is a volume, so the build cannot seed it.** Anything
     written to `/home/cabin` during a build is hidden at run time. The
     Flathub repository is therefore fetched at build time and added to the

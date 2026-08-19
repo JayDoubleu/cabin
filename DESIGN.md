@@ -2257,6 +2257,29 @@ open it.
 The capability set is not involved. This toolbox reproduces the working case
 with **no** effective capabilities at all, because it runs as `spc_t`.
 
+### 22.2.1 The label needs two fields, not one
+
+`selinux_opts` alone is accepted by the libpod API and then discarded. The
+container is created, no error is returned, and the label comes back as
+`container_init_t`. Podman's systemd integration rewrites the type, and a
+container whose command is `/sbin/init` gets that integration whether it asks
+for it or not, so `"systemd": "false"` was the only value that let the type
+through and it is not a value Cabin can use.
+
+`podman run` does not have this problem, which is what made the difference
+worth chasing. Proxying its socket and reading the request showed it sends the
+label twice:
+
+```json
+"selinux_opts": ["type:container_engine_t"],
+"annotations": {"io.podman.annotations.label": "type:container_engine_t"}
+```
+
+The annotation is what survives. Both fields are built from one value in
+`create_desktop` so they cannot disagree, and `live_selinux.rs` asserts the
+label on a real container, because this failure is invisible from the request:
+the create succeeds either way.
+
 ### 22.3 The dash was empty for an unrelated reason
 
 Fedora's default `favorite-apps` names Firefox, Calendar, Software and

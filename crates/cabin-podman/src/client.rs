@@ -178,6 +178,9 @@ impl Podman {
 
         let resource_limits = build_limits(config);
 
+        // Podman keeps the SELinux label only when the option and the
+        // annotation agree, so they are built once and used twice.
+        let label_option = config.socket.selinux_label_option();
         let request = CreateContainer {
             name: config.name.clone(),
             image: config.image.clone(),
@@ -203,8 +206,13 @@ impl Podman {
             systemd: "always".to_string(),
             // Always set, because the default type cannot mount the devpts
             // that Fedora's image decoder needs and the desktop then has no
-            // icons at all. See GUEST_SELINUX_TYPE.
-            selinux_opts: Some(vec![config.socket.selinux_label_option()]),
+            // icons at all. See GUEST_SELINUX_TYPE. Both fields are needed:
+            // the option alone is discarded by the systemd integration.
+            selinux_opts: Some(vec![label_option.clone()]),
+            annotations: std::collections::BTreeMap::from([(
+                PODMAN_LABEL_ANNOTATION.to_string(),
+                label_option,
+            )]),
             resource_limits,
             stop_signal: SIGRTMIN_3,
         };
