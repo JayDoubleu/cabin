@@ -8,6 +8,11 @@
 #   podman build -t localhost/cabin-guest:f44 -f guest/Containerfile guest/
 FROM registry.fedoraproject.org/fedora:44
 
+# Marks the image as one of ours. Cabin lists images by this label, so an
+# image built here is told apart from everything else on the host, and the
+# image manager never offers to delete somebody else's work by default.
+LABEL io.github.jaydoubleu.cabin.guest="true"
+
 ARG CABIN_USER=cabin
 ARG CABIN_UID=1000
 

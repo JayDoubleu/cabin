@@ -7,6 +7,7 @@
 
 use crate::runtime;
 use adw::prelude::*;
+use cabin_podman::images::human_bytes;
 use cabin_podman::{Image, Podman};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -32,7 +33,7 @@ pub fn present(
     let page = adw::PreferencesPage::new();
 
     let group = adw::PreferencesGroup::builder()
-        .title("Images on this computer")
+        .title("Guest images")
         .description(
             "A desktop runs from a guest image. Cabin builds it here from the \
              files it ships with, so nothing is downloaded from anyone else.",
@@ -46,13 +47,51 @@ pub fn present(
     group.add(&list);
     page.add(&group);
 
+    // Cabin's own images only, unless asked otherwise. The host carries
+    // plenty that belongs to other work, and an image manager that offers to
+    // delete those by default is a trap rather than a convenience.
+    let show_all = adw::SwitchRow::builder()
+        .title("Show every image on this computer")
+        .subtitle("Including images that have nothing to do with Cabin.")
+        .active(false)
+        .build();
+    let switch_group = adw::PreferencesGroup::new();
+    switch_group.add(&show_all);
+    page.add(&switch_group);
+
+    let other_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(vec!["boxed-list"])
+        .build();
+    let other_holder = adw::PreferencesGroup::builder()
+        .title("Other images")
+        .visible(false)
+        .build();
+    other_holder.add(&other_list);
+    page.add(&other_holder);
+
     let build = gtk::Button::builder()
         .css_classes(vec!["suggested-action", "pill"])
+        .build();
+    let reclaim = gtk::Button::builder()
+        .css_classes(vec!["pill"])
+        .visible(false)
+        .build();
+    // What the last refresh found, so the confirmation lists exactly what it
+    // is about to remove instead of describing it in the abstract.
+    let stale_images: Rc<RefCell<Vec<Image>>> = Rc::new(RefCell::new(Vec::new()));
+
+    let actions = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
         .halign(gtk::Align::Center)
         .margin_top(12)
         .build();
+    actions.append(&build);
+    actions.append(&reclaim);
+
     let build_group = adw::PreferencesGroup::new();
-    build_group.add(&build);
+    build_group.add(&actions);
     page.add(&build_group);
 
     let toolbar = adw::ToolbarView::new();
@@ -62,12 +101,22 @@ pub fn present(
 
     let refresh = {
         let list = list.clone();
+        let other_list = other_list.clone();
+        let other_holder = other_holder.clone();
+        let show_all = show_all.clone();
+        let reclaim = reclaim.clone();
+        let stale_images = stale_images.clone();
         let build = build.clone();
         let podman = podman.clone();
         let dialog = dialog.clone();
         let on_changed = on_changed.clone();
         Rc::new(move || {
             let list = list.clone();
+            let other_list = other_list.clone();
+            let other_holder = other_holder.clone();
+            let show_all = show_all.clone();
+            let reclaim = reclaim.clone();
+            let stale_for_rows = stale_images.clone();
             let build = build.clone();
             let podman_for_rows = podman.clone();
             let dialog = dialog.clone();
@@ -81,13 +130,24 @@ pub fn present(
                         Vec::new()
                     }
                 };
+                let (ours, theirs): (Vec<_>, Vec<_>) =
+                    images.iter().cloned().partition(|i| i.is_guest);
                 populate(
                     &list,
-                    &images,
+                    &ours,
                     podman_for_rows.clone(),
                     &dialog,
                     on_changed.clone(),
                 );
+                populate(
+                    &other_list,
+                    &theirs,
+                    podman_for_rows.clone(),
+                    &dialog,
+                    on_changed.clone(),
+                );
+                other_holder.set_visible(show_all.is_active());
+
                 // The label says which of the two jobs the button does,
                 // because building the first image and replacing an
                 // existing one are not the same act.
@@ -99,10 +159,46 @@ pub fn present(
                 } else {
                     "Build the Guest Image"
                 });
+
+                // Offer the clean-up only when there is something to clean
+                // up, and say what it is worth.
+                let stale: Vec<Image> = images.iter().filter(|i| i.dangling).cloned().collect();
+                let freed: u64 = stale.iter().map(|i| i.size_bytes).sum();
+                reclaim.set_visible(!stale.is_empty());
+                if !stale.is_empty() {
+                    // The trailing ellipsis is the platform's own way of
+                    // saying that a button asks before it acts. Spelling that
+                    // out in the label would be longer and less familiar.
+                    reclaim.set_label(&format!(
+                        "Delete {} Unused Image{} ({})\u{2026}",
+                        stale.len(),
+                        if stale.len() == 1 { "" } else { "s" },
+                        human_bytes(freed)
+                    ));
+                }
+                stale_for_rows.replace(stale);
             });
         })
     };
     refresh();
+
+    let refresh_for_show_all = refresh.clone();
+    show_all.connect_active_notify(move |_| refresh_for_show_all());
+
+    let refresh_after_prune = refresh.clone();
+    let dialog_for_prune = dialog.clone();
+    let podman_for_prune = podman.clone();
+    let on_changed_for_prune = on_changed.clone();
+    let stale_for_prune = stale_images.clone();
+    reclaim.connect_clicked(move |_| {
+        confirm_prune(
+            &dialog_for_prune,
+            podman_for_prune.clone(),
+            stale_for_prune.borrow().clone(),
+            refresh_after_prune.clone(),
+            on_changed_for_prune.clone(),
+        );
+    });
 
     let refresh_after_build = refresh.clone();
     let dialog_for_build = dialog.clone();
@@ -187,6 +283,105 @@ fn populate(
         row.add_suffix(&remove);
         list.append(&row);
     }
+}
+
+/// Lists what a prune would remove, and asks.
+///
+/// A bulk delete that only says how many is not something a person can agree
+/// to. The images are named, so the answer is informed rather than trusting.
+fn confirm_prune(
+    parent: &adw::Dialog,
+    podman: Arc<Podman>,
+    stale: Vec<Image>,
+    refresh: Rc<dyn Fn()>,
+    on_changed: Rc<dyn Fn()>,
+) {
+    let freed: u64 = stale.iter().map(|i| i.size_bytes).sum();
+    let dialog = adw::AlertDialog::builder()
+        .heading(format!(
+            "Delete {} unused image{}?",
+            stale.len(),
+            if stale.len() == 1 { "" } else { "s" }
+        ))
+        .body(format!(
+            "These images have no name and no container using them. Deleting \
+             them frees about {}.\n\nThis is not limited to Cabin: Podman \
+             removes every unused image on this computer. A rebuild leaves the \
+             image it replaced in this state, which is usually what this \
+             reclaims.",
+            human_bytes(freed)
+        ))
+        .build();
+
+    // The review itself. Scrolled, because a host that has not been tidied in
+    // a while can have dozens.
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(vec!["boxed-list"])
+        .build();
+    for image in &stale {
+        list.append(
+            &adw::ActionRow::builder()
+                .title(image.short_id())
+                .subtitle(image.human_size())
+                .css_classes(vec!["property"])
+                .build(),
+        );
+    }
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .max_content_height(260)
+        .propagate_natural_height(true)
+        .child(&list)
+        .build();
+    dialog.set_extra_child(Some(&scroller));
+
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("delete", "Delete");
+    dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+
+    let parent_for_response = parent.clone();
+    dialog.connect_response(None, move |_, response| {
+        if response != "delete" {
+            return;
+        }
+        let podman = podman.clone();
+        let refresh = refresh.clone();
+        let on_changed = on_changed.clone();
+        let parent = parent_for_response.clone();
+        runtime::spawn(async move { podman.prune_images().await }, move |result| {
+            match result {
+                // Report what Podman actually removed rather than what
+                // was predicted. The two can differ, because the decision
+                // is made on the host at the moment of the request.
+                Ok((count, freed)) => {
+                    tracing::info!("removed {count} image(s), freeing {freed} bytes");
+                    let done = adw::AlertDialog::builder()
+                        .heading("Unused images deleted")
+                        .body(format!(
+                            "{count} image{} removed, freeing {}.",
+                            if count == 1 { "" } else { "s" },
+                            human_bytes(freed)
+                        ))
+                        .build();
+                    done.add_response("close", "Close");
+                    done.present(Some(&parent));
+                }
+                Err(e) => {
+                    let error = adw::AlertDialog::builder()
+                        .heading("Could not delete the unused images")
+                        .body(e.to_string())
+                        .build();
+                    error.add_response("close", "Close");
+                    error.present(Some(&parent));
+                }
+            }
+            refresh();
+            on_changed();
+        });
+    });
+    dialog.present(Some(parent));
 }
 
 fn confirm_delete(

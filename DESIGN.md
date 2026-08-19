@@ -1876,11 +1876,31 @@ display that only appears at the end is not a progress display. The build
 endpoint reports a failure inside a stream that still ends with 200, so the
 error is read out of the body rather than from the status.
 
+**The list is Cabin's images only.** `guest/Containerfile` carries
+`LABEL io.github.jaydoubleu.cabin.guest="true"`, so anything built from it is
+told apart from the rest of the host, including images built with
+`just guest`. A switch shows everything else. The default matters: the
+development host carries two dozen images belonging to other work, and an
+image manager that offers to delete those by default is a trap rather than a
+convenience. An image built before the label existed is still recognised by
+its name, so the one in use is never hidden from its owner.
+
 Deleting is worth having for a reason that only showed up once the list
-existed. The development host had four untagged 1.6 GB images, left behind by
-earlier rebuilds, using 6.4 GB that nothing accounted for. Podman refuses to
-delete an image a container still uses, and Cabin shows that refusal rather
-than forcing past it.
+existed. The development host had fourteen untagged 1.65 GB images, left behind
+by earlier rebuilds, using around 23 GB that nothing accounted for. Podman
+refuses to delete an image a container still uses, and Cabin shows that refusal
+rather than forcing past it.
+
+Clearing them is a bulk delete, so it is a review rather than a warning. The
+confirmation lists every image it would remove with its size, because a bulk
+delete that says only how many is not something a person can agree to. The
+button carries a trailing ellipsis, which is the platform's own way of saying
+that it asks first. The result reports what Podman actually removed rather than
+what was predicted, since the decision is made on the host at the moment of the
+request and the two can differ.
+
+Note that pruning is not limited to Cabin's images. Podman prunes by
+danglingness, not by owner, and the confirmation says so.
 
 ### 19.3 Opening a shell in a desktop
 

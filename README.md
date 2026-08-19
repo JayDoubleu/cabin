@@ -153,10 +153,13 @@ A desktop runs from an image Cabin builds on your machine, from
 downloaded from anywhere else, and nothing is published.
 
 Build it from the main menu, under Guest Images, or with `just guest`. The
-first build takes several minutes. The same place lists what is on the host and
-removes images you no longer want, which is worth checking after a few
-rebuilds: each one leaves the previous image untagged and it still occupies
-over a gigabyte.
+first build takes several minutes.
+
+The same place lists Cabin's images, and only those: the guest image carries a
+label, so your other images are left alone unless you ask to see them. It is
+worth visiting after a few rebuilds. Each rebuild leaves the previous image
+untagged and still over a gigabyte, and the manager offers to clear them once
+you have seen the list.
 
 ### Opening a shell in a desktop
 

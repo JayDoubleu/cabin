@@ -10,6 +10,30 @@ use crate::http::{self, RawBody};
 use crate::Podman;
 use serde::Deserialize;
 
+/// A byte count a person can read.
+///
+/// Powers of 1000, not 1024, because that is what Podman prints and a manager
+/// that disagreed with `podman images` about a size would be worse than one
+/// that rounds differently from the disk.
+pub fn human_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "kB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1000.0 && unit + 1 < UNITS.len() {
+        size /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{size:.0} {}", UNITS[unit])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+/// The label that marks an image as Cabin's. Set in `guest/Containerfile`, so
+/// an image built with `just guest` carries it too.
+pub const LABEL_GUEST: &str = "io.github.jaydoubleu.cabin.guest";
+
 /// The image a desktop is built from, as Podman reports it.
 #[derive(Debug, Clone)]
 pub struct Image {
@@ -20,6 +44,11 @@ pub struct Image {
     pub size_bytes: u64,
     /// Seconds since the epoch.
     pub created: i64,
+    /// True when the image carries Cabin's guest label.
+    pub is_guest: bool,
+    /// True when nothing references the image by name any more. A rebuild
+    /// leaves the image it replaced in this state.
+    pub dangling: bool,
 }
 
 impl Image {
@@ -42,18 +71,7 @@ impl Image {
 
     /// A size a person can read, in the units Podman itself uses.
     pub fn human_size(&self) -> String {
-        const UNITS: &[&str] = &["B", "kB", "MB", "GB"];
-        let mut size = self.size_bytes as f64;
-        let mut unit = 0;
-        while size >= 1000.0 && unit + 1 < UNITS.len() {
-            size /= 1000.0;
-            unit += 1;
-        }
-        if unit == 0 {
-            format!("{size:.0} {}", UNITS[unit])
-        } else {
-            format!("{size:.1} {}", UNITS[unit])
-        }
+        human_bytes(self.size_bytes)
     }
 }
 
@@ -69,6 +87,8 @@ struct ImageSummary {
     size: u64,
     #[serde(rename = "Created", default)]
     created: i64,
+    #[serde(rename = "Labels", default)]
+    labels: Option<std::collections::HashMap<String, String>>,
 }
 
 /// One line of build output.
@@ -113,13 +133,26 @@ impl Podman {
         let summaries: Vec<ImageSummary> = serde_json::from_slice(&response.body)?;
         let mut images: Vec<Image> = summaries
             .into_iter()
-            .map(|s| Image {
-                id: s.id,
+            .map(|s| {
                 // Podman fills one or the other depending on the endpoint
                 // version, so take whichever is there.
-                tags: s.names.or(s.repo_tags).unwrap_or_default(),
-                size_bytes: s.size,
-                created: s.created,
+                let tags = s.names.or(s.repo_tags).unwrap_or_default();
+                let is_guest = s
+                    .labels
+                    .as_ref()
+                    .and_then(|l| l.get(LABEL_GUEST))
+                    .is_some_and(|v| v == "true");
+                Image {
+                    dangling: tags.is_empty(),
+                    // An image built before the label existed still carries
+                    // the name, so fall back to it rather than hiding an
+                    // image the user plainly recognises.
+                    is_guest: is_guest || tags.iter().any(|t| t.contains("cabin-guest")),
+                    id: s.id,
+                    tags,
+                    size_bytes: s.size,
+                    created: s.created,
+                }
             })
             .collect();
         images.sort_by_key(|i| std::cmp::Reverse(i.created));
@@ -187,6 +220,40 @@ impl Podman {
         }
         Ok(())
     }
+}
+
+impl Podman {
+    /// Removes every image that nothing names and no container uses.
+    ///
+    /// Returns the number removed and the bytes reclaimed. This is not
+    /// limited to Cabin's images: Podman prunes by danglingness, not by
+    /// owner, and the interface says so before it is used.
+    pub async fn prune_images(&self) -> Result<(usize, u64)> {
+        let response = http::request(
+            self.socket_path(),
+            "POST",
+            "/v5.0.0/libpod/images/prune",
+            Some(b"{}"),
+        )
+        .await?;
+        if response.status >= 400 {
+            return Err(Error::Api {
+                status: response.status,
+                message: String::from_utf8_lossy(&response.body).into_owned(),
+            });
+        }
+        // A prune that removed nothing answers with null rather than an
+        // empty list, which is not the same shape.
+        let reports: Vec<PruneReport> = serde_json::from_slice(&response.body).unwrap_or_default();
+        let freed = reports.iter().map(|r| r.size).sum();
+        Ok((reports.len(), freed))
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct PruneReport {
+    #[serde(rename = "Size", default)]
+    size: u64,
 }
 
 /// Packs a directory into the tar archive that the build endpoint takes.
@@ -280,10 +347,20 @@ mod tests {
     fn image(size: u64, tags: &[&str]) -> Image {
         Image {
             id: "sha256:0123456789abcdef".into(),
+            dangling: tags.is_empty(),
             tags: tags.iter().map(|s| s.to_string()).collect(),
             size_bytes: size,
             created: 0,
+            is_guest: false,
         }
+    }
+
+    #[test]
+    fn an_image_with_no_name_is_dangling() {
+        // A rebuild leaves the image it replaced in this state, and those
+        // are what fill a disk without anything accounting for them.
+        assert!(image(1, &[]).dangling);
+        assert!(!image(1, &["localhost/cabin-guest:f44"]).dangling);
     }
 
     #[test]
