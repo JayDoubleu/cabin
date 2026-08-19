@@ -31,6 +31,9 @@ mod imp {
         /// True when the guest should follow the window size.
         pub fit_to_window: Cell<bool>,
         pub pending_resize: RefCell<Option<glib::SourceId>>,
+        /// The last size actually sent to the guest, so an identical request
+        /// is not sent twice.
+        pub last_requested: Cell<Option<(u32, u32)>>,
         /// Set when a fixed resolution is chosen instead of fit.
         pub fixed_size: Cell<Option<(u32, u32)>>,
     }
@@ -210,6 +213,16 @@ impl CabinDisplay {
 
     fn request_guest_resize(&self, width: u32, height: u32) {
         let (width, height) = cabin_rdp::session::clamp_resolution(width, height);
+        let imp = self.imp();
+
+        // One window drag produces several size-allocate calls, so the debounce
+        // can expire more than once on the same final size. Sending it twice
+        // costs a Display Control round trip and a guest re-layout for nothing.
+        if !should_send_resize(imp.last_requested.get(), (width, height)) {
+            return;
+        }
+        imp.last_requested.set(Some((width, height)));
+
         tracing::debug!("guest resize requested: {width}x{height}");
         // The guest rounds odd sizes down and may grant something else, so the
         // granted size is read back from the next frame rather than assumed.
@@ -234,6 +247,15 @@ impl CabinDisplay {
             guest_h,
         )
     }
+}
+
+/// True when a resize request is worth sending.
+///
+/// Only an exact repeat of the previous request is suppressed. Returning to an
+/// earlier size after visiting another one is still sent, because the guest may
+/// have been left somewhere else.
+pub fn should_send_resize(last: Option<(u32, u32)>, next: (u32, u32)) -> bool {
+    last != Some(next)
 }
 
 /// Pure geometry, split out so it can be tested with no widget.
@@ -289,6 +311,32 @@ mod tests {
     #[test]
     fn rejects_before_the_first_frame() {
         assert!(letterbox_map(1.0, 1.0, 100.0, 100.0, 0, 0).is_none());
+    }
+
+    #[test]
+    fn suppresses_an_identical_repeat_request() {
+        assert!(!should_send_resize(Some((1380, 604)), (1380, 604)));
+    }
+
+    #[test]
+    fn sends_the_first_request() {
+        assert!(should_send_resize(None, (1920, 1080)));
+    }
+
+    #[test]
+    fn sends_a_changed_size() {
+        assert!(should_send_resize(Some((1380, 604)), (1130, 804)));
+    }
+
+    #[test]
+    fn sends_a_return_to_an_earlier_size() {
+        // A then B then A must reach the guest, because after B the guest is
+        // no longer at A.
+        let mut last = None;
+        for size in [(800, 600), (1024, 768), (800, 600)] {
+            assert!(should_send_resize(last, size), "{size:?} should be sent");
+            last = Some(size);
+        }
     }
 
     #[test]

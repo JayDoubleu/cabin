@@ -486,7 +486,7 @@ just guest          # build the guest image
 | 3 | Podman client: list, start, stop, event stream | Real state in the sidebar | Done, see section 13 |
 | 4 | `CabinDisplay` shows guest frames, read-only | The hardest component | Done, see section 15 |
 | 5 | Keyboard and pointer input | Usable desktop |
-| 6 | Fit-to-window and fixed resolutions | The headline feature |
+| 6 | Fit-to-window and fixed resolutions | The headline feature | Done, verified against the guest |
 | 7 | Create, delete, mounts, GPU and socket settings | Feature complete |
 | 8 | Clipboard, audio, connection profiles for other devices | Polish |
 
@@ -1042,16 +1042,75 @@ padding. FreeRDP's buffer belongs to FreeRDP, is reused between frames and is
 reallocated on resize, so it cannot cross a thread by reference.
 `GdkMemoryTexture` then takes the packed buffer with a stride of `width * 4`.
 
-### 15.7 Still to do
+### 15.7 Verified in the running application
+
+A host session drove the built application against a live guest and checked
+each claim against the guest itself rather than against Cabin's own logs.
+
+**Rendering.** Selecting a running desktop fills the pane with the guest's
+GNOME session, including a live notification, which proves it is a stream and
+not a still frame.
+
+**Letterboxing.** With the pane at 1380x604 and the guest still at 960x754, the
+image was centred with equal bars and the aspect ratio held. Once the debounce
+fired and the guest resized, the bars disappeared. In steady state the
+letterbox is rarely visible, which is the intent: it exists for the transition.
+
+**Resize.** Every request was granted exactly, confirmed through the guest's
+own `org.gnome.Mutter.DisplayConfig`:
+
+| Requested | Granted by the guest |
+|---|---|
+| 960x754 | `960x754@60.000` |
+| 1380x604 | `1380x604@60.000` |
+| 1130x804 | `1130x804@60.000` |
+
+The "Keep these display settings?" dialogue never appeared, which confirms the
+change goes over Display Control rather than `DisplayConfig`.
+
+**The clipboard decision holds.** The demo desktop ran with `Devices=[]` and
+`CapAdd=[]`, so no `/dev/fuse` and no added capabilities, and the guest journal
+contained no `fuse` line at all. A stock `xfreerdp` against the same image
+aborts the daemon within a second. Suppressing `cliprdr` in Cabin's own client
+is therefore sufficient on its own, and needs nothing from the container
+configuration. That matters for section 8: the safe default costs nothing.
+
+**One defect found and fixed.** The debounce fired twice per gesture and sent
+the same size twice, about 350 ms apart, plus a third identical request later
+when nothing had changed. Each one is a Display Control round trip and a guest
+re-layout for no benefit. `should_send_resize` now suppresses an exact repeat
+of the previous request, while still sending a return to an earlier size.
+
+### 15.8 Notes on testing the application
+
+Two constraints are worth recording, because both cost time to discover.
+
+**Synthetic X events do not work on Cabin's own window.** GTK4 reads input
+through XInput2 and ignores core X events, so `XSendEvent` does nothing. It
+works on `xfreerdp` only because that client reads core events. The working
+route for automating Cabin's own chrome is **AT-SPI**: find the application on
+the accessibility bus, walk to the `GtkListBox`, and call
+`Selection.select_child`.
+
+An input regression test therefore needs both mechanisms: AT-SPI to open a
+session in Cabin, `XSendEvent` to type into the guest surface, then read the
+framebuffer back to assert the pixels changed.
+
+**The verification above ran under `GDK_BACKEND=x11`.** GNOME 50 blocks the
+Shell screenshot D-Bus API for unlisted callers, so a Wayland window can be
+neither captured nor clicked from a script. The frame path should not care, but
+the render path has not been eyeballed on native Wayland and should be once.
+
+### 15.9 Still to do
 - `rdpdr`, `rdpsnd` and `AUDIO_PLAYBACK_DVC` still connect even though the shim
   sets `FreeRDP_DeviceRedirection`, `FreeRDP_AudioPlayback` and friends to
   false, so those settings are applied too late or overridden by
   `freerdp_client_load_addins`. Harmless today, but it is unwanted surface.
-- `cabin_rdp_request_resize` sends a monitor layout over Display Control but
-  has not been exercised against a guest. Two things to expect when it is:
-  the guest rounds odd dimensions **down** to even, so a request for 1703x961
-  is granted as 1702x960 and the client must read the granted size back rather
-  than assume; and a layout change driven over Display Control produces no
-  confirmation dialogue. If the "Keep these display settings?" dialogue ever
-  appears during a resize test, the change went through `DisplayConfig` instead
-  and will revert itself after twenty seconds.
+- The odd-dimension rounding path is still untested. The guest rounds odd
+  sizes **down** to even, so 1703x961 is granted as 1702x960, but GTK kept
+  constraining the pane to even dimensions so the case never arose. Exercising
+  it needs the application to request an odd width directly. It is a one-pixel
+  concern.
+- Input is plumbed through to the guest but has never been exercised from the
+  widget. Section 15.8 describes the harness it needs.
+- Audio, clipboard and connection profiles for other devices remain unstarted.
