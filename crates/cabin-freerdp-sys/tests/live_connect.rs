@@ -48,7 +48,6 @@ fn configure(client: &Client, password: &str) -> i32 {
 
 #[test]
 #[ignore = "needs a running guest from 'just guest-test'"]
-#[ignore = "needs a running guest from 'just guest-test'"]
 fn connects_and_receives_frames() {
     let client = Client::new();
     assert_eq!(configure(&client, "testpass"), CABIN_OK, "configure failed");
