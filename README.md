@@ -31,6 +31,10 @@ other devices can still reach them.
 
 ## Requirements
 
+Run `just doctor` to check everything below at once. It changes nothing.
+[docs/HOST-SETUP.md](docs/HOST-SETUP.md) explains each item and why it is
+there.
+
 - Fedora, or another Linux with Podman 5 and Flatpak.
 - The Podman user socket:
   ```sh
@@ -88,14 +92,15 @@ on first connect.
 
 Every desktop runs systemd, which needs several inotify instances, and the
 default limit is 128 for your whole user account. After a handful of desktops
-the next one fails to start.
-
-Cabin detects this and tells you, but the fix needs root:
+the next one fails to start, and the failure is silent unless Cabin names it.
 
 ```sh
 sudo sysctl -w fs.inotify.max_user_instances=1024
 echo fs.inotify.max_user_instances=1024 | sudo tee /etc/sysctl.d/99-cabin.conf
 ```
+
+[docs/HOST-SETUP.md](docs/HOST-SETUP.md) covers this and the rest of the host
+setup.
 
 ## Security
 
