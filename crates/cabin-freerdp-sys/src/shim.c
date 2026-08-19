@@ -474,12 +474,21 @@ uint64_t cabin_rdp_frame_count(cabin_rdp* self)
 	return self ? self->frames : 0;
 }
 
+/* The Display Control channel attaches some time after the connection is up,
+ * because it is a dynamic virtual channel and DRDYNVC negotiates it after
+ * PostConnect. A resize asked for before that point cannot be sent, so the
+ * caller needs to know whether to hold the request rather than discard it. */
+int cabin_rdp_display_ready(cabin_rdp* self)
+{
+	return (self && self->ctx && self->disp) ? 1 : 0;
+}
+
 int cabin_rdp_request_resize(cabin_rdp* self, uint32_t width, uint32_t height)
 {
 	if (!self || !self->ctx)
 		return CABIN_ERR_GENERIC;
 	if (!self->disp)
-		return CABIN_ERR_GENERIC;
+		return CABIN_ERR_NOT_READY;
 
 	DISPLAY_CONTROL_MONITOR_LAYOUT layout;
 	memset(&layout, 0, sizeof(layout));

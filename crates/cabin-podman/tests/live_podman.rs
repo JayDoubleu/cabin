@@ -44,7 +44,7 @@ async fn create_list_start_stop_remove() {
 
     let config = test_config();
     let id = podman
-        .create_desktop(&config, TEST_PORT, &[], "integration-test-password")
+        .create_desktop(&config, TEST_PORT, &[], &[], "integration-test-password")
         .await
         .expect("create should succeed");
     assert!(!id.is_empty());
@@ -103,7 +103,7 @@ async fn mounts_and_config_survive_a_round_trip() {
     config.height = 1440;
 
     let id = podman
-        .create_desktop(&config, TEST_PORT, &[], "integration-test-password")
+        .create_desktop(&config, TEST_PORT, &[], &[], "integration-test-password")
         .await
         .expect("create should succeed");
 

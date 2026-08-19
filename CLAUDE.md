@@ -84,6 +84,24 @@ Use `just`. Run `just` alone to list every task.
 18. **Building `cabin-freerdp-sys` needs FreeRDP 3.** If `freerdp-devel` is not
     installed, run `just freerdp-sysroot` and export the variables it prints.
     No root is needed.
+19. **The viewer pane owns what it shows.** Do not write to its stack from
+    anywhere else. A session thread outlives the moment it is replaced, so a
+    dead session would otherwise put its own error over the one that replaced
+    it. Every session carries a generation and a stale one returns early.
+    `window::open` is the only route into the pane.
+20. **The Display Control channel attaches after the connection.** A resize
+    asked for before that point cannot be sent, so the session holds it. Never
+    record a resize as sent when no session took the command: the widget
+    suppresses exact repeats, so one dropped request becomes permanent.
+21. **The guest serves one RDP session at a time.** A connection made while the
+    previous one tears down is rejected with `ERRINFO_LOGOFF_BY_USER` part way
+    through the capabilities exchange, which looks like a client fault.
+    `live_session.rs` takes a lock and waits. Separate test binaries still run
+    concurrently, so run `live_input.rs` and `live_connect.rs` apart from it.
+22. **Store interface names for remote access, never addresses.** An address
+    changes with the network, and a stored one would leave the desktop unable
+    to start after a DHCP lease changed. Names resolve to addresses when the
+    container is created. Loopback is always bound as well.
 
 ## Environment notes
 

@@ -8,7 +8,7 @@ pub mod config;
 pub mod labels;
 pub mod mount;
 
-pub use config::{DesktopConfig, GraphicsMode, SocketPolicy};
+pub use config::{DesktopConfig, Exposure, GraphicsMode, NetInterface, SocketPolicy};
 pub use mount::{Mount, MountMode};
 
 /// The prefix on every label that Cabin writes.

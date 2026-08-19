@@ -19,6 +19,9 @@ typedef struct cabin_rdp cabin_rdp;
 #define CABIN_ERR_CONNECT (-2)
 #define CABIN_ERR_AUTH (-3)
 #define CABIN_ERR_DISCONNECTED (-4)
+/* The request was valid but the channel that carries it is not attached yet.
+ * The caller should hold the request and try again, not discard it. */
+#define CABIN_ERR_NOT_READY (-5)
 
 cabin_rdp* cabin_rdp_new(void);
 void cabin_rdp_free(cabin_rdp* self);
@@ -57,6 +60,7 @@ uint64_t cabin_rdp_frame_count(cabin_rdp* self);
 
 /* Asks the server to change the desktop size, over the Display Control
  * channel. The server may grant a different size, so read it back. */
+int cabin_rdp_display_ready(cabin_rdp* self);
 int cabin_rdp_request_resize(cabin_rdp* self, uint32_t width, uint32_t height);
 
 int cabin_rdp_send_key(cabin_rdp* self, uint32_t scancode, int extended, int down);

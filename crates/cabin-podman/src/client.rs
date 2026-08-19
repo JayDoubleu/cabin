@@ -1,7 +1,9 @@
 use crate::error::{Error, Result};
 use crate::http;
 use crate::model::*;
-use cabin_core::{labels, Desktop, DesktopConfig, SocketPolicy, State, LABEL_MANAGED};
+use cabin_core::{
+    labels, Desktop, DesktopConfig, NetInterface, SocketPolicy, State, LABEL_MANAGED,
+};
 use std::collections::HashMap;
 
 /// The libpod API version prefix. Podman keeps this stable.
@@ -83,11 +85,17 @@ impl Podman {
     ///
     /// `render_nodes` lists the DRM render nodes on the host as
     /// `(path, driver)`, which the graphics mode uses to choose a device.
+    /// Creates a desktop container.
+    ///
+    /// `render_nodes` and `interfaces` are facts about the host. This crate
+    /// reads none of them itself, so the caller supplies both and the domain
+    /// model decides what to do with them.
     pub async fn create_desktop(
         &self,
         config: &DesktopConfig,
         host_port: u16,
         render_nodes: &[(String, String)],
+        interfaces: &[NetInterface],
         password: &str,
     ) -> Result<String> {
         let mut env = HashMap::new();
@@ -178,12 +186,20 @@ impl Podman {
             mounts,
             volumes,
             devices,
-            portmappings: vec![CreatePortMapping {
-                host_ip: config.bind_address().to_string(),
-                host_port,
-                container_port: GUEST_RDP_PORT,
-                protocol: "tcp".to_string(),
-            }],
+            // One mapping per address. Choosing interfaces means binding
+            // each of their addresses, rather than binding everything and
+            // hoping a firewall covers the difference.
+            portmappings: config
+                .exposure
+                .bind_addresses(interfaces)
+                .into_iter()
+                .map(|host_ip| CreatePortMapping {
+                    host_ip,
+                    host_port,
+                    container_port: GUEST_RDP_PORT,
+                    protocol: "tcp".to_string(),
+                })
+                .collect(),
             systemd: "always".to_string(),
             selinux_opts: config
                 .socket

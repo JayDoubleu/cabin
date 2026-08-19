@@ -21,6 +21,8 @@ pub const CABIN_ERR_GENERIC: c_int = -1;
 pub const CABIN_ERR_CONNECT: c_int = -2;
 pub const CABIN_ERR_AUTH: c_int = -3;
 pub const CABIN_ERR_DISCONNECTED: c_int = -4;
+/// The Display Control channel is not attached yet. Hold the request.
+pub const CABIN_ERR_NOT_READY: c_int = -5;
 
 // Pointer button flags, from MS-RDPBCGR. Declared here rather than bound,
 // because they are stable protocol constants.
@@ -59,6 +61,7 @@ extern "C" {
     ) -> *const u8;
 
     pub fn cabin_rdp_frame_count(client: *mut cabin_rdp) -> u64;
+    pub fn cabin_rdp_display_ready(client: *mut cabin_rdp) -> c_int;
     pub fn cabin_rdp_request_resize(client: *mut cabin_rdp, width: u32, height: u32) -> c_int;
     pub fn cabin_rdp_send_key(
         client: *mut cabin_rdp,

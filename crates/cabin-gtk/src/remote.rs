@@ -21,7 +21,7 @@ pub fn present(parent: &impl IsA<gtk::Widget>, desktop: &Desktop, password: Stri
         return;
     };
 
-    if !desktop.config.expose_on_lan {
+    if !desktop.config.exposure.reaches_other_devices() {
         page.add(&message_group(
             "Only this computer can connect",
             "This desktop listens on 127.0.0.1. To reach it from a phone or \
@@ -32,12 +32,31 @@ pub fn present(parent: &impl IsA<gtk::Widget>, desktop: &Desktop, password: Stri
         return;
     }
 
-    let address = netaddr::describe(netaddr::best_local_address());
     let details = adw::PreferencesGroup::builder()
         .title("Connection details")
         .description("Use any RDP client. Choose RDP, not VNC.")
         .build();
-    details.add(&copyable_row("Address", &format!("{address}:{port}")));
+    // With chosen networks the desktop answers on those addresses only, so
+    // offering the route to the wider network would name an address that
+    // refuses the connection.
+    let addresses = reachable_addresses(desktop);
+    if addresses.is_empty() {
+        page.add(&message_group(
+            "No usable address",
+            "The chosen networks hold no address at the moment. Connect this \
+             computer to one of them, or choose a different network in Settings.",
+        ));
+        finish(&dialog, &page, parent);
+        return;
+    }
+    for (index, address) in addresses.iter().enumerate() {
+        let title = if addresses.len() == 1 {
+            "Address".to_string()
+        } else {
+            format!("Address {}", index + 1)
+        };
+        details.add(&copyable_row(&title, &format!("{address}:{port}")));
+    }
     details.add(&copyable_row("Username", "cabin"));
     details.add(&copyable_row("Password", &password));
     page.add(&details);
@@ -77,6 +96,26 @@ fn finish(dialog: &adw::Dialog, page: &adw::PreferencesPage, parent: &impl IsA<g
     toolbar.set_content(Some(page));
     dialog.set_child(Some(&toolbar));
     dialog.present(Some(parent));
+}
+
+/// The addresses another device could actually use.
+///
+/// For chosen networks these are the addresses on those interfaces. For every
+/// network there is no single answer, so the route to the wider network is the
+/// useful one.
+fn reachable_addresses(desktop: &Desktop) -> Vec<String> {
+    let chosen = desktop.config.exposure.chosen_interfaces();
+    if chosen.is_empty() {
+        return match netaddr::best_local_address() {
+            Some(ip) => vec![ip.to_string()],
+            None => vec![netaddr::describe(None)],
+        };
+    }
+    crate::network::interfaces()
+        .into_iter()
+        .filter(|i| chosen.contains(&i.name))
+        .flat_map(|i| i.addresses)
+        .collect()
 }
 
 fn message_group(title: &str, body: &str) -> adw::PreferencesGroup {

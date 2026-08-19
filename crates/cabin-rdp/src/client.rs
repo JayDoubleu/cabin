@@ -173,13 +173,20 @@ impl Client {
         })
     }
 
-    fn request_resize(&self, width: u32, height: u32) -> Result<()> {
+    /// True once the Display Control channel has attached.
+    fn display_ready(&self) -> bool {
+        // SAFETY: valid handle.
+        unsafe { sys::cabin_rdp_display_ready(self.0) == 1 }
+    }
+
+    fn request_resize(&self, width: u32, height: u32) -> ResizeOutcome {
         // SAFETY: valid handle.
         let rc = unsafe { sys::cabin_rdp_request_resize(self.0, width, height) };
-        if rc != sys::CABIN_OK {
-            return Err(Error::Closed(format!("resize refused, code {rc}")));
+        match rc {
+            sys::CABIN_OK => ResizeOutcome::Sent,
+            sys::CABIN_ERR_NOT_READY => ResizeOutcome::NotReady,
+            _ => ResizeOutcome::Refused,
         }
-        Ok(())
     }
 
     fn send_pointer(&self, x: u32, y: u32, flags: u32) {
@@ -216,6 +223,15 @@ fn cstring(value: &str) -> Result<CString> {
     CString::new(value).map_err(|_| Error::Closed("a setting contained a NUL byte".into()))
 }
 
+/// What came of asking the guest to change its resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResizeOutcome {
+    Sent,
+    /// The Display Control channel is not attached yet.
+    NotReady,
+    Refused,
+}
+
 /// How long a poll waits for network activity. Short enough that queued
 /// commands are acted on promptly, long enough not to spin.
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
@@ -244,14 +260,34 @@ pub fn run_session(
     });
 
     let mut last_frame = 0u64;
+    // The size the interface asked for before the Display Control channel was
+    // attached. Without this the first request is lost: the widget is
+    // allocated its size well before DRDYNVC negotiates disp, so the opening
+    // resize arrives too early, and the interface will not repeat a request it
+    // believes it already sent. The desktop then stays at its created size
+    // until the user drags a window edge.
+    let mut pending_resize: Option<(u32, u32)> = None;
+
     loop {
         while let Ok(command) = commands.try_recv() {
-            if !apply(&client, command) {
+            if !apply(&client, command, &mut pending_resize) {
                 client.disconnect();
                 let _ = events.send_blocking(SessionEvent::Disconnected {
                     reason: "closed by the application".into(),
                 });
                 return;
+            }
+        }
+
+        if let Some((width, height)) = pending_resize {
+            if client.display_ready() {
+                pending_resize = None;
+                match client.request_resize(width, height) {
+                    ResizeOutcome::Sent => {
+                        tracing::debug!("sent the held resize to {width}x{height}")
+                    }
+                    _ => tracing::debug!("the held resize to {width}x{height} was refused"),
+                }
             }
         }
 
@@ -317,13 +353,24 @@ fn button_flag(button: u8) -> Option<u32> {
 }
 
 /// Applies one command. Returns false when the session should end.
-fn apply(client: &Client, command: SessionCommand) -> bool {
+///
+/// A resize that cannot be sent yet is written to `pending_resize` rather than
+/// dropped. See `run_session` for why that matters.
+fn apply(
+    client: &Client,
+    command: SessionCommand,
+    pending_resize: &mut Option<(u32, u32)>,
+) -> bool {
     match command {
         SessionCommand::Disconnect => return false,
         SessionCommand::Resize { width, height } => {
-            let (width, height) = crate::session::clamp_resolution(width, height);
-            if let Err(e) = client.request_resize(width, height) {
-                tracing::debug!("resize refused: {e}");
+            let size = crate::session::clamp_resolution(width, height);
+            match client.request_resize(size.0, size.1) {
+                ResizeOutcome::Sent => *pending_resize = None,
+                ResizeOutcome::NotReady => *pending_resize = Some(size),
+                ResizeOutcome::Refused => {
+                    tracing::debug!("the guest refused a resize to {}x{}", size.0, size.1)
+                }
             }
         }
         SessionCommand::PointerMove { x, y } => {

@@ -19,15 +19,30 @@ const STOP_TIMEOUT_SECS: u32 = 20;
 /// Called when the user picks a desktop from the list.
 type SelectionCallback = Rc<RefCell<Option<Box<dyn Fn(Desktop)>>>>;
 
+/// Called after every refresh, with the desktops Podman reported.
+type ListCallback = Rc<RefCell<Option<Box<dyn Fn(&[Desktop])>>>>;
+
 pub struct Sidebar {
     pub widget: gtk::Box,
     list: gtk::ListBox,
     podman: Arc<Podman>,
     desktops: Rc<RefCell<Vec<Desktop>>>,
     on_select: SelectionCallback,
+    on_list: ListCallback,
     /// Guards the one-off opening selection, so a refresh from the event feed
     /// does not keep reselecting and reconnecting behind the user.
     opened: Cell<bool>,
+    /// The desktop the user chose, by name. The list is rebuilt from scratch
+    /// on every refresh, which drops the selection, so it is restored by name
+    /// rather than by row.
+    selected: RefCell<Option<String>>,
+    /// True while the selection is being restored. The restore is only there
+    /// to keep the row highlighted, so it must not be mistaken for the user
+    /// choosing a desktop.
+    restoring: Cell<bool>,
+    /// Set when `selected` names a desktop the user has just asked for, and
+    /// the row does not exist yet. The next refresh that finds it opens it.
+    pending_choice: Cell<bool>,
 }
 
 impl Sidebar {
@@ -69,20 +84,29 @@ impl Sidebar {
             podman,
             desktops: Rc::new(RefCell::new(Vec::new())),
             on_select: Rc::new(RefCell::new(None)),
+            on_list: Rc::new(RefCell::new(None)),
             opened: Cell::new(false),
+            selected: RefCell::new(None),
+            restoring: Cell::new(false),
+            pending_choice: Cell::new(false),
         });
 
         let for_new = sidebar.clone();
         new_button.connect_clicked(move |button| {
             let sidebar = for_new.clone();
             let refresh_target = for_new.clone();
-            crate::create::present(button, sidebar.podman.clone(), move || {
-                refresh_target.refresh();
+            // Select the new desktop once it appears, so its settings are one
+            // click away and the pane stops showing the previous one.
+            crate::create::present(button, sidebar.podman.clone(), move |name| {
+                refresh_target.choose(&name);
             });
         });
 
         let for_select = sidebar.clone();
         sidebar.list.connect_row_selected(move |_, row| {
+            if for_select.restoring.get() {
+                return;
+            }
             let Some(row) = row else { return };
             let index = row.index();
             if index < 0 {
@@ -90,6 +114,7 @@ impl Sidebar {
             }
             let desktop = for_select.desktops.borrow().get(index as usize).cloned();
             if let Some(desktop) = desktop {
+                *for_select.selected.borrow_mut() = Some(desktop.name.clone());
                 if let Some(callback) = for_select.on_select.borrow().as_ref() {
                     callback(desktop);
                 }
@@ -105,6 +130,22 @@ impl Sidebar {
 
     pub fn connect_selected(&self, callback: impl Fn(Desktop) + 'static) {
         *self.on_select.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// Called after every refresh. The viewer uses this to notice a desktop
+    /// that was deleted or stopped somewhere else.
+    pub fn connect_listed(&self, callback: impl Fn(&[Desktop]) + 'static) {
+        *self.on_list.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// Selects a desktop by name, and opens it once it appears.
+    ///
+    /// A desktop that was just created is not in the list yet, so the choice
+    /// is recorded and acted on by the refresh that finds it.
+    pub fn choose(self: &Rc<Self>, name: &str) {
+        *self.selected.borrow_mut() = Some(name.to_string());
+        self.pending_choice.set(true);
+        self.refresh();
     }
 
     /// Re-queries Podman and rebuilds the list.
@@ -128,29 +169,65 @@ impl Sidebar {
         for desktop in &desktops {
             self.list.append(&self.build_row(desktop));
         }
+
         // Prefer the desktop that was last in use, so reopening Cabin puts
         // the user back where they were. Fall back to the first that is
         // running, which is better than an empty pane.
         let preferred = crate::state::State::new(crate::APP_ID).last_desktop();
-        let first_running = preferred
+        let opening_choice = preferred
             .and_then(|name| {
                 desktops
                     .iter()
                     .position(|d| d.name == name && d.state.is_running())
             })
             .or_else(|| desktops.iter().position(|d| d.state.is_running()));
-        *self.desktops.borrow_mut() = desktops;
+
+        // Removing the rows above dropped the selection, so find where the
+        // chosen desktop landed before the list is replaced.
+        let chosen = self
+            .selected
+            .borrow()
+            .as_ref()
+            .and_then(|name| desktops.iter().position(|d| &d.name == name));
+        *self.desktops.borrow_mut() = desktops.clone();
+
+        if let Some(index) = chosen {
+            // A choice that is still pending must reach the viewer. Every
+            // other restore is a highlight only: treating it as a fresh
+            // choice would reconnect the session on every Podman event.
+            let pending = self.pending_choice.replace(false);
+            self.restoring.set(!pending);
+            if let Some(row) = self.list.row_at_index(index as i32) {
+                if pending && self.list.selected_row().as_ref() == Some(&row) {
+                    // Already the selected row, so selecting it again emits
+                    // nothing. Call through directly.
+                    self.list.unselect_all();
+                }
+                self.list.select_row(Some(&row));
+            }
+            self.restoring.set(false);
+            self.opened.set(true);
+        } else {
+            // The chosen desktop has gone. Stop trying to restore it.
+            *self.selected.borrow_mut() = None;
+        }
 
         // Open the first running desktop once, at start-up. Without this the
         // viewer shows an empty pane until the user thinks to click a row,
         // which reads as the application being broken.
-        if !self.opened.get() {
-            if let Some(index) = first_running {
+        if !self.opened.get() && chosen.is_none() {
+            if let Some(index) = opening_choice {
                 self.opened.set(true);
                 if let Some(row) = self.list.row_at_index(index as i32) {
                     self.list.select_row(Some(&row));
                 }
             }
+        }
+
+        // Last, so the viewer reconciles against a list the sidebar has
+        // already settled on.
+        if let Some(callback) = self.on_list.borrow().as_ref() {
+            callback(&desktops);
         }
     }
 

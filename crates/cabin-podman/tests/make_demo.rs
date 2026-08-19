@@ -13,7 +13,7 @@ async fn make_demo_desktop() {
     config.memory_mb = Some(4096);
     config.graphics = GraphicsMode::Software;
     let id = podman
-        .create_desktop(&config, 13390, &[], "demopassword")
+        .create_desktop(&config, 13390, &[], &[], "demopassword")
         .await
         .expect("create");
     println!("created demo desktop {id}");

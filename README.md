@@ -123,11 +123,28 @@ Defaults are conservative:
 - RDP always runs over TLS, and the credentials are per desktop.
 - No container runtime socket is exposed.
 
-Cabin can expose the host Podman or Docker socket to a desktop, because that is
-sometimes what you want. Both options warn first, and the warning is accurate:
-the Podman socket grants a desktop the power of your user account, and the
-Docker socket grants root on the host. The safe alternative, running Podman
-inside the desktop, is the recommended setting.
+### Reaching a desktop from another device
+
+Turning remote access on asks which networks, not just whether. You can name
+the interfaces to listen on, and Cabin publishes the port on those addresses
+only. Loopback is always included.
+
+This matters on a laptop. Choosing a VPN interface such as `tailscale0` gives a
+desktop that your own devices can reach from anywhere and that nobody in a cafe
+can reach. Listening on every network is still offered, and it warns that the
+desktop will then accept connections on public Wi-Fi as well.
+
+### Container runtime access
+
+Cabin can share the host's Podman or Docker socket with a desktop, because that
+is sometimes what you want. The desktop gets no runtime of its own: containers
+it starts run outside the desktop, and outside its sandbox.
+
+Both options warn first, and the warning is accurate. The Podman socket grants
+a desktop the power of your user account. The Docker socket grants root on the
+host. Running Podman inside the desktop would be the safe alternative, and it
+does not work yet, so it is not offered. DESIGN.md section 15.17 records how
+far it got.
 
 The application itself asks for very little. It does **not** request
 `--filesystem=home`, and it does **not** request `org.freedesktop.Flatpak`.

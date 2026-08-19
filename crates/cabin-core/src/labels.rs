@@ -50,10 +50,12 @@ pub fn from_labels(labels: &HashMap<String, String>) -> Result<DesktopConfig, La
     let raw = labels
         .get(LABEL_CONFIG)
         .ok_or(LabelError::Missing(LABEL_CONFIG))?;
-    serde_json::from_str(raw).map_err(|source| LabelError::Parse {
-        label: LABEL_CONFIG,
-        source,
-    })
+    serde_json::from_str::<DesktopConfig>(raw)
+        .map(DesktopConfig::migrate)
+        .map_err(|source| LabelError::Parse {
+            label: LABEL_CONFIG,
+            source,
+        })
 }
 
 #[cfg(test)]
@@ -74,6 +76,31 @@ mod tests {
 
         let restored = from_labels(&to_labels(&original)).unwrap();
         assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn an_older_exposed_desktop_keeps_its_exposure() {
+        // Written by a version that only had a boolean.
+        let json = r#"{"name":"old","image":"x","mounts":[],"width":1920,
+                       "height":1080,"expose_on_lan":true}"#;
+        let labels = HashMap::from([
+            (LABEL_MANAGED.to_string(), "true".to_string()),
+            (LABEL_CONFIG.to_string(), json.to_string()),
+        ]);
+        let config = from_labels(&labels).unwrap();
+        assert_eq!(config.exposure, crate::config::Exposure::Everywhere);
+    }
+
+    #[test]
+    fn an_older_private_desktop_stays_private() {
+        let json = r#"{"name":"old","image":"x","mounts":[],"width":1920,
+                       "height":1080,"expose_on_lan":false}"#;
+        let labels = HashMap::from([
+            (LABEL_MANAGED.to_string(), "true".to_string()),
+            (LABEL_CONFIG.to_string(), json.to_string()),
+        ]);
+        let config = from_labels(&labels).unwrap();
+        assert_eq!(config.exposure, crate::config::Exposure::Loopback);
     }
 
     #[test]

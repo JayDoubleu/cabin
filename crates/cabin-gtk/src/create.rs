@@ -12,17 +12,25 @@ use std::sync::Arc;
 /// the usual ephemeral services and below the ephemeral allocation range.
 const PORT_RANGE: std::ops::Range<u16> = 13389..13500;
 
+/// Presents the New Desktop dialogue.
+///
+/// `on_created` receives the name of the desktop that was made, so the caller
+/// can select it. Only the essentials are asked for here. Everything else is
+/// in the desktop's own settings, which the pane header opens.
 pub fn present(
     parent: &impl IsA<gtk::Widget>,
     podman: Arc<Podman>,
-    on_created: impl Fn() + 'static,
+    on_created: impl Fn(String) + 'static,
 ) {
     // connect_response can fire more than once over the dialogue's life, so
     // the callback is shared rather than moved.
-    let on_created: Rc<dyn Fn()> = Rc::new(on_created);
+    let on_created: Rc<dyn Fn(String)> = Rc::new(on_created);
     let dialog = adw::AlertDialog::builder()
         .heading("New Desktop")
-        .body("A new desktop runs its own Fedora GNOME session.")
+        .body(
+            "A new desktop runs its own Fedora GNOME session. Shared folders, \
+             container access and remote access are in its settings once it exists.",
+        )
         .build();
 
     let name_row = adw::EntryRow::builder()
@@ -85,21 +93,23 @@ pub fn present(
 
         let podman = podman.clone();
         let nodes = nodes.clone();
+        let interfaces = crate::network::interfaces();
         let parent_widget = parent_widget.clone();
         let on_created = on_created.clone();
         let port = free_port().unwrap_or(PORT_RANGE.start);
         let password = generate_password();
+        let created_name = name.clone();
 
         runtime::spawn(
             async move {
                 podman
-                    .create_desktop(&config, port, &nodes, &password)
+                    .create_desktop(&config, port, &nodes, &interfaces, &password)
                     .await
             },
             move |result| match result {
                 Ok(id) => {
                     tracing::info!("created desktop {id}");
-                    on_created();
+                    on_created(created_name);
                 }
                 Err(e) => show_error(&parent_widget, &e.to_string()),
             },

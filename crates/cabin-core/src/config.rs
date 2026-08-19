@@ -33,6 +33,82 @@ impl GraphicsMode {
     }
 }
 
+/// A network interface on the host, with the addresses it currently holds.
+///
+/// Cabin performs no I/O in this crate, so the caller reads these from the
+/// system and passes them in. This mirrors how render nodes are handled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetInterface {
+    pub name: String,
+    /// Every address on the interface, as strings, IPv4 and IPv6 together.
+    pub addresses: Vec<String>,
+    /// True for the loopback interface, which is always reachable and is
+    /// never worth offering as a choice.
+    pub loopback: bool,
+}
+
+/// Which addresses a desktop's RDP port publishes on. See DESIGN.md section 7.5.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Exposure {
+    /// Loopback only. Nothing outside this computer can connect.
+    #[default]
+    Loopback,
+    /// Every address on the machine, including any that appear later.
+    Everywhere,
+    /// Only the named interfaces.
+    ///
+    /// Interface names are stored rather than addresses, because an address
+    /// changes whenever the network does. A stored address would leave the
+    /// desktop unable to start after a DHCP lease changed, and the reason
+    /// would not be obvious.
+    Interfaces { names: Vec<String> },
+}
+
+impl Exposure {
+    /// The host addresses to publish the RDP port on.
+    ///
+    /// `available` is the host's interfaces, which the caller reads from the
+    /// system. An interface that is named but currently has no address
+    /// contributes nothing, so the desktop still starts.
+    pub fn bind_addresses(&self, available: &[NetInterface]) -> Vec<String> {
+        match self {
+            Self::Loopback => vec!["127.0.0.1".to_string()],
+            Self::Everywhere => vec!["0.0.0.0".to_string()],
+            Self::Interfaces { names } => {
+                // Loopback is always included. Without it the desktop would
+                // stop being reachable from the computer it runs on, which is
+                // never what choosing an interface is meant to mean.
+                let mut addresses = vec!["127.0.0.1".to_string()];
+                for name in names {
+                    let Some(interface) = available.iter().find(|i| &i.name == name) else {
+                        continue;
+                    };
+                    for address in &interface.addresses {
+                        if !addresses.contains(address) {
+                            addresses.push(address.clone());
+                        }
+                    }
+                }
+                addresses
+            }
+        }
+    }
+
+    /// True when something other than this computer can connect.
+    pub fn reaches_other_devices(&self) -> bool {
+        !matches!(self, Self::Loopback)
+    }
+
+    /// The interfaces chosen, when specific ones were.
+    pub fn chosen_interfaces(&self) -> &[String] {
+        match self {
+            Self::Interfaces { names } => names,
+            _ => &[],
+        }
+    }
+}
+
 /// Whether a desktop can reach a container runtime. See DESIGN.md section 7.2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -170,9 +246,14 @@ pub struct DesktopConfig {
     pub width: u32,
     #[serde(default = "default_height")]
     pub height: u32,
-    /// Listen beyond loopback. Off by default.
+    /// Which addresses the RDP port publishes on. Loopback by default.
     #[serde(default)]
-    pub expose_on_lan: bool,
+    pub exposure: Exposure,
+    /// Superseded by `exposure`, and read only so that a desktop created by
+    /// an earlier version keeps its setting. `migrate` folds it in, and it is
+    /// never written again.
+    #[serde(default, rename = "expose_on_lan", skip_serializing)]
+    pub legacy_expose_on_lan: bool,
 }
 
 fn default_width() -> u32 {
@@ -194,17 +275,22 @@ impl DesktopConfig {
             cpus: None,
             width: default_width(),
             height: default_height(),
-            expose_on_lan: false,
+            exposure: Exposure::default(),
+            legacy_expose_on_lan: false,
         }
     }
 
-    /// The address that the RDP port publishes on.
-    pub fn bind_address(&self) -> &'static str {
-        if self.expose_on_lan {
-            "0.0.0.0"
-        } else {
-            "127.0.0.1"
+    /// Folds a setting written by an earlier version into `exposure`.
+    ///
+    /// Call this after reading a configuration. Without it a desktop that was
+    /// already open to the network would quietly fall back to loopback, and
+    /// the user would find it unreachable with nothing to explain why.
+    pub fn migrate(mut self) -> Self {
+        if self.legacy_expose_on_lan && self.exposure == Exposure::Loopback {
+            self.exposure = Exposure::Everywhere;
         }
+        self.legacy_expose_on_lan = false;
+        self
     }
 
     /// Changing any of these needs the container to be recreated.
@@ -215,7 +301,7 @@ impl DesktopConfig {
             || self.socket != other.socket
             || self.memory_mb != other.memory_mb
             || self.cpus != other.cpus
-            || self.expose_on_lan != other.expose_on_lan
+            || self.exposure != other.exposure
     }
 }
 
@@ -317,11 +403,80 @@ mod tests {
         assert!(SocketPolicy::None.warning().is_none());
     }
 
+    fn wifi() -> Vec<NetInterface> {
+        vec![
+            NetInterface {
+                name: "wlp3s0".into(),
+                addresses: vec!["192.168.1.24".into(), "fd00::24".into()],
+                loopback: false,
+            },
+            NetInterface {
+                name: "docker0".into(),
+                addresses: vec!["172.17.0.1".into()],
+                loopback: false,
+            },
+        ]
+    }
+
     #[test]
     fn default_is_loopback_only() {
         let c = DesktopConfig::new("test");
-        assert_eq!(c.bind_address(), "127.0.0.1");
+        assert_eq!(c.exposure.bind_addresses(&wifi()), vec!["127.0.0.1"]);
         assert_eq!(c.socket, SocketPolicy::None);
+    }
+
+    #[test]
+    fn everywhere_binds_the_unspecified_address() {
+        assert_eq!(
+            Exposure::Everywhere.bind_addresses(&wifi()),
+            vec!["0.0.0.0"]
+        );
+    }
+
+    #[test]
+    fn a_chosen_interface_binds_all_of_its_addresses() {
+        let e = Exposure::Interfaces {
+            names: vec!["wlp3s0".into()],
+        };
+        assert_eq!(
+            e.bind_addresses(&wifi()),
+            vec!["127.0.0.1", "192.168.1.24", "fd00::24"]
+        );
+    }
+
+    #[test]
+    fn choosing_interfaces_never_drops_loopback() {
+        // Otherwise the desktop would stop being reachable from the computer
+        // it runs on, which is never what choosing a network is meant to do.
+        let e = Exposure::Interfaces { names: Vec::new() };
+        assert_eq!(e.bind_addresses(&wifi()), vec!["127.0.0.1"]);
+    }
+
+    #[test]
+    fn an_interface_that_has_gone_is_skipped() {
+        // A network the computer has left must not stop the desktop starting.
+        let e = Exposure::Interfaces {
+            names: vec!["wlp3s0".into(), "tun0".into()],
+        };
+        assert_eq!(
+            e.bind_addresses(&wifi()),
+            vec!["127.0.0.1", "192.168.1.24", "fd00::24"]
+        );
+    }
+
+    #[test]
+    fn only_loopback_keeps_the_desktop_private() {
+        assert!(!Exposure::Loopback.reaches_other_devices());
+        assert!(Exposure::Everywhere.reaches_other_devices());
+        assert!(Exposure::Interfaces { names: Vec::new() }.reaches_other_devices());
+    }
+
+    #[test]
+    fn an_exposure_change_recreates_the_container() {
+        let a = DesktopConfig::new("test");
+        let mut b = a.clone();
+        b.exposure = Exposure::Everywhere;
+        assert!(a.needs_recreate(&b));
     }
 
     #[test]

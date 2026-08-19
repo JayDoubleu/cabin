@@ -75,6 +75,7 @@ dependencies = [
  "cabin-rdp",
  "gtk4",
  "libadwaita",
+ "libc",
  "tokio",
  "tracing",
  "tracing-subscriber",

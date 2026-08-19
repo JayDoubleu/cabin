@@ -146,13 +146,50 @@ impl CabinDisplay {
     }
 
     /// Attaches a session, so the widget can send input and resize requests.
+    ///
+    /// A new session starts at the size the desktop was created with, which is
+    /// almost never the size of this widget. So the widget states its size at
+    /// once instead of waiting for the user to drag a window edge. The session
+    /// holds the request until the Display Control channel attaches.
     pub fn set_command_sender(&self, sender: std::sync::mpsc::Sender<cabin_rdp::SessionCommand>) {
-        self.imp().commands.replace(Some(sender));
+        let imp = self.imp();
+        imp.commands.replace(Some(sender));
+        // The previous session's beliefs do not apply to this one.
+        imp.last_requested.set(None);
+        self.request_current_size();
     }
 
     /// Detaches the session, so no further input is sent.
     pub fn clear_command_sender(&self) {
-        self.imp().commands.replace(None);
+        let imp = self.imp();
+        imp.commands.replace(None);
+        imp.last_requested.set(None);
+    }
+
+    /// Ends the session cleanly, so its thread stops rather than being left to
+    /// discover the disconnection on its own.
+    pub fn disconnect_session(&self) {
+        self.cancel_pending_resize();
+        self.send(cabin_rdp::SessionCommand::Disconnect);
+        self.clear_command_sender();
+        self.imp().texture.replace(None);
+        self.imp().guest_size.set((0, 0));
+        self.queue_draw();
+    }
+
+    /// Asks the guest to match the size this widget already has.
+    fn request_current_size(&self) {
+        let imp = self.imp();
+        let (width, height) = match imp.fixed_size.get() {
+            Some(size) => size,
+            None if imp.fit_to_window.get() => (self.width() as u32, self.height() as u32),
+            None => return,
+        };
+        if width == 0 || height == 0 {
+            // Not allocated yet. size_allocate will schedule one.
+            return;
+        }
+        self.request_guest_resize(width, height);
     }
 
     /// Shows a new frame.
@@ -267,9 +304,11 @@ impl CabinDisplay {
         });
     }
 
-    fn send(&self, command: cabin_rdp::SessionCommand) {
-        if let Some(sender) = self.imp().commands.borrow().as_ref() {
-            let _ = sender.send(command);
+    /// Returns false when no session is attached, or the session has gone.
+    fn send(&self, command: cabin_rdp::SessionCommand) -> bool {
+        match self.imp().commands.borrow().as_ref() {
+            Some(sender) => sender.send(command).is_ok(),
+            None => false,
         }
     }
 
@@ -306,12 +345,16 @@ impl CabinDisplay {
         if !should_send_resize(imp.last_requested.get(), (width, height)) {
             return;
         }
-        imp.last_requested.set(Some((width, height)));
 
-        tracing::debug!("guest resize requested: {width}x{height}");
         // The guest rounds odd sizes down and may grant something else, so the
         // granted size is read back from the next frame rather than assumed.
-        self.send(cabin_rdp::SessionCommand::Resize { width, height });
+        if !self.send(cabin_rdp::SessionCommand::Resize { width, height }) {
+            // No session took it. Recording it anyway would suppress the
+            // repeat, and the desktop would never reach this size.
+            return;
+        }
+        imp.last_requested.set(Some((width, height)));
+        tracing::debug!("guest resize requested: {width}x{height}");
     }
 
     /// Maps a point in widget space to guest framebuffer space.

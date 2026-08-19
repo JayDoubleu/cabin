@@ -411,6 +411,48 @@ Settings.
 Cabin builds the base image on first use if it is absent, and shows build
 output in a progress page.
 
+### 7.5 Remote access and network selection
+
+A desktop publishes its RDP port on loopback by default. Remote access is two
+questions, not one, and the settings ask them separately.
+
+| Setting | Published on |
+|---|---|
+| **Off** (default) | `127.0.0.1` only. |
+| **Chosen networks** | Loopback, plus every address on the named interfaces. |
+| **Every network** | `0.0.0.0`. |
+
+Turning remote access on lands the user on **chosen networks**, because that is
+the safer of the two. Widening it to every network is a separate, deliberate
+step with its own warning.
+
+**Interface names are stored, not addresses.** An address changes whenever the
+network does. A stored address would leave the desktop unable to start after a
+DHCP lease changed, and the reason would not be obvious. Cabin resolves the
+names to addresses when it creates the container, and an interface that has no
+address at that moment simply contributes nothing.
+
+**Loopback is always bound.** Choosing an interface never removes the ability
+to connect from the computer the desktop runs on. Offering loopback as a
+checkbox would suggest it can be turned off, which it cannot.
+
+This matters because a laptop joins networks it does not trust. On the
+development host the interfaces are:
+
+```
+docker0      172.17.0.1
+tailscale0   100.64.0.1, fd7a:115c:a1e0::1
+wlp0s20f3    192.0.2.10
+```
+
+Choosing `tailscale0` alone gives a desktop that is reachable from the user's
+own devices anywhere in the world and reachable from nobody in a cafe. That
+distinction is not expressible with a single on and off switch, which is why
+the setting is not one.
+
+Each chosen address becomes its own Podman port mapping. Several mappings may
+share one host port as long as their addresses differ.
+
 ---
 
 ## 8. Security model
@@ -1455,3 +1497,143 @@ Three things work but have never been checked in the way they will be used:
   never been exercised together against a guest.
 - The odd-dimension resize rounding has no test, because GTK kept constraining
   the pane to even sizes.
+
+---
+
+## 16. Milestone 8 corrections
+
+Found while using the application rather than testing it. Each one is a case
+where the code was right about the thing it was doing and wrong about the thing
+around it.
+
+### 16.1 The viewer pane must own what it shows
+
+The pane kept whatever it last displayed. Deleting a desktop left its
+"disconnected" notice on screen with nothing left to explain it, and selecting
+a stopped desktop left the previous one's error in place.
+
+There were three separate causes, and only the first is obvious.
+
+**Nothing told the pane that a desktop had gone.** The sidebar refreshed itself
+from the Podman event feed and the pane was never in that path.
+
+**Selecting a stopped desktop returned early.** The handler logged "not
+running" and left the pane alone, which is exactly the wrong thing to leave
+alone.
+
+**A dead session could write over a live one.** The session thread outlives the
+moment it is replaced. Its failure arrives later, through a callback that
+captured the shared stack, so a session the user had already moved on from
+could put its own error over whatever had replaced it. This is the one that
+would have been hard to find from a bug report, because it needs two sessions
+and a specific interleaving.
+
+The fix is to make the pane own its state instead of being written to from
+several places:
+
+- `Viewer` holds the desktop it is showing and whether a session is live.
+- Every session carries a generation. `detach` increments it. A session whose
+  generation is stale returns without touching anything.
+- `Viewer::reconcile` runs after every refresh and settles the pane against
+  what Podman actually reports.
+- One function, `window::open`, is the only route into the pane. The sidebar
+  selection, the Reconnect button and a desktop that starts again all go
+  through it, so there is one set of rules rather than three.
+
+A session that fails while its container keeps running is **not** retried
+automatically. The pane offers a Reconnect button instead. Automatic retry
+looks helpful until the Podman event feed produces a burst, and then it is a
+reconnect loop.
+
+The sidebar had a related defect. It rebuilds its rows from scratch on every
+refresh, which drops the selection, so the highlight disappeared on every
+Podman event while the pane kept showing the desktop. The selection is now
+restored by name, behind a `restoring` flag so that restoring a highlight is
+never mistaken for the user choosing a desktop.
+
+### 16.2 The first resize was always lost
+
+A new desktop connected at its created size and stayed there. Dragging the
+window edge resized it correctly, which made it look like an initialisation
+problem in the widget. It was not.
+
+The Display Control channel is a dynamic virtual channel, so DRDYNVC negotiates
+it after `PostConnect`. The widget is allocated its size well before that. So
+the first resize request, the one that would make the desktop fit the pane,
+always arrives before the channel exists.
+
+Two pieces of bookkeeping then conspired:
+
+1. The shim returned a generic error when `disp` was null, and the session
+   logged it at debug and dropped the request.
+2. The widget had already recorded the size in `last_requested`, and it
+   suppresses an exact repeat, so it never asked again.
+
+The desktop was therefore stuck until the user produced a *different* size by
+hand.
+
+The fix has three parts:
+
+- The shim returns `CABIN_ERR_NOT_READY`, distinct from a refusal, and
+  `cabin_rdp_display_ready` reports whether the channel has attached.
+- The session holds a request that cannot be sent yet and sends it as soon as
+  the channel appears.
+- The widget records `last_requested` only when a session actually accepted the
+  command. Recording a request that went nowhere is what made the failure
+  permanent rather than momentary.
+
+Attaching a session now also states the pane's current size at once, rather
+than waiting for a size-allocate that may never come.
+
+`live_session.rs` has a regression test. It queues the resize before the
+session thread starts, which is the earliest a request can possibly arrive, and
+asserts the guest reaches that size. With the fix removed it fails with the
+guest still at 1920x1080.
+
+### 16.3 The guest serves one session at a time
+
+The live tests began failing when run together, with
+`ERRINFO_LOGOFF_BY_USER` during the capabilities exchange. That reads like a
+client fault and is not one.
+
+`gnome-remote-desktop` serves one headless session. A connection that arrives
+while the previous one is tearing down is rejected rather than queued. Cargo
+runs the tests in one binary on several threads, so they were fighting over it.
+
+`live_session.rs` now takes a process-wide lock and waits for the session to
+recycle. Note that this only covers one test binary. Cargo runs separate test
+binaries concurrently, so `live_input.rs` and `live_connect.rs` still need to
+be run apart from it.
+
+### 16.4 Settings were reachable but not findable
+
+Per-desktop settings existed only in the sidebar row's overflow menu, which the
+user did not find. Every comparable application puts the settings for the
+machine you are looking at above the machine.
+
+Settings now also sit in the viewer's own header bar, acting on whatever the
+pane shows. Creating a desktop selects it, so a new desktop's settings are one
+click from the dialogue that made it. The create dialogue says where the rest
+of the settings are, rather than implying it is the whole set.
+
+### 16.5 Backlog
+
+Raised while testing, deliberately not built yet.
+
+**Detect the container runtimes that are present.** The socket setting offers
+Podman and Docker whether or not either is installed. It should read
+`$XDG_RUNTIME_DIR/podman/podman.sock` and `/var/run/docker.sock`, mark what it
+finds, and say plainly that the others are absent. The wording is already
+corrected: the setting shares the runtime that is on the computer, and does not
+give the desktop one of its own, which the old title implied.
+
+**Application settings, separate from desktop settings.** A place for choices
+that are about Cabin rather than about one desktop:
+
+- Allow or forbid exposing a container runtime at all, so the dangerous choice
+  can be turned off once rather than declined repeatedly.
+- Show which runtimes were detected, with a Test button that proves the socket
+  answers.
+- The default guest image.
+
+**Audio.** RDPSND is disabled in the shim. Nothing has been attempted.

@@ -2,7 +2,7 @@
 //!
 //!     cargo test -p cabin-podman --test live_recreate -- --ignored --nocapture
 
-use cabin_core::{DesktopConfig, GraphicsMode};
+use cabin_core::{DesktopConfig, Exposure, GraphicsMode, NetInterface};
 use cabin_podman::Podman;
 use std::process::Command;
 
@@ -35,7 +35,7 @@ async fn the_home_volume_outlives_the_container() {
     config.memory_mb = Some(2048);
 
     let id = podman
-        .create_desktop(&config, 13998, &[], "recreate-test")
+        .create_desktop(&config, 13998, &[], &[], "recreate-test")
         .await
         .expect("create");
 
@@ -52,7 +52,7 @@ async fn the_home_volume_outlives_the_container() {
     podman.remove(&id, true).await.expect("remove");
     config.memory_mb = Some(3072);
     let second = podman
-        .create_desktop(&config, 13998, &[], "recreate-test")
+        .create_desktop(&config, 13998, &[], &[], "recreate-test")
         .await
         .expect("create again");
 
@@ -84,7 +84,7 @@ async fn a_file_in_the_home_directory_survives_a_recreate() {
     config.graphics = GraphicsMode::Software;
 
     let id = podman
-        .create_desktop(&config, 13996, &[], "persist-test")
+        .create_desktop(&config, 13996, &[], &[], "persist-test")
         .await
         .expect("create");
     podman.start(&id).await.expect("start");
@@ -111,7 +111,7 @@ async fn a_file_in_the_home_directory_survives_a_recreate() {
     podman.remove(&id, true).await.expect("remove");
     config.memory_mb = Some(3072);
     let second = podman
-        .create_desktop(&config, 13996, &[], "persist-test")
+        .create_desktop(&config, 13996, &[], &[], "persist-test")
         .await
         .expect("recreate");
     podman.start(&second).await.expect("start again");
@@ -142,19 +142,29 @@ async fn exposing_on_the_lan_changes_the_bound_address() {
     config.graphics = GraphicsMode::Software;
 
     assert_eq!(
-        config.bind_address(),
-        "127.0.0.1",
+        config.exposure.bind_addresses(&[]),
+        vec!["127.0.0.1"],
         "the default is loopback"
     );
-    config.expose_on_lan = true;
+
+    // A named interface, so this also proves Podman accepts several mappings
+    // on one host port. Loopback is always among them.
+    let interfaces = vec![NetInterface {
+        name: "cabin-test0".to_string(),
+        addresses: vec!["127.0.0.2".to_string()],
+        loopback: false,
+    }];
+    config.exposure = Exposure::Interfaces {
+        names: vec!["cabin-test0".to_string()],
+    };
     assert_eq!(
-        config.bind_address(),
-        "0.0.0.0",
-        "exposed means every interface"
+        config.exposure.bind_addresses(&interfaces),
+        vec!["127.0.0.1", "127.0.0.2"],
+        "a chosen interface is bound alongside loopback"
     );
 
     let id = podman
-        .create_desktop(&config, 13997, &[], "lan-test")
+        .create_desktop(&config, 13997, &[], &interfaces, "lan-test")
         .await
         .expect("create");
     podman.start(&id).await.expect("start");
@@ -164,7 +174,13 @@ async fn exposing_on_the_lan_changes_the_bound_address() {
         .iter()
         .find(|d| d.config.name == name)
         .expect("listed");
-    assert!(found.config.expose_on_lan, "the setting should round trip");
+    assert_eq!(
+        found.config.exposure,
+        Exposure::Interfaces {
+            names: vec!["cabin-test0".to_string()]
+        },
+        "the setting should round trip"
+    );
     assert_eq!(found.rdp_port, Some(13997));
 
     // Podman reports the mapping, so check it published beyond loopback.
@@ -187,7 +203,7 @@ async fn a_desktop_that_will_not_start_says_why() {
     let mut config = DesktopConfig::new(name);
     config.graphics = GraphicsMode::Software;
     let id = podman
-        .create_desktop(&config, 13994, &[], "diagnose")
+        .create_desktop(&config, 13994, &[], &[], "diagnose")
         .await
         .expect("create");
 
@@ -230,7 +246,7 @@ async fn a_shared_folder_reaches_the_container() {
     });
 
     let id = podman
-        .create_desktop(&config, 13993, &[], "mount-test")
+        .create_desktop(&config, 13993, &[], &[], "mount-test")
         .await
         .expect("create");
 
@@ -277,7 +293,7 @@ async fn nested_podman_can_run_a_container() {
     config.socket = SocketPolicy::Nested;
 
     let id = podman
-        .create_desktop(&config, 13992, &[], "nested-test")
+        .create_desktop(&config, 13992, &[], &[], "nested-test")
         .await
         .expect("create");
     podman
@@ -329,7 +345,7 @@ async fn the_host_podman_socket_reaches_the_desktop() {
     config.socket = SocketPolicy::HostPodman;
 
     let id = podman
-        .create_desktop(&config, 13991, &[], "hostsock-test")
+        .create_desktop(&config, 13991, &[], &[], "hostsock-test")
         .await
         .expect("create");
     podman
@@ -388,7 +404,7 @@ async fn the_tls_certificate_survives_a_recreate() {
     config.graphics = GraphicsMode::Software;
 
     let id = podman
-        .create_desktop(&config, 13990, &[], "cert-test")
+        .create_desktop(&config, 13990, &[], &[], "cert-test")
         .await
         .expect("create");
     podman.start_desktop(&id, name).await.expect("start");
@@ -412,7 +428,7 @@ async fn the_tls_certificate_survives_a_recreate() {
     podman.remove(&id, true).await.expect("remove");
     config.memory_mb = Some(3072);
     let second = podman
-        .create_desktop(&config, 13990, &[], "cert-test")
+        .create_desktop(&config, 13990, &[], &[], "cert-test")
         .await
         .expect("recreate");
     podman

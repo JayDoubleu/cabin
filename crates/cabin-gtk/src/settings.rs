@@ -6,7 +6,7 @@
 use crate::graphics;
 use crate::runtime;
 use adw::prelude::*;
-use cabin_core::{Desktop, DesktopConfig, GraphicsMode, Mount, MountMode, SocketPolicy};
+use cabin_core::{Desktop, DesktopConfig, Exposure, GraphicsMode, Mount, MountMode, SocketPolicy};
 use cabin_podman::Podman;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -22,17 +22,17 @@ const SOCKET_CHOICES: &[(SocketPolicy, &str, &str)] = &[
     (
         SocketPolicy::None,
         "None",
-        "No container runtime inside this desktop.",
+        "The desktop cannot build or run containers.",
     ),
     (
         SocketPolicy::HostPodman,
-        "Host Podman socket",
-        "Dangerous. Grants the power of your user account.",
+        "Podman on this computer",
+        "Dangerous. The desktop gets the power of your user account.",
     ),
     (
         SocketPolicy::HostDocker,
-        "Host Docker socket",
-        "Dangerous. Grants root on your computer.",
+        "Docker on this computer",
+        "Dangerous. The desktop gets root on your computer.",
     ),
 ];
 
@@ -260,8 +260,12 @@ fn build_socket_group(
     config: Rc<RefCell<DesktopConfig>>,
 ) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
-        .title("Containers")
-        .description("Whether this desktop can build and run containers.")
+        .title("Container Runtime")
+        .description(
+            "The desktop has no container runtime of its own. This shares the one \
+             already on this computer, so containers it starts run outside the \
+             desktop and outside its sandbox.",
+        )
         .build();
 
     let labels: Vec<&str> = SOCKET_CHOICES.iter().map(|(_, label, _)| *label).collect();
@@ -271,7 +275,7 @@ fn build_socket_group(
         .unwrap_or(0) as u32;
 
     let row = adw::ComboRow::builder()
-        .title("Container runtime")
+        .title("Share a runtime with this desktop")
         .subtitle(SOCKET_CHOICES[selected as usize].2)
         .model(&gtk::StringList::new(&labels))
         .selected(selected)
@@ -319,7 +323,12 @@ fn build_socket_group(
     group
 }
 
-/// Whether other devices can reach this desktop.
+/// Whether other devices can reach this desktop, and over which networks.
+///
+/// The choice is two questions, not one. The first is whether to leave
+/// loopback at all. The second is which networks to accept, which matters
+/// because a laptop joins networks it does not trust. See DESIGN.md section
+/// 7.5.
 fn build_remote_group(
     parent: &impl IsA<gtk::Widget>,
     config: Rc<RefCell<DesktopConfig>>,
@@ -329,29 +338,67 @@ fn build_remote_group(
         .description("Connect to this desktop from a phone or another computer.")
         .build();
 
-    let row = adw::SwitchRow::builder()
-        .title("Allow connections from other devices")
-        .subtitle("Off means only this computer can connect.")
-        .active(config.borrow().expose_on_lan)
+    let interfaces = crate::network::selectable();
+
+    // Everything below the master switch, hidden while it is off.
+    let detail = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .margin_top(12)
         .build();
 
+    let scope = adw::ComboRow::builder()
+        .title("Networks")
+        .model(&gtk::StringList::new(&[
+            "Every network",
+            "Chosen networks only",
+        ]))
+        .build();
+    let scope_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(vec!["boxed-list"])
+        .build();
+    scope_list.append(&scope);
+    detail.append(&scope_list);
+
+    let chooser = build_interface_list(&interfaces, config.clone());
+    detail.append(&chooser);
+
+    let switch = adw::SwitchRow::builder()
+        .title("Allow connections from other devices")
+        .subtitle("Off means only this computer can connect.")
+        .active(config.borrow().exposure.reaches_other_devices())
+        .build();
+
+    // Reflect what was saved.
+    match &config.borrow().exposure {
+        Exposure::Loopback => {}
+        Exposure::Everywhere => scope.set_selected(0),
+        Exposure::Interfaces { .. } => scope.set_selected(1),
+    }
+    detail.set_visible(switch.is_active());
+    chooser.set_visible(scope.selected() == 1);
+
     let parent_widget = parent.as_ref().clone();
-    row.connect_active_notify(move |row| {
-        if !row.is_active() {
-            config.borrow_mut().expose_on_lan = false;
+    let config_for_switch = config.clone();
+    let detail_for_switch = detail.clone();
+    let scope_for_switch = scope.clone();
+    switch.connect_active_notify(move |switch| {
+        if !switch.is_active() {
+            config_for_switch.borrow_mut().exposure = Exposure::Loopback;
+            detail_for_switch.set_visible(false);
             return;
         }
 
-        // Going from loopback to the whole network is worth one deliberate
+        // Going from loopback to a network is worth one deliberate
         // confirmation, because it is not obvious that the desktop becomes
         // reachable by anything that can route to this machine.
         let dialog = adw::AlertDialog::builder()
-            .heading("Open this desktop to your network?")
+            .heading("Open this desktop to a network?")
             .body(
-                "Anything that can reach this computer will be able to attempt a \
-                 connection. The desktop still needs its password, and the \
-                 connection is encrypted, but it will no longer be reachable only \
-                 from here.",
+                "Other devices will be able to reach the login screen. The desktop \
+                 still needs its password, and the connection is encrypted. Choose \
+                 which networks next.",
             )
             .build();
         dialog.add_response("cancel", "Cancel");
@@ -359,20 +406,133 @@ fn build_remote_group(
         dialog.set_response_appearance("allow", adw::ResponseAppearance::Destructive);
         dialog.set_default_response(Some("cancel"));
 
-        let config = config.clone();
-        let row = row.clone();
+        let config = config_for_switch.clone();
+        let switch = switch.clone();
+        let detail = detail_for_switch.clone();
+        let scope = scope_for_switch.clone();
         dialog.connect_response(None, move |_, response| {
-            if response == "allow" {
-                config.borrow_mut().expose_on_lan = true;
+            if response != "allow" {
+                switch.set_active(false);
+                return;
+            }
+            detail.set_visible(true);
+            // Chosen networks is the safer of the two, so it is what the
+            // switch lands on. The user can widen it deliberately.
+            scope.set_selected(1);
+            config.borrow_mut().exposure = Exposure::Interfaces { names: Vec::new() };
+        });
+        dialog.present(Some(&parent_widget));
+    });
+
+    let parent_widget = parent.as_ref().clone();
+    let chooser_for_scope = chooser.clone();
+    let config_for_scope = config.clone();
+    scope.connect_selected_notify(move |scope| {
+        if scope.selected() == 1 {
+            chooser_for_scope.set_visible(true);
+            let names = current_selection(&chooser_for_scope);
+            config_for_scope.borrow_mut().exposure = Exposure::Interfaces { names };
+            return;
+        }
+
+        // Every network includes the ones this computer has not joined yet.
+        let dialog = adw::AlertDialog::builder()
+            .heading("Listen on every network?")
+            .body(
+                "The desktop will accept connections on every network this computer \
+                 joins. That includes public Wi-Fi in cafes, hotels and airports, \
+                 where other people are on the same network and can reach the login \
+                 screen.\n\n\
+                 Choosing networks instead limits it to the ones you name.",
+            )
+            .build();
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("accept", "Listen on every network");
+        dialog.set_response_appearance("accept", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+
+        let config = config_for_scope.clone();
+        let scope_ref = scope.clone();
+        let chooser = chooser_for_scope.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response == "accept" {
+                config.borrow_mut().exposure = Exposure::Everywhere;
+                chooser.set_visible(false);
             } else {
-                row.set_active(false);
+                scope_ref.set_selected(1);
             }
         });
         dialog.present(Some(&parent_widget));
     });
 
-    group.add(&row);
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let switch_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(vec!["boxed-list"])
+        .build();
+    switch_list.append(&switch);
+    box_.append(&switch_list);
+    box_.append(&detail);
+    group.add(&box_);
     group
+}
+
+/// One switch per interface, with the addresses it currently holds.
+///
+/// The addresses are shown because interface names alone do not say which
+/// network is which. `wlp3s0` means nothing; `192.168.1.24` is recognisable.
+fn build_interface_list(
+    interfaces: &[cabin_core::NetInterface],
+    config: Rc<RefCell<DesktopConfig>>,
+) -> gtk::ListBox {
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(vec!["boxed-list"])
+        .build();
+
+    if interfaces.is_empty() {
+        let empty = adw::ActionRow::builder()
+            .title("No networks found")
+            .subtitle("This computer is not connected to a network.")
+            .build();
+        list.append(&empty);
+        return list;
+    }
+
+    let chosen: Vec<String> = config.borrow().exposure.chosen_interfaces().to_vec();
+    for interface in interfaces {
+        let row = adw::SwitchRow::builder()
+            .title(&interface.name)
+            .subtitle(interface.addresses.join(", "))
+            .active(chosen.contains(&interface.name))
+            .build();
+        let config = config.clone();
+        let list_ref = list.clone();
+        row.connect_active_notify(move |row| {
+            // Read every row rather than tracking one, so the stored list
+            // always matches what the user can see.
+            let names = current_selection(&list_ref);
+            config.borrow_mut().exposure = Exposure::Interfaces { names };
+            let _ = row;
+        });
+        list.append(&row);
+    }
+    list
+}
+
+/// The interface names whose switches are on.
+fn current_selection(list: &gtk::ListBox) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut child = list.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if let Some(row) = widget.downcast_ref::<adw::SwitchRow>() {
+            if row.is_active() {
+                names.push(row.title().to_string());
+            }
+        }
+    }
+    names
 }
 
 fn confirm_and_apply(
@@ -404,11 +564,12 @@ fn confirm_and_apply(
         let updated = updated.clone();
         let on_applied = on_applied.clone();
         let nodes = graphics::render_nodes();
+        let interfaces = crate::network::interfaces();
         let parent = parent_for_closure.clone();
         let settings_dialog = settings_dialog.clone();
 
         runtime::spawn(
-            async move { recreate(podman, desktop, updated, nodes).await },
+            async move { recreate(podman, desktop, updated, nodes, interfaces).await },
             move |result| match result {
                 Ok(()) => {
                     settings_dialog.close();
@@ -436,6 +597,7 @@ async fn recreate(
     desktop: Desktop,
     updated: DesktopConfig,
     nodes: Vec<(String, String)>,
+    interfaces: Vec<cabin_core::NetInterface>,
 ) -> Result<(), String> {
     let password = podman
         .desktop_password(&desktop.id)
@@ -454,7 +616,7 @@ async fn recreate(
         .map_err(|e| format!("could not remove the old container: {e}"))?;
 
     let id = podman
-        .create_desktop(&updated, port, &nodes, &password)
+        .create_desktop(&updated, port, &nodes, &interfaces, &password)
         .await
         .map_err(|e| format!("could not recreate the desktop: {e}"))?;
     podman

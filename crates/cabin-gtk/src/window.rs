@@ -2,54 +2,13 @@
 //!
 //! See the layout sketch in DESIGN.md section 5.3.
 
-use crate::display::CabinDisplay;
 use crate::sidebar::Sidebar;
+use crate::viewer::Viewer;
 use adw::prelude::*;
+use cabin_core::Desktop;
 use cabin_podman::Podman;
+use std::rc::Rc;
 use std::sync::Arc;
-
-const PAGE_EMPTY: &str = "empty";
-const PAGE_DESKTOP: &str = "desktop";
-
-/// Swaps the viewer between its placeholder and the live desktop.
-fn apply_viewer_state(stack: &gtk::Stack, name: &str, state: crate::viewer::State) {
-    use crate::viewer::State;
-    match state {
-        State::Connecting => {
-            set_placeholder(
-                stack,
-                "content-loading-symbolic",
-                &format!("Connecting to {name}"),
-                "Starting the remote desktop session.",
-            );
-            stack.set_visible_child_name(PAGE_EMPTY);
-        }
-        State::Showing => stack.set_visible_child_name(PAGE_DESKTOP),
-        State::Failed(reason) => {
-            set_placeholder(
-                stack,
-                "dialog-warning-symbolic",
-                &format!("{name} disconnected"),
-                &reason,
-            );
-            stack.set_visible_child_name(PAGE_EMPTY);
-        }
-    }
-}
-
-fn set_placeholder(stack: &gtk::Stack, icon: &str, title: &str, description: &str) {
-    if let Some(page) = stack
-        .child_by_name(PAGE_EMPTY)
-        .and_downcast::<adw::StatusPage>()
-    {
-        page.set_icon_name(Some(icon));
-        page.set_title(title);
-        page.set_description(Some(description));
-    }
-}
-
-/// The fixed sizes offered in the display menu.
-const RESOLUTIONS: &[(u32, u32)] = &[(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)];
 
 /// Builds the main window.
 pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
@@ -74,8 +33,8 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         .build();
 
     let podman = Arc::new(Podman::new());
-    let podman_for_viewer = podman.clone();
-    let sidebar = Sidebar::new(podman);
+    let sidebar = Sidebar::new(podman.clone());
+    let viewer = Viewer::new();
 
     let sidebar_toolbar = adw::ToolbarView::new();
     sidebar_toolbar.add_top_bar(&adw::HeaderBar::new());
@@ -85,39 +44,48 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         .child(&sidebar_toolbar)
         .build();
 
-    let (content, display, stack) = build_content();
+    // The pane asks for a desktop to be opened, which needs its password, and
+    // only the window holds the Podman handle.
+    let podman_for_open = podman.clone();
+    let viewer_for_open = viewer.clone();
+    viewer.connect_open(move |desktop| {
+        open(&viewer_for_open, &podman_for_open, desktop);
+    });
 
-    // Selecting a running desktop opens a session and starts drawing it.
-    let podman_for_select = podman_for_viewer;
-    let state_for_select = state.clone();
-    sidebar.connect_selected(move |desktop| {
-        state_for_select.set_last_desktop(&desktop.name);
-        if !desktop.state.is_running() {
-            tracing::info!("{} is not running", desktop.name);
-            return;
-        }
-        let display = display.clone();
-        let stack = stack.clone();
-        let podman = podman_for_select.clone();
-        let id = desktop.id.clone();
-        let desktop = desktop.clone();
-        crate::runtime::spawn(
-            async move { podman.desktop_password(&id).await },
-            move |result| match result {
-                Ok(password) => {
-                    let stack = stack.clone();
-                    let name = desktop.name.clone();
-                    crate::viewer::attach(&display, &desktop, password, move |state| {
-                        apply_viewer_state(&stack, &name, state)
-                    });
-                }
-                Err(e) => tracing::error!("could not read the desktop password: {e}"),
-            },
+    // Settings for the desktop on screen, reachable from its own header bar
+    // rather than only from the sidebar row menu.
+    let podman_for_settings = podman.clone();
+    let sidebar_for_settings = sidebar.clone();
+    let window_for_settings = window.clone();
+    viewer.connect_settings(move |desktop| {
+        let refresh_target = sidebar_for_settings.clone();
+        crate::settings::present(
+            &window_for_settings,
+            podman_for_settings.clone(),
+            desktop,
+            move || refresh_target.refresh(),
         );
     });
 
+    // Selecting a desktop opens it. Selecting one that is stopped says so,
+    // rather than leaving whatever the pane showed before.
+    let podman_for_select = podman.clone();
+    let viewer_for_select = viewer.clone();
+    let state_for_select = state.clone();
+    sidebar.connect_selected(move |desktop| {
+        state_for_select.set_last_desktop(&desktop.name);
+        open(&viewer_for_select, &podman_for_select, desktop);
+    });
+
+    // Podman is the only store of desktop state, so the pane follows the list
+    // rather than being told separately about deletions and stops.
+    let viewer_for_list = viewer.clone();
+    sidebar.connect_listed(move |desktops| {
+        viewer_for_list.reconcile(desktops);
+    });
+
     split.set_sidebar(Some(&sidebar_page));
-    split.set_content(Some(&content));
+    split.set_content(Some(&viewer.page));
     window.set_content(Some(&split));
 
     // Podman is reachable or it is not. Tell the user at start-up rather
@@ -128,93 +96,35 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     window
 }
 
-/// The viewer pane. A stack so the user sees an explanation rather than a
-/// black rectangle before a session is connected.
-fn build_content() -> (adw::NavigationPage, CabinDisplay, gtk::Stack) {
-    let display = CabinDisplay::new();
-    display.set_hexpand(true);
-    display.set_vexpand(true);
-
-    let placeholder = adw::StatusPage::builder()
-        .icon_name("video-display-symbolic")
-        .title("No desktop connected")
-        .description("Choose a desktop from the sidebar to connect to it.")
-        .build();
-
-    let stack = gtk::Stack::new();
-    stack.add_named(&placeholder, Some(PAGE_EMPTY));
-    stack.add_named(&display, Some(PAGE_DESKTOP));
-    stack.set_visible_child_name(PAGE_EMPTY);
-
-    let header = adw::HeaderBar::new();
-    header.pack_end(&build_display_menu(&display));
-    header.pack_end(&fullscreen_button());
-
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&stack));
-
-    let page = adw::NavigationPage::builder()
-        .title("Desktop")
-        .child(&toolbar)
-        .build();
-    (page, display, stack)
-}
-
-fn build_display_menu(display: &CabinDisplay) -> gtk::MenuButton {
-    let popover = gtk::Popover::new();
-    let box_ = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(4)
-        .margin_top(8)
-        .margin_bottom(8)
-        .margin_start(8)
-        .margin_end(8)
-        .build();
-
-    let fit = gtk::CheckButton::with_label("Fit to window");
-    fit.set_active(true);
-    box_.append(&fit);
-    box_.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-
-    for &(width, height) in RESOLUTIONS {
-        let button = gtk::CheckButton::with_label(&format!("{width} x {height}"));
-        button.set_group(Some(&fit));
-        let display = display.clone();
-        button.connect_toggled(move |b| {
-            if b.is_active() {
-                display.set_fixed_resolution(width, height);
-            }
-        });
-        box_.append(&button);
+/// Shows `desktop` in the pane, connecting to it when it is running.
+///
+/// Every route into the pane goes through here: the sidebar selection, the
+/// Reconnect button, and a desktop that starts running again. One route means
+/// one set of rules about what the pane shows.
+fn open(viewer: &Rc<Viewer>, podman: &Arc<Podman>, desktop: Desktop) {
+    if !desktop.state.is_running() {
+        viewer.show_stopped(&desktop);
+        return;
+    }
+    // Reselecting the desktop already on screen must not tear down its
+    // session and build another one.
+    if viewer.is_connected_to(&desktop.id) {
+        return;
     }
 
-    let display_for_fit = display.clone();
-    fit.connect_toggled(move |b| {
-        if b.is_active() {
-            display_for_fit.set_fit_to_window(true);
-        }
-    });
-
-    popover.set_child(Some(&box_));
-    gtk::MenuButton::builder()
-        .icon_name("video-display-symbolic")
-        .tooltip_text("Display")
-        .popover(&popover)
-        .build()
-}
-
-fn fullscreen_button() -> gtk::Button {
-    let button = gtk::Button::builder()
-        .icon_name("view-fullscreen-symbolic")
-        .tooltip_text("Fullscreen")
-        .build();
-    button.connect_clicked(|b| {
-        if let Some(window) = b.root().and_downcast::<gtk::Window>() {
-            window.set_fullscreened(!window.is_fullscreen());
-        }
-    });
-    button
+    let viewer = viewer.clone();
+    let podman = podman.clone();
+    let id = desktop.id.clone();
+    crate::runtime::spawn(
+        async move { podman.desktop_password(&id).await },
+        move |result| match result {
+            Ok(password) => viewer.attach(&desktop, password),
+            Err(e) => {
+                tracing::error!("could not read the desktop password: {e}");
+                viewer.clear();
+            }
+        },
+    );
 }
 
 /// Reports a missing Podman socket with the command that fixes it.
