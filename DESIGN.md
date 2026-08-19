@@ -1208,7 +1208,27 @@ the arrows, navigation keys and Super.
 An unmapped key is dropped rather than approximated. Sending a wrong scancode
 would type the wrong character, which is worse than typing nothing.
 
-### 15.12 Still to do
+### 15.12 The viewer needs a visible state
+
+The first build shipped a viewer that drew a dark rectangle until a session
+attached, and attached only when the user clicked a sidebar row. On first run
+that is a black pane with nothing to explain it, which reads as a broken
+application rather than as an empty one.
+
+Two changes fix it:
+
+- The pane is a `GtkStack`. Until a frame arrives it shows an `AdwStatusPage`
+  that says what to do, and it reports connecting and disconnected states with
+  the reason. The swap happens on the **first frame**, not on `Connected`,
+  because a connected session with nothing drawn still looks broken.
+- The sidebar opens the first running desktop once, at start-up. A guard stops
+  the event feed reselecting behind the user on every refresh.
+
+`CABIN_DEV_INSTANCE=1` opts out of the single instance behaviour, so a second
+copy can run beside the first during development. GTK hands a second launch off
+to the first and exits, which is right for users and awkward when testing.
+
+### 15.13 Still to do
 - `rdpdr`, `rdpsnd` and `AUDIO_PLAYBACK_DVC` still connect even though the shim
   sets `FreeRDP_DeviceRedirection`, `FreeRDP_AudioPlayback` and friends to
   false, so those settings are applied too late or overridden by

@@ -8,7 +8,7 @@ use crate::runtime;
 use adw::prelude::*;
 use cabin_core::{Desktop, State};
 use cabin_podman::Podman;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -25,6 +25,9 @@ pub struct Sidebar {
     podman: Arc<Podman>,
     desktops: Rc<RefCell<Vec<Desktop>>>,
     on_select: SelectionCallback,
+    /// Guards the one-off opening selection, so a refresh from the event feed
+    /// does not keep reselecting and reconnecting behind the user.
+    opened: Cell<bool>,
 }
 
 impl Sidebar {
@@ -66,6 +69,7 @@ impl Sidebar {
             podman,
             desktops: Rc::new(RefCell::new(Vec::new())),
             on_select: Rc::new(RefCell::new(None)),
+            opened: Cell::new(false),
         });
 
         let for_new = sidebar.clone();
@@ -124,7 +128,20 @@ impl Sidebar {
         for desktop in &desktops {
             self.list.append(&self.build_row(desktop));
         }
+        let first_running = desktops.iter().position(|d| d.state.is_running());
         *self.desktops.borrow_mut() = desktops;
+
+        // Open the first running desktop once, at start-up. Without this the
+        // viewer shows an empty pane until the user thinks to click a row,
+        // which reads as the application being broken.
+        if !self.opened.get() {
+            if let Some(index) = first_running {
+                self.opened.set(true);
+                if let Some(row) = self.list.row_at_index(index as i32) {
+                    self.list.select_row(Some(&row));
+                }
+            }
+        }
     }
 
     fn build_row(self: &Rc<Self>, desktop: &Desktop) -> gtk::ListBoxRow {

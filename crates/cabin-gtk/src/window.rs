@@ -8,6 +8,46 @@ use adw::prelude::*;
 use cabin_podman::Podman;
 use std::sync::Arc;
 
+const PAGE_EMPTY: &str = "empty";
+const PAGE_DESKTOP: &str = "desktop";
+
+/// Swaps the viewer between its placeholder and the live desktop.
+fn apply_viewer_state(stack: &gtk::Stack, name: &str, state: crate::viewer::State) {
+    use crate::viewer::State;
+    match state {
+        State::Connecting => {
+            set_placeholder(
+                stack,
+                "content-loading-symbolic",
+                &format!("Connecting to {name}"),
+                "Starting the remote desktop session.",
+            );
+            stack.set_visible_child_name(PAGE_EMPTY);
+        }
+        State::Showing => stack.set_visible_child_name(PAGE_DESKTOP),
+        State::Failed(reason) => {
+            set_placeholder(
+                stack,
+                "dialog-warning-symbolic",
+                &format!("{name} disconnected"),
+                &reason,
+            );
+            stack.set_visible_child_name(PAGE_EMPTY);
+        }
+    }
+}
+
+fn set_placeholder(stack: &gtk::Stack, icon: &str, title: &str, description: &str) {
+    if let Some(page) = stack
+        .child_by_name(PAGE_EMPTY)
+        .and_downcast::<adw::StatusPage>()
+    {
+        page.set_icon_name(Some(icon));
+        page.set_title(title);
+        page.set_description(Some(description));
+    }
+}
+
 /// The fixed sizes offered in the display menu.
 const RESOLUTIONS: &[(u32, u32)] = &[(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)];
 
@@ -37,7 +77,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         .child(&sidebar_toolbar)
         .build();
 
-    let (content, display) = build_content();
+    let (content, display, stack) = build_content();
 
     // Selecting a running desktop opens a session and starts drawing it.
     let podman_for_select = podman_for_viewer;
@@ -47,13 +87,20 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
             return;
         }
         let display = display.clone();
+        let stack = stack.clone();
         let podman = podman_for_select.clone();
         let id = desktop.id.clone();
         let desktop = desktop.clone();
         crate::runtime::spawn(
             async move { podman.desktop_password(&id).await },
             move |result| match result {
-                Ok(password) => crate::viewer::attach(&display, &desktop, password),
+                Ok(password) => {
+                    let stack = stack.clone();
+                    let name = desktop.name.clone();
+                    crate::viewer::attach(&display, &desktop, password, move |state| {
+                        apply_viewer_state(&stack, &name, state)
+                    });
+                }
                 Err(e) => tracing::error!("could not read the desktop password: {e}"),
             },
         );
@@ -71,10 +118,23 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     window
 }
 
-fn build_content() -> (adw::NavigationPage, CabinDisplay) {
+/// The viewer pane. A stack so the user sees an explanation rather than a
+/// black rectangle before a session is connected.
+fn build_content() -> (adw::NavigationPage, CabinDisplay, gtk::Stack) {
     let display = CabinDisplay::new();
     display.set_hexpand(true);
     display.set_vexpand(true);
+
+    let placeholder = adw::StatusPage::builder()
+        .icon_name("video-display-symbolic")
+        .title("No desktop connected")
+        .description("Choose a desktop from the sidebar to connect to it.")
+        .build();
+
+    let stack = gtk::Stack::new();
+    stack.add_named(&placeholder, Some(PAGE_EMPTY));
+    stack.add_named(&display, Some(PAGE_DESKTOP));
+    stack.set_visible_child_name(PAGE_EMPTY);
 
     let header = adw::HeaderBar::new();
     header.pack_end(&build_display_menu(&display));
@@ -82,13 +142,13 @@ fn build_content() -> (adw::NavigationPage, CabinDisplay) {
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&display));
+    toolbar.set_content(Some(&stack));
 
     let page = adw::NavigationPage::builder()
         .title("Desktop")
         .child(&toolbar)
         .build();
-    (page, display)
+    (page, display, stack)
 }
 
 fn build_display_menu(display: &CabinDisplay) -> gtk::MenuButton {
