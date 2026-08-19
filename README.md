@@ -161,6 +161,18 @@ worth visiting after a few rebuilds. Each rebuild leaves the previous image
 untagged and still over a gigabyte, and the manager offers to clear them once
 you have seen the list.
 
+### Changing what goes into a desktop
+
+The image is built from a Containerfile, which Guest Images shows you. The copy
+Cabin ships is read-only, because it lives inside the installation. To change
+it, press Customise: Cabin copies the guest files to a folder you own and every
+build uses that copy from then on. Add packages, change the desktop, whatever
+you need.
+
+Your copy stops following Cabin's updates, and the dialogue tells you when
+Cabin has a newer recipe than the one you copied. There is a button to delete
+your copy and go back.
+
 ### Opening a shell in a desktop
 
 Each desktop's menu has "Open a shell", which gives you the command:

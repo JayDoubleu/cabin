@@ -1936,3 +1936,69 @@ for, so a container that was both would be neither.
 
 The goal behind the request, reaching a desktop from a terminal, is met by
 19.3 with none of that cost.
+
+---
+
+## 20. The guest recipe
+
+### 20.1 Two trees, one of them writable
+
+The recipe is `guest/Containerfile` and the files beside it. Cabin ships one
+copy and the user may hold another.
+
+| | Shipped | Customised |
+|---|---|---|
+| Where | `<datadir>/cabin/guest` | `<config>/cabin/guest` |
+| Writable | No | Yes |
+| Follows Cabin updates | Yes | No |
+
+The shipped tree is read-only because it lives inside the installation, under
+`/app/share` in the Flatpak and under `/usr/share` in a system install. Editing
+in place is not merely discouraged, it is impossible, so the interface shows it
+read-only rather than offering a save that would fail.
+
+A customised copy lives under the user's configuration directory, which the
+Flatpak writes without any filesystem permission. When one exists, builds use
+it. That is the whole rule: presence decides, so there is no separate setting
+to get out of step with the files.
+
+**The whole tree is copied, not only the Containerfile.** The Containerfile
+copies the scripts and units beside it, so a copy holding one file would build
+nothing.
+
+**The copy records where it came from.** `<config>/cabin/guest-origin` holds a
+hash of the shipped tree at the moment of copying, and the interface says so
+when the shipped tree has moved on. Without it there is no way to tell a
+customised recipe that is current from one taken three releases ago, and the
+second quietly keeps building an old guest.
+
+That marker sits beside the copy rather than inside it. Anything inside is part
+of the build context and gets sent to Podman, and a build context should hold
+what the build needs and nothing else.
+
+The hash is FNV-1a over the packed context. Packing is already deterministic,
+sorted and without file modes or times, so hashing it answers "has any of this
+changed" without walking the tree twice. This is a change check rather than a
+security check, so a short non-cryptographic hash is the right size.
+
+### 20.2 What the interface offers
+
+The Guest Images dialogue carries a Recipe row above the build button, because
+the recipe is what the build uses: a user who wants a different image has to
+change this rather than press build again.
+
+- **Shipped**: View, and Customise.
+- **Customised**: Edit, and a button to delete the copy and go back.
+
+Viewing and editing are the same window. The banner says which recipe it is,
+since only one of the two can be saved and the window otherwise looks the same
+either way. Editing says plainly that changes take effect at the next build,
+because nothing visible happens on save.
+
+`live_overlay.rs` proves the join that nothing else covers. Packing is unit
+tested and building is tested against the shipped tree, but that a *customised*
+recipe is the one that reaches the image was not. The test writes a recipe with
+a marker and a file in a subdirectory, builds it, and runs the image to check
+both arrived. The subdirectory matters: a context that packed only the top
+level would build a guest with no scripts, and that failure would appear much
+later and look like something else.

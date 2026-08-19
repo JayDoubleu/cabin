@@ -128,12 +128,18 @@ Use `just`. Run `just` alone to list every task.
     by default turns the manager into a way to delete somebody else's work.
     Pruning is the exception: Podman prunes by danglingness, not by owner, and
     the confirmation has to say so.
-28. **Do not make a desktop a Toolbx container.** It was considered and it
+28. **The shipped guest recipe is read-only, and that is not a policy.** It
+    lives inside the installation, under `/app/share` in the Flatpak. A user
+    who wants to change it takes a copy to `<config>/cabin/guest`, and the
+    presence of that copy is what makes builds use it. Do not add a setting
+    to select between them: presence is the setting, and a second one would
+    get out of step with the files.
+29. **Do not make a desktop a Toolbx container.** It was considered and it
     cannot work: toolbox runs with `--pid=host`, and systemd as PID 1 needs
     its own PID namespace. DESIGN.md section 19.4 has the full comparison.
     Use `podman exec` to get a shell, which is what the Open a shell dialogue
     shows.
-29. **Store interface names for remote access, never addresses.** An address
+30. **Store interface names for remote access, never addresses.** An address
     changes with the network, and a stored one would leave the desktop unable
     to start after a DHCP lease changed. Names resolve to addresses when the
     container is created. Loopback is always bound as well.

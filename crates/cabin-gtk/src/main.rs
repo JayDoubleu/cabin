@@ -10,6 +10,7 @@ mod keymap;
 mod netaddr;
 mod network;
 mod pinning;
+mod recipe;
 mod remote;
 mod runtime;
 mod settings;

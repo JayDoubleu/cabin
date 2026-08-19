@@ -70,6 +70,37 @@ pub fn present(
     other_holder.add(&other_list);
     page.add(&other_holder);
 
+    // The recipe the image is built from. It sits above the build button
+    // because it is what the build uses, and a user who wants a different
+    // image needs to change this rather than press build again.
+    let recipe_group = adw::PreferencesGroup::builder()
+        .title("Recipe")
+        .description("The Containerfile that says what goes into a guest image.")
+        .build();
+    let recipe_row = adw::ActionRow::builder().build();
+    recipe_row.set_subtitle_lines(0);
+    let recipe_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(vec!["boxed-list"])
+        .build();
+    recipe_list.append(&recipe_row);
+    recipe_group.add(&recipe_list);
+    page.add(&recipe_group);
+
+    let recipe_open = gtk::Button::builder()
+        .valign(gtk::Align::Center)
+        .css_classes(vec!["flat"])
+        .build();
+    recipe_row.add_suffix(&recipe_open);
+    let recipe_reset = gtk::Button::builder()
+        .icon_name("edit-undo-symbolic")
+        .valign(gtk::Align::Center)
+        .css_classes(vec!["flat"])
+        .tooltip_text("Go back to the recipe Cabin ships with")
+        .visible(false)
+        .build();
+    recipe_row.add_suffix(&recipe_reset);
+
     let build = gtk::Button::builder()
         .css_classes(vec!["suggested-action", "pill"])
         .build();
@@ -181,6 +212,55 @@ pub fn present(
         })
     };
     refresh();
+
+    // The recipe row does not depend on Podman, so it is updated on its own
+    // rather than waiting for the image list to come back.
+    let show_recipe = {
+        let row = recipe_row.clone();
+        let open = recipe_open.clone();
+        let reset = recipe_reset.clone();
+        Rc::new(move || {
+            let custom = crate::guestdir::has_custom();
+            row.set_title(if custom {
+                "Your own recipe"
+            } else {
+                "The recipe Cabin ships with"
+            });
+            row.set_subtitle(if custom {
+                if crate::guestdir::shipped_has_moved_on() {
+                    "Builds use your copy. Cabin now ships a newer one, which your \
+                     copy does not have."
+                } else {
+                    "Builds use your copy instead of the one Cabin ships."
+                }
+            } else {
+                "Read-only, because it lives inside the installation. Take a copy \
+                 to change it."
+            });
+            open.set_label(if custom { "Edit" } else { "View" });
+            reset.set_visible(custom);
+        })
+    };
+    show_recipe();
+
+    let show_after_recipe = show_recipe.clone();
+    let refresh_after_recipe = refresh.clone();
+    let dialog_for_recipe = dialog.clone();
+    recipe_open.connect_clicked(move |_| {
+        let show = show_after_recipe.clone();
+        let refresh = refresh_after_recipe.clone();
+        crate::recipe::present(&dialog_for_recipe, move || {
+            show();
+            refresh();
+        });
+    });
+
+    let show_after_reset = show_recipe.clone();
+    let dialog_for_reset = dialog.clone();
+    recipe_reset.connect_clicked(move |_| {
+        let show = show_after_reset.clone();
+        crate::recipe::confirm_reset(&dialog_for_reset, move || show());
+    });
 
     let refresh_for_show_all = refresh.clone();
     show_all.connect_active_notify(move |_| refresh_for_show_all());
@@ -439,7 +519,7 @@ pub fn present_build(
     tag: &str,
     on_done: impl Fn() + 'static,
 ) {
-    let Some(context_dir) = crate::guestdir::find() else {
+    let Some((context_dir, source)) = crate::guestdir::active() else {
         let error = adw::AlertDialog::builder()
             .heading("The guest files are missing")
             .body(format!(
@@ -452,6 +532,14 @@ pub fn present_build(
         error.present(Some(parent));
         return;
     };
+    tracing::info!(
+        "building from the {} recipe at {}",
+        match source {
+            crate::guestdir::Source::Shipped => "shipped",
+            crate::guestdir::Source::Custom => "customised",
+        },
+        context_dir.display()
+    );
 
     let dialog = adw::Dialog::builder()
         .title("Building the Guest Image")
