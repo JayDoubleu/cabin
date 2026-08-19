@@ -17,6 +17,18 @@ pub const LABEL_PREFIX: &str = "io.github.jaydoubleu.cabin";
 /// Marks a container as a Cabin desktop. Used to filter `podman ps`.
 pub const LABEL_MANAGED: &str = "io.github.jaydoubleu.cabin.managed";
 
+/// Where the guest user's home directory lives inside the container.
+pub const GUEST_HOME: &str = "/home/cabin";
+
+/// The named volume that holds a desktop's home directory.
+///
+/// Changing a mount, the graphics mode or a resource limit means recreating
+/// the container. Without a volume the writable layer goes with it and the
+/// user loses their files, so the home directory has to outlive the container.
+pub fn home_volume_name(desktop_name: &str) -> String {
+    format!("cabin-{desktop_name}-home")
+}
+
 /// The run state of a desktop, as reported by Podman.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -46,6 +58,17 @@ impl State {
 }
 
 /// A desktop, as Cabin sees it.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn home_volume_is_namespaced_per_desktop() {
+        assert_eq!(home_volume_name("fedora-dev"), "cabin-fedora-dev-home");
+        assert_ne!(home_volume_name("a"), home_volume_name("b"));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Desktop {
     pub id: String,

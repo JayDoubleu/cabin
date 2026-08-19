@@ -6,6 +6,7 @@ mod display;
 mod graphics;
 mod keymap;
 mod runtime;
+mod settings;
 mod sidebar;
 mod viewer;
 mod window;

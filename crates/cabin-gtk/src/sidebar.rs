@@ -178,6 +178,7 @@ impl Sidebar {
         row_box.append(&labels);
 
         row_box.append(&self.build_action_button(desktop));
+        row_box.append(&self.build_overflow_menu(desktop));
 
         gtk::ListBoxRow::builder().child(&row_box).build()
     }
@@ -224,6 +225,110 @@ impl Sidebar {
         button
     }
 
+    /// The per-desktop menu: settings, restart and delete.
+    fn build_overflow_menu(self: &Rc<Self>, desktop: &Desktop) -> gtk::MenuButton {
+        let popover = gtk::Popover::new();
+        let box_ = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .margin_top(6)
+            .margin_bottom(6)
+            .margin_start(6)
+            .margin_end(6)
+            .build();
+
+        let settings = flat_button("Settings", "preferences-system-symbolic");
+        let sidebar = self.clone();
+        let for_settings = desktop.clone();
+        let popover_ref = popover.clone();
+        settings.connect_clicked(move |button| {
+            popover_ref.popdown();
+            let refresh_target = sidebar.clone();
+            crate::settings::present(
+                button,
+                sidebar.podman.clone(),
+                for_settings.clone(),
+                move || refresh_target.refresh(),
+            );
+        });
+        box_.append(&settings);
+
+        let restart = flat_button("Restart", "view-refresh-symbolic");
+        restart.set_sensitive(desktop.state.is_running());
+        let sidebar = self.clone();
+        let id = desktop.id.clone();
+        let popover_ref = popover.clone();
+        restart.connect_clicked(move |_| {
+            popover_ref.popdown();
+            let podman = sidebar.podman.clone();
+            let id = id.clone();
+            let sidebar = sidebar.clone();
+            runtime::spawn(
+                async move { podman.restart(&id, STOP_TIMEOUT_SECS).await },
+                move |result| {
+                    if let Err(e) = result {
+                        tracing::error!("could not restart the desktop: {e}");
+                    }
+                    sidebar.refresh();
+                },
+            );
+        });
+        box_.append(&restart);
+
+        box_.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+        let delete = flat_button("Delete", "user-trash-symbolic");
+        delete.add_css_class("destructive-action");
+        let sidebar = self.clone();
+        let for_delete = desktop.clone();
+        let popover_ref = popover.clone();
+        delete.connect_clicked(move |button| {
+            popover_ref.popdown();
+            sidebar.confirm_delete(button, for_delete.clone());
+        });
+        box_.append(&delete);
+
+        popover.set_child(Some(&box_));
+        gtk::MenuButton::builder()
+            .icon_name("view-more-symbolic")
+            .valign(gtk::Align::Center)
+            .css_classes(vec!["flat", "circular"])
+            .popover(&popover)
+            .build()
+    }
+
+    /// Deleting destroys the desktop's files, so it asks first and says so.
+    fn confirm_delete(self: &Rc<Self>, parent: &impl IsA<gtk::Widget>, desktop: Desktop) {
+        let dialog = adw::AlertDialog::builder()
+            .heading(format!("Delete {}?", desktop.name))
+            .body("The desktop and everything saved inside it will be removed. This cannot be undone.")
+            .build();
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("delete", "Delete");
+        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+
+        let sidebar = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response != "delete" {
+                return;
+            }
+            let podman = sidebar.podman.clone();
+            let id = desktop.id.clone();
+            let sidebar = sidebar.clone();
+            runtime::spawn(
+                async move { podman.remove(&id, true).await },
+                move |result| {
+                    if let Err(e) = result {
+                        tracing::error!("could not delete the desktop: {e}");
+                    }
+                    sidebar.refresh();
+                },
+            );
+        });
+        dialog.present(Some(parent));
+    }
+
     /// Follows the Podman event feed so the list reflects reality without
     /// polling.
     fn watch_events(self: &Rc<Self>) {
@@ -248,6 +353,18 @@ impl Sidebar {
             },
         );
     }
+}
+
+fn flat_button(label: &str, icon: &str) -> gtk::Button {
+    let content = adw::ButtonContent::builder()
+        .label(label)
+        .icon_name(icon)
+        .halign(gtk::Align::Start)
+        .build();
+    gtk::Button::builder()
+        .child(&content)
+        .css_classes(vec!["flat"])
+        .build()
 }
 
 fn state_icon(state: State) -> &'static str {

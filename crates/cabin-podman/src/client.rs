@@ -96,22 +96,28 @@ impl Podman {
         env.insert("CABIN_HEIGHT".to_string(), config.height.to_string());
         env.insert("CABIN_RDP_PORT".to_string(), GUEST_RDP_PORT.to_string());
 
-        let mounts = config
-            .mounts
-            .iter()
-            .map(|m| {
-                let mut options = vec![m.mode.as_podman_option().to_string()];
-                if m.relabel {
-                    options.push("z".to_string());
-                }
-                CreateMount {
-                    destination: m.guest_path.clone(),
-                    source: m.host_path.clone(),
-                    kind: "bind".to_string(),
-                    options,
-                }
-            })
-            .collect();
+        // The home directory lives in a named volume, so reconfiguring a
+        // desktop can recreate the container without destroying the user's
+        // files. Podman seeds a new volume from the image on first use.
+        let mut mounts = vec![CreateMount {
+            destination: cabin_core::GUEST_HOME.to_string(),
+            source: cabin_core::home_volume_name(&config.name),
+            kind: "volume".to_string(),
+            options: vec!["rw".to_string()],
+        }];
+
+        mounts.extend(config.mounts.iter().map(|m| {
+            let mut options = vec![m.mode.as_podman_option().to_string()];
+            if m.relabel {
+                options.push("z".to_string());
+            }
+            CreateMount {
+                destination: m.guest_path.clone(),
+                source: m.host_path.clone(),
+                kind: "bind".to_string(),
+                options,
+            }
+        }));
 
         let devices = config
             .graphics

@@ -505,7 +505,7 @@ just guest          # build the guest image
 | 4 | `CabinDisplay` shows guest frames, read-only | The hardest component | Done, see section 15 |
 | 5 | Keyboard and pointer input | Usable desktop | Done, see sections 15.9 to 15.11 |
 | 6 | Fit-to-window and fixed resolutions | The headline feature | Done, verified against the guest |
-| 7 | Create, delete, mounts, GPU and socket settings | Feature complete |
+| 7 | Create, delete, mounts, GPU and socket settings | Feature complete | Done |
 | 8 | Clipboard, audio, connection profiles for other devices | Polish |
 
 Milestone 1 comes first on purpose. It carries nearly all the technical risk,
@@ -1246,7 +1246,36 @@ Two changes fix it:
 copy can run beside the first during development. GTK hands a second launch off
 to the first and exits, which is right for users and awkward when testing.
 
-### 15.13 Still to do
+### 15.13 Settings, and why the home directory is a volume
+
+Changing a mount, the graphics mode, a resource limit or the socket policy all
+need the container recreated: Podman cannot alter them in place. Recreating
+would destroy the writable layer, and with it everything the user saved.
+
+So a desktop's home directory lives in a named volume, `cabin-<name>-home`,
+mounted at `/home/cabin`. Podman seeds it from the image on first use, and it
+outlives the container. This is verified by
+`crates/cabin-podman/tests/live_recreate.rs`, which recreates a desktop with a
+changed configuration and checks the new settings applied.
+
+The settings dialogue makes the safe choice the easy one:
+
+- A new shared folder starts **read-only**. Making it writable is a switch the
+  user has to reach for.
+- The host path comes from the file chooser portal, so Cabin needs no
+  filesystem permission of its own. Section 7.1 explains why that matters.
+- The two dangerous socket options warn before they take effect, and the row
+  snaps back to its previous value if the warning is declined. The safe option
+  is labelled "Recommended" and the dangerous ones say what they grant: the
+  power of your user account, or root on your computer.
+- Applying is an explicit button, and it confirms first, because it restarts
+  the desktop and closes whatever is running in it. The confirmation says the
+  user's files are kept, because otherwise "recreated" sounds like data loss.
+
+Deleting a desktop asks first and says plainly that everything saved inside it
+goes with it.
+
+### 15.14 Still to do
 - `rdpdr`, `rdpsnd` and `AUDIO_PLAYBACK_DVC` still connect even though the shim
   sets `FreeRDP_DeviceRedirection`, `FreeRDP_AudioPlayback` and friends to
   false, so those settings are applied too late or overridden by

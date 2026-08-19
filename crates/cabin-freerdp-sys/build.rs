@@ -21,6 +21,10 @@ fn main() {
 
     let mut build = cc::Build::new();
     build.file("src/shim.c").std("gnu17").warnings(true);
+    // FreeRDP's own headers use symbols it has since deprecated, so every
+    // build prints pages of warnings about code that is not ours. Silence
+    // those specifically, and keep the rest.
+    build.flag_if_supported("-Wno-deprecated-declarations");
     for path in &lib.include_paths {
         build.include(path);
     }
