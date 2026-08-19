@@ -46,6 +46,49 @@ finish-args:
 #   --talk-name=org.freedesktop.Flatpak   That would be a sandbox escape.
 
 modules:
+  # FreeRDP is not in the GNOME runtime, and Cabin needs it because
+  # gnome-remote-desktop requires the MS-RDPEGFX graphics pipeline. See
+  # DESIGN.md section 14.
+  - name: freerdp
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_INSTALL_LIBDIR=lib
+      # Cabin links the client library. None of FreeRDP's own clients, servers
+      # or tools are used, and each one is build time and attack surface.
+      - -DWITH_SERVER=OFF
+      - -DWITH_SHADOW=OFF
+      - -DWITH_PROXY=OFF
+      - -DWITH_SAMPLE=OFF
+      - -DWITH_CLIENT_SDL=OFF
+      - -DWITH_X11=OFF
+      - -DWITH_WAYLAND=OFF
+      - -DWITH_MANPAGES=OFF
+      # FreeRDP warns at runtime that AV1 is experimental and "might crash the
+      # application". The guest sends RemoteFX Progressive in any case, because
+      # a container with no render node has no hardware encoder. See section
+      # 15.5. Building it out removes a whole codec path Cabin never uses.
+      - -DWITH_GFX_AV1=OFF
+      # The clipboard mounts a FUSE filesystem, which Cabin deliberately never
+      # asks for: it crashes the guest daemon. See section 15.2.
+      - -DWITH_FUSE=OFF
+      # On by default, and FreeRDP warns at runtime that it "might slow down
+      # the application". It is a development aid, not something to ship.
+      - -DWITH_VERBOSE_WINPR_ASSERT=OFF
+      - -DWITH_PCSC=OFF
+      - -DWITH_CAIRO=OFF
+      - -DWITH_SWSCALE=OFF
+      - -DWITH_FFMPEG=OFF
+    cleanup:
+      - /bin
+      - /share/man
+      - /share/FreeRDP
+    sources:
+      - type: archive
+        url: https://github.com/FreeRDP/FreeRDP/archive/refs/tags/3.30.0.tar.gz
+        sha256: 21b3f72bd688fcd1dbbef37b7129bfc9701906705572fce2a5a80b1e85ecc0ee
+
   - name: cabin
     buildsystem: meson
     config-opts:

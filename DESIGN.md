@@ -442,6 +442,24 @@ assumption.
 | SDK | `org.gnome.Sdk//50` |
 | Rust | `org.freedesktop.Sdk.Extension.rust-stable//25.08` |
 | Build system | Meson, which drives Cargo |
+| Bundled | FreeRDP 3.30.0, built from source |
+
+FreeRDP is not in the GNOME runtime, so the manifest builds it. The build turns
+off everything Cabin does not use: FreeRDP's own clients, servers and tools,
+the X11 and Wayland backends, smartcards, FFmpeg and Cairo.
+
+Two of those flags come from findings elsewhere in this document rather than
+from tidiness:
+
+- `WITH_GFX_AV1=OFF`. FreeRDP warns at runtime that AV1 is experimental and
+  "might crash the application". Section 15.5 shows the guest sends RemoteFX
+  Progressive regardless, because a container with no render node has no
+  hardware encoder.
+- `WITH_FUSE=OFF`. The clipboard mounts a FUSE filesystem, which Cabin never
+  asks for because it crashes the guest daemon. Section 15.2 has the detail.
+
+`WITH_VERBOSE_WINPR_ASSERT` is also off. It defaults on, and FreeRDP warns that
+it "might slow down the application", which is not something to ship.
 
 Sandbox permissions:
 

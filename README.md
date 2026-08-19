@@ -52,6 +52,10 @@ just flatpak    # build and install the application
 just flatpak-run
 ```
 
+The Flatpak bundles FreeRDP, so it needs nothing installed on the host beyond
+the runtime. A native build does need FreeRDP 3. If `freerdp-devel` is not
+installed, run `just freerdp-sysroot`, which builds a local one without root.
+
 For faster iteration, build natively instead:
 
 ```sh
