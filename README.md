@@ -10,10 +10,15 @@ in under a second, because it is a container and not a virtual machine.
 Connect from this computer through the application window, or from a phone,
 tablet, or another computer with any standard RDP client.
 
-> **Status: early.** The guest image works and serves a desktop over RDP. The
-> application is a scaffold: the window, the packaging, and the domain model are
-> in place, and the viewer does not yet draw guest frames. See
-> [DESIGN.md](DESIGN.md) for the plan and the milestones.
+> **Status: usable, not finished.** A desktop starts, renders in the window,
+> and takes keyboard and pointer input. The window can be resized and the guest
+> follows. Desktops can be created, configured, shared with folders, reached
+> from other devices, and deleted.
+>
+> Not done: clipboard sharing, which is blocked by a fault in
+> `gnome-remote-desktop`, and audio. Section 15.20 of [DESIGN.md](DESIGN.md)
+> lists everything outstanding, including the gaps between what this document
+> claims and what the code does.
 
 ## How it works
 

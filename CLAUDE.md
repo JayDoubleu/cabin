@@ -60,7 +60,28 @@ Use `just`. Run `just` alone to list every task.
 11. **Do not hard-code a codec.** The guest sends RemoteFX Progressive only
     because the container has no GPU. Give a desktop a render node and it may
     negotiate AVC444 instead.
-12. **Building `cabin-freerdp-sys` needs FreeRDP 3.** If `freerdp-devel` is not
+12. **Named volumes go in libpod's `volumes` field, not `mounts`.** `mounts` is
+    for OCI mounts whose source is a host path. A volume name put there creates
+    successfully and then fails to start with "No such device", so the mistake
+    looks like a runtime fault rather than a bad request.
+13. **A container that exits 255 with an empty log is the inotify limit.** Every
+    desktop runs systemd, which needs several inotify instances, and the default
+    is 128 per user. systemd exits before it can log anything. `start_desktop`
+    detects this and reports it, so do not replace it with a bare `start`.
+14. **GLib aborts when a gschema is missing.** A native run then exits
+    immediately with no output at all and nothing to identify the cause. Use
+    `just run`, which compiles the schema into `target/glib-schemas`. The
+    Flatpak is unaffected, so this breaks development while the packaged build
+    looks fine.
+15. **The TLS certificate stays in its own volume.** Pinning means nothing if a
+    reconfigure regenerates the certificate, and the private key must not sit in
+    the home directory where the desktop session could read it.
+16. **Run tests with `just`, not bare `cargo`.** The recipes export the FreeRDP
+    sysroot variables, without which the build script fails.
+17. **Never call bare `podman` in a test.** Inside a toolbox that is the
+    container's own podman, with separate storage, and it cannot join the host
+    user namespace. Use the `host_podman` helper in the live tests.
+18. **Building `cabin-freerdp-sys` needs FreeRDP 3.** If `freerdp-devel` is not
     installed, run `just freerdp-sysroot` and export the variables it prints.
     No root is needed.
 

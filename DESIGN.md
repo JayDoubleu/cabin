@@ -326,6 +326,10 @@ Fit mode rounds sizes to even numbers. Several RDP codecs need even dimensions.
 
 ### 6.5 Clipboard and audio
 
+> **Superseded for the clipboard by section 15.2.** Advertising CLIPRDR crashes
+> the guest session, so Cabin deliberately never offers it. What follows was
+> the original plan and is kept for when the upstream fault is fixed.
+
 Clipboard uses the CLIPRDR channel, bridged to `GdkClipboard`. Text first,
 images second.
 
@@ -506,7 +510,7 @@ just guest          # build the guest image
 | 5 | Keyboard and pointer input | Usable desktop | Done, see sections 15.9 to 15.11 |
 | 6 | Fit-to-window and fixed resolutions | The headline feature | Done, verified against the guest |
 | 7 | Create, delete, mounts, GPU and socket settings | Feature complete | Done |
-| 8 | Clipboard, audio, connection profiles for other devices | Polish |
+| 8 | Clipboard, audio, connection profiles for other devices | Polish | Connection profiles done, see section 15.14. Clipboard blocked, see 15.2. Audio not started |
 
 Milestone 1 comes first on purpose. It carries nearly all the technical risk,
 and it needs no Rust at all.
@@ -863,12 +867,15 @@ Odd sizes round down to even, as H.264 requires. Section 6.4 already rounds
 before sending, which is right, but the viewer must also read the size back
 from the server rather than assume the request was honoured.
 
-### 14.7 Still unverified
+### 14.7 Input, since resolved
 
-Input has never been proven end to end. `view-only` was `true` for every test
-so far, and the host session could not inject synthetic input, because GNOME 50
-ignores XTEST injection on the host. Now that `view-only` is `false` this needs
-one manual check: connect, and type.
+At the time of this round input had never been proven. `view-only` was `true`
+for every test, and synthetic input could not be injected because GNOME 50
+ignores XTEST.
+
+Both are settled now. Section 12.3 covers the `view-only` fix, and sections
+15.9 and 15.10 prove keyboard and pointer input end to end through Cabin's own
+client.
 
 ---
 
