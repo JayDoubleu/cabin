@@ -14,23 +14,20 @@ const PORT_RANGE: std::ops::Range<u16> = 13389..13500;
 
 /// Presents the New Desktop dialogue.
 ///
-/// `on_created` receives the name of the desktop that was made, so the caller
-/// can select it. Only the essentials are asked for here. Everything else is
-/// in the desktop's own settings, which the pane header opens.
+/// `on_created` receives the name of the desktop that was made and whether the
+/// user asked for its settings. Only the essentials are asked for here.
+/// Everything else is in the desktop's own settings.
 pub fn present(
     parent: &impl IsA<gtk::Widget>,
     podman: Arc<Podman>,
-    on_created: impl Fn(String) + 'static,
+    on_created: impl Fn(String, bool) + 'static,
 ) {
     // connect_response can fire more than once over the dialogue's life, so
     // the callback is shared rather than moved.
-    let on_created: Rc<dyn Fn(String)> = Rc::new(on_created);
+    let on_created: Rc<dyn Fn(String, bool)> = Rc::new(on_created);
     let dialog = adw::AlertDialog::builder()
         .heading("New Desktop")
-        .body(
-            "A new desktop runs its own Fedora GNOME session. Shared folders, \
-             container access and remote access are in its settings once it exists.",
-        )
+        .body("A new desktop runs its own Fedora GNOME session.")
         .build();
 
     let name_row = adw::EntryRow::builder()
@@ -57,10 +54,19 @@ pub fn present(
         .model(&gtk::StringList::new(&option_refs))
         .build();
 
+    // Shared folders and the rest are not asked for here, so offer the way to
+    // them rather than leaving the user to find the settings afterwards.
+    let open_settings = adw::SwitchRow::builder()
+        .title("Open settings")
+        .subtitle("Set up shared folders and access straight away.")
+        .active(false)
+        .build();
+
     let group = adw::PreferencesGroup::new();
     group.add(&name_row);
     group.add(&memory_row);
     group.add(&graphics_row);
+    group.add(&open_settings);
 
     dialog.set_extra_child(Some(&group));
     dialog.add_response("cancel", "Cancel");
@@ -99,6 +105,7 @@ pub fn present(
         let port = free_port().unwrap_or(PORT_RANGE.start);
         let password = generate_password();
         let created_name = name.clone();
+        let wants_settings = open_settings.is_active();
 
         runtime::spawn(
             async move {
@@ -109,7 +116,7 @@ pub fn present(
             move |result| match result {
                 Ok(id) => {
                     tracing::info!("created desktop {id}");
-                    on_created(created_name);
+                    on_created(created_name, wants_settings);
                 }
                 Err(e) => show_error(&parent_widget, &e.to_string()),
             },

@@ -377,6 +377,21 @@ impl Viewer {
                     return;
                 }
                 match event {
+                    SessionEvent::Connecting { attempt, waited } => {
+                        // Say nothing for the first couple of seconds. A
+                        // desktop that starts promptly should not flash a
+                        // message about being slow.
+                        if waited >= 2 {
+                            viewer.set_placeholder(
+                                "content-loading-symbolic",
+                                &format!("Starting {}", desktop.name),
+                                "The desktop is still coming up. This takes a \
+                                 moment on the first start.",
+                                None,
+                            );
+                        }
+                        tracing::debug!("connect attempt {attempt} after {waited}s");
+                    }
                     SessionEvent::Connected {
                         width,
                         height,

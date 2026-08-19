@@ -43,6 +43,10 @@ pub struct Sidebar {
     /// Set when `selected` names a desktop the user has just asked for, and
     /// the row does not exist yet. The next refresh that finds it opens it.
     pending_choice: Cell<bool>,
+    /// Set when the desktop being waited for should have its settings opened
+    /// as soon as it appears.
+    pending_settings: Cell<bool>,
+    on_settings: SelectionCallback,
 }
 
 impl Sidebar {
@@ -89,6 +93,8 @@ impl Sidebar {
             selected: RefCell::new(None),
             restoring: Cell::new(false),
             pending_choice: Cell::new(false),
+            pending_settings: Cell::new(false),
+            on_settings: Rc::new(RefCell::new(None)),
         });
 
         let for_new = sidebar.clone();
@@ -97,9 +103,14 @@ impl Sidebar {
             let refresh_target = for_new.clone();
             // Select the new desktop once it appears, so its settings are one
             // click away and the pane stops showing the previous one.
-            crate::create::present(button, sidebar.podman.clone(), move |name| {
-                refresh_target.choose(&name);
-            });
+            crate::create::present(
+                button,
+                sidebar.podman.clone(),
+                move |name, open_settings| {
+                    refresh_target.pending_settings.set(open_settings);
+                    refresh_target.choose(&name);
+                },
+            );
         });
 
         let for_select = sidebar.clone();
@@ -136,6 +147,12 @@ impl Sidebar {
     /// that was deleted or stopped somewhere else.
     pub fn connect_listed(&self, callback: impl Fn(&[Desktop]) + 'static) {
         *self.on_list.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// Called when a desktop's settings should be opened. Used by the create
+    /// dialogue, which offers to go straight there.
+    pub fn connect_settings_requested(&self, callback: impl Fn(Desktop) + 'static) {
+        *self.on_settings.borrow_mut() = Some(Box::new(callback));
     }
 
     /// Selects a desktop by name, and opens it once it appears.
@@ -228,6 +245,18 @@ impl Sidebar {
         // already settled on.
         if let Some(callback) = self.on_list.borrow().as_ref() {
             callback(&desktops);
+        }
+
+        // A desktop created with "Open settings" switched on. It exists now,
+        // so this is the first moment its settings can be shown.
+        if self.pending_settings.get() {
+            if let Some(desktop) = chosen.and_then(|index| desktops.get(index)) {
+                self.pending_settings.set(false);
+                let callback = self.on_settings.borrow();
+                if let Some(callback) = callback.as_ref() {
+                    callback(desktop.clone());
+                }
+            }
         }
     }
 

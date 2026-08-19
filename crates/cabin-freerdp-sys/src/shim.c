@@ -450,10 +450,18 @@ int cabin_rdp_poll(cabin_rdp* self, uint32_t timeout_ms)
 	return 1;
 }
 
+/* Reports the current framebuffer, or NULL when there is not one to report.
+ *
+ * The connected flag is not belt and braces. PostDisconnect calls gdi_free,
+ * which releases the primary buffer, and it can run inside a poll that still
+ * reports the session as alive. A caller that then asks for the framebuffer
+ * gets a pointer into freed memory, and copying from it crashes rather than
+ * showing a bad frame. cabin_post_disconnect clears the flag before it frees
+ * anything, so checking it here closes that window. */
 const uint8_t* cabin_rdp_framebuffer(cabin_rdp* self, uint32_t* width, uint32_t* height,
                                      uint32_t* stride)
 {
-	if (!self || !self->ctx)
+	if (!self || !self->ctx || !self->connected)
 		return NULL;
 
 	rdpGdi* gdi = self->ctx->context.gdi;

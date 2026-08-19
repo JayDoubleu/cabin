@@ -146,6 +146,17 @@ host. Running Podman inside the desktop would be the safe alternative, and it
 does not work yet, so it is not offered. DESIGN.md section 15.17 records how
 far it got.
 
+### Shared files and folders
+
+A desktop can be given host folders and single files. Both are Podman bind
+mounts, so read-only is enforced by the kernel and behaves the same however you
+connect. You choose where each one appears inside the desktop.
+
+Sharing a single file has one catch worth knowing. The mount follows the file
+itself, and most editors replace a file rather than change it, so edits made on
+this computer can stop reaching the desktop. Share the folder when you plan to
+edit.
+
 The application itself asks for very little. It does **not** request
 `--filesystem=home`, and it does **not** request `org.freedesktop.Flatpak`.
 Host directories reach a desktop through the file chooser portal: you pick a

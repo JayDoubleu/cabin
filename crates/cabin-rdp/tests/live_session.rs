@@ -8,7 +8,7 @@
 use cabin_rdp::{
     run_session, ConnectionParams, Credentials, PixelFormat, SessionCommand, SessionEvent,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long gnome-remote-desktop needs to recycle a headless session.
 ///
@@ -210,5 +210,96 @@ fn a_resize_sent_before_the_channel_is_ready_still_arrives() {
     assert!(
         granted,
         "the guest never reached {WANTED:?}, the last frame was {last:?}"
+    );
+}
+
+/// Connecting to a desktop that has only just started must succeed, without
+/// the caller retrying.
+///
+///
+/// This is what the user sees on every start. Podman reports the container as
+/// running before the guest binds its RDP port, so the first connection lands
+/// in a gap. Measured on the development host, the gap is about two and a half
+/// seconds, and it is the same for a cold first boot as for a restart. An
+/// earlier version reported "could not connect" and left the user to press
+/// Reconnect. See DESIGN.md section 17.1.
+///
+/// It also proves that a command queued before the guest answers is kept. The
+/// widget states the pane size the moment it attaches, so that request is
+/// always in the channel while the retries run.
+///
+/// This test restarts the guest, so it is separate from the others and takes a
+/// while.
+#[test]
+#[ignore = "needs a running guest from 'just guest-test', and restarts it"]
+fn a_desktop_that_has_just_started_connects_without_help() {
+    let _guest = guest_lock();
+
+    let status = std::process::Command::new("flatpak-spawn")
+        .args(["--host", "podman", "restart", "-t", "20", "cabin-test"])
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        _ => {
+            eprintln!("could not restart the guest, skipping");
+            return;
+        }
+    }
+
+    // No wait here on purpose. Connecting straight after the restart is the
+    // case being tested.
+    let began = Instant::now();
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let (event_tx, event_rx) = async_channel::bounded(1);
+
+    // Queued before the session starts, exactly as the widget does when it is
+    // attached. This must survive the retries: an early version of the retry
+    // loop drained the command channel while waiting and threw this away,
+    // which brought back the fault in section 16.2 whenever a desktop was
+    // slow to start.
+    const WANTED: (u32, u32) = (1152, 720);
+    command_tx
+        .send(SessionCommand::Resize {
+            width: WANTED.0,
+            height: WANTED.1,
+        })
+        .expect("the command should queue");
+
+    let handle = std::thread::spawn(move || run_session(params(13389), command_rx, event_tx));
+
+    let mut attempts = 0;
+    let mut last = None;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        match event_rx.recv_blocking() {
+            Ok(SessionEvent::Connecting { attempt, .. }) => attempts = attempt,
+            Ok(SessionEvent::Frame(f)) => {
+                last = Some((f.width, f.height));
+                if last == Some(WANTED) {
+                    break;
+                }
+            }
+            Ok(SessionEvent::Error(m)) => panic!("reported a failure instead of waiting: {m}"),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+
+    let _ = command_tx.send(SessionCommand::Disconnect);
+    drop(event_rx);
+    let _ = handle.join();
+
+    println!(
+        "connected after {attempts} retries in {:.1}s",
+        began.elapsed().as_secs_f32()
+    );
+    assert!(
+        last.is_some(),
+        "the session never produced a frame after {attempts} retries"
+    );
+    assert_eq!(
+        last,
+        Some(WANTED),
+        "the size asked for while the guest was starting was lost"
     );
 }

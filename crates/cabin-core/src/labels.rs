@@ -71,6 +71,7 @@ mod tests {
             guest_path: "/mnt/code".into(),
             mode: MountMode::ReadWrite,
             relabel: true,
+            kind: crate::mount::MountKind::Directory,
         });
         original.width = 2560;
 

@@ -496,6 +496,7 @@ mod tests {
             guest_path: "/mnt/data".into(),
             mode: crate::mount::MountMode::ReadOnly,
             relabel: true,
+            kind: crate::mount::MountKind::Directory,
         });
         assert!(a.needs_recreate(&b));
     }

@@ -152,15 +152,39 @@ impl Client {
             return None;
         }
 
-        // SAFETY: the shim guarantees stride * height readable bytes.
-        let raw = unsafe { std::slice::from_raw_parts(data, (stride * height) as usize) };
+        // Check the description before trusting it.
+        //
+        // A resize reallocates the primary buffer, and there are moments when
+        // the size and the stride do not agree. A guest that goes from 1920 to
+        // 1152 wide reports width 1152 with the old stride of 7680 still in
+        // place, which describes a buffer half again as large as the one that
+        // exists. Copying on that description reads past the end of the
+        // allocation and aborts the process.
+        //
+        // Real padding aligns a row and is a few bytes. A stride that is
+        // further out than that is a stale value, not a padded one, so the
+        // frame is skipped. The next one carries a consistent description.
+        let row_bytes = width as usize * 4;
+        let stride = stride as usize;
+        if !stride_is_plausible(stride, row_bytes) {
+            tracing::debug!("skipping a frame: {width}x{height} cannot have a stride of {stride}");
+            return None;
+        }
+        let Some(total) = stride.checked_mul(height as usize) else {
+            tracing::warn!("framebuffer size overflows: stride {stride}, height {height}");
+            return None;
+        };
+
+        // SAFETY: the shim reports a buffer of stride * height bytes for a
+        // connected client, and the description has just been checked for
+        // self consistency.
+        let raw = unsafe { std::slice::from_raw_parts(data, total) };
 
         // Drop any row padding, so the Frame is exactly width * 4 per row and
         // GdkTexture can take it without a stride argument.
-        let row_bytes = width as usize * 4;
         let mut packed = Vec::with_capacity(row_bytes * height as usize);
         for row in 0..height as usize {
-            let start = row * stride as usize;
+            let start = row * stride;
             packed.extend_from_slice(&raw[start..start + row_bytes]);
         }
 
@@ -245,14 +269,118 @@ pub fn run_session(
     commands: std::sync::mpsc::Receiver<SessionCommand>,
     events: async_channel::Sender<SessionEvent>,
 ) {
-    let client = match start(&params) {
-        Ok(client) => client,
-        Err(e) => {
-            let _ = events.send_blocking(SessionEvent::Error(e.to_string()));
-            return;
-        }
-    };
+    let began = std::time::Instant::now();
+    let deadline = began + CONNECT_WINDOW;
+    // Commands that arrived before there was a session to give them to.
+    let mut held: Vec<SessionCommand> = Vec::new();
+    // The size the interface last asked for. It is re-applied to every new
+    // connection, because a request that went to an attempt that then died
+    // would otherwise be lost, and the interface does not repeat itself.
+    let mut desired_size: Option<(u32, u32)> = None;
 
+    for attempt in 1u32.. {
+        let client = match start(&params) {
+            Ok(client) => client,
+            Err(e) => {
+                if !is_transient(&e) || std::time::Instant::now() >= deadline {
+                    report_giving_up(&events, attempt, began, &e.to_string());
+                    return;
+                }
+                if !keep_waiting(&events, &commands, attempt, began, &mut held) {
+                    return;
+                }
+                continue;
+            }
+        };
+
+        match run_connected(
+            &client,
+            &params,
+            &commands,
+            &events,
+            &mut held,
+            &mut desired_size,
+        ) {
+            // Frames flowed. The session ran and has reported its own ending.
+            Outcome::Ran => return,
+            Outcome::Cancelled => return,
+            // Connected, then dropped before drawing anything. A desktop that
+            // is still starting does this: the RDP port is open while the
+            // GNOME session behind it is not ready. Treat it as not up yet.
+            Outcome::EndedEarly(reason) => {
+                if std::time::Instant::now() >= deadline {
+                    report_giving_up(&events, attempt, began, &reason);
+                    return;
+                }
+                tracing::debug!("attempt {attempt} ended before any frame: {reason}");
+                if !keep_waiting(&events, &commands, attempt, began, &mut held) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Tells the interface the attempt is over, and why.
+fn report_giving_up(
+    events: &async_channel::Sender<SessionEvent>,
+    attempt: u32,
+    began: std::time::Instant,
+    reason: &str,
+) {
+    if attempt > 1 {
+        tracing::warn!(
+            "gave up after {attempt} attempts in {:?}: {reason}",
+            began.elapsed()
+        );
+    }
+    let _ = events.send_blocking(SessionEvent::Error(reason.to_string()));
+}
+
+/// Reports that the session is still trying, then waits before the next go.
+///
+/// Returns false when the session should stop, either because the interface
+/// asked it to or because the interface has gone.
+fn keep_waiting(
+    events: &async_channel::Sender<SessionEvent>,
+    commands: &std::sync::mpsc::Receiver<SessionCommand>,
+    attempt: u32,
+    began: std::time::Instant,
+    held: &mut Vec<SessionCommand>,
+) -> bool {
+    if events
+        .send_blocking(SessionEvent::Connecting {
+            attempt,
+            waited: began.elapsed().as_secs(),
+        })
+        .is_err()
+    {
+        return false;
+    }
+    // The user may switch desktops or close the window while this waits, so
+    // the interval is spent watching for that rather than sleeping through it.
+    !wait_or_cancel(commands, RETRY_INTERVAL, held)
+}
+
+/// What became of one connected session.
+enum Outcome {
+    /// Frames were delivered. A terminal event has already been sent.
+    Ran,
+    /// The interface asked the session to stop, or went away.
+    Cancelled,
+    /// The session ended before any frame arrived.
+    EndedEarly(String),
+}
+
+/// Runs one connected session until it ends.
+fn run_connected(
+    client: &Client,
+    params: &ConnectionParams,
+    commands: &std::sync::mpsc::Receiver<SessionCommand>,
+    events: &async_channel::Sender<SessionEvent>,
+    held: &mut Vec<SessionCommand>,
+    desired_size: &mut Option<(u32, u32)>,
+) -> Outcome {
     let _ = events.send_blocking(SessionEvent::Connected {
         width: params.width,
         height: params.height,
@@ -260,22 +388,35 @@ pub fn run_session(
     });
 
     let mut last_frame = 0u64;
-    // The size the interface asked for before the Display Control channel was
-    // attached. Without this the first request is lost: the widget is
-    // allocated its size well before DRDYNVC negotiates disp, so the opening
-    // resize arrives too early, and the interface will not repeat a request it
-    // believes it already sent. The desktop then stays at its created size
-    // until the user drags a window edge.
+    let mut drew_anything = false;
+    // The size asked for before the Display Control channel was attached.
+    // Without this the first request is lost: the widget is allocated its size
+    // well before DRDYNVC negotiates disp, so the opening resize arrives too
+    // early, and the interface will not repeat a request it believes it
+    // already sent. The desktop then stays at its created size until the user
+    // drags a window edge. See DESIGN.md section 16.2.
     let mut pending_resize: Option<(u32, u32)> = None;
+
+    // Whatever arrived while the guest was still starting, then the size the
+    // interface wants. Both go through the same path as any later command, so
+    // a resize is held again if the channel is not attached yet.
+    for command in held.drain(..) {
+        remember_size(&command, desired_size);
+        if !apply(client, command, &mut pending_resize) {
+            client.disconnect();
+            return finish(events, drew_anything, "closed by the application");
+        }
+    }
+    if let Some((width, height)) = *desired_size {
+        pending_resize = Some((width, height));
+    }
 
     loop {
         while let Ok(command) = commands.try_recv() {
-            if !apply(&client, command, &mut pending_resize) {
+            remember_size(&command, desired_size);
+            if !apply(client, command, &mut pending_resize) {
                 client.disconnect();
-                let _ = events.send_blocking(SessionEvent::Disconnected {
-                    reason: "closed by the application".into(),
-                });
-                return;
+                return finish(events, drew_anything, "closed by the application");
             }
         }
 
@@ -293,15 +434,13 @@ pub fn run_session(
 
         match client.poll(POLL_INTERVAL) {
             Ok(true) => {}
-            Ok(false) => {
-                let _ = events.send_blocking(SessionEvent::Disconnected {
-                    reason: "the guest ended the session".into(),
-                });
-                return;
-            }
+            Ok(false) => return finish(events, drew_anything, "the guest ended the session"),
             Err(e) => {
+                if !drew_anything {
+                    return Outcome::EndedEarly(e.to_string());
+                }
                 let _ = events.send_blocking(SessionEvent::Error(e.to_string()));
-                return;
+                return Outcome::Ran;
             }
         }
 
@@ -312,14 +451,106 @@ pub fn run_session(
         last_frame = count;
 
         if let Some(frame) = client.framebuffer() {
+            drew_anything = true;
             // send_blocking applies back pressure: a slow interface makes the
             // session wait rather than build a queue of stale frames.
             if events.send_blocking(SessionEvent::Frame(frame)).is_err() {
                 client.disconnect();
-                return;
+                return Outcome::Cancelled;
             }
         }
     }
+}
+
+/// Ends a session, reporting it only when it had something to show.
+///
+/// A session that never drew is reported as not yet up, so the caller can try
+/// again instead of putting a failure in front of the user.
+///
+/// This does not call `disconnect`. The guest has already gone in every case
+/// that reaches here, and disconnecting a session that has ended, before the
+/// client is freed, tears the GDI layer down twice. The retry loop then builds
+/// a new client over the wreckage and the first frame it copies reads freed
+/// memory.
+fn finish(
+    events: &async_channel::Sender<SessionEvent>,
+    drew_anything: bool,
+    reason: &str,
+) -> Outcome {
+    if !drew_anything {
+        return Outcome::EndedEarly(reason.to_string());
+    }
+    let _ = events.send_blocking(SessionEvent::Disconnected {
+        reason: reason.to_string(),
+    });
+    Outcome::Ran
+}
+
+/// The most padding a real row alignment adds.
+///
+/// FreeRDP aligns rows, so a stride slightly above the pixel width is normal.
+/// Anything beyond this is a stride left over from a different size.
+const MAX_ROW_PADDING: usize = 64;
+
+/// True when a stride could really belong to a row of `row_bytes`.
+fn stride_is_plausible(stride: usize, row_bytes: usize) -> bool {
+    stride >= row_bytes && stride - row_bytes <= MAX_ROW_PADDING
+}
+
+/// Keeps track of the size the interface wants, so a new attempt can restate
+/// it.
+fn remember_size(command: &SessionCommand, desired: &mut Option<(u32, u32)>) {
+    if let SessionCommand::Resize { width, height } = command {
+        *desired = Some(crate::session::clamp_resolution(*width, *height));
+    }
+}
+
+/// How long to keep trying to reach a desktop that has just started.
+///
+/// A cold start binds the port about two and a half seconds in on the
+/// development host. The window is far wider than that, because a loaded host
+/// or a large image is slower, and waiting is cheaper than making the user
+/// clear an error and press Reconnect.
+const CONNECT_WINDOW: Duration = Duration::from_secs(90);
+
+/// How long to wait between attempts.
+const RETRY_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// Waits for `interval`, returning true if the session was told to stop.
+///
+/// Commands that are not `Disconnect` are put in `held` for the session to
+/// apply once it is connected.
+fn wait_or_cancel(
+    commands: &std::sync::mpsc::Receiver<SessionCommand>,
+    interval: Duration,
+    held: &mut Vec<SessionCommand>,
+) -> bool {
+    use std::sync::mpsc::RecvTimeoutError;
+    let deadline = std::time::Instant::now() + interval;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        match commands.recv_timeout(left) {
+            Ok(SessionCommand::Disconnect) => return true,
+            Ok(other) => held.push(other),
+            Err(RecvTimeoutError::Timeout) => return false,
+            Err(RecvTimeoutError::Disconnected) => return true,
+        }
+    }
+}
+
+/// True when the failure is one that starting up explains.
+///
+/// Only the connection itself is retried. A rejected password is not retried,
+/// because the guest cannot report one by accident: `cabin-rdp.service`
+/// configures the credentials and only then starts
+/// `gnome-remote-desktop-headless.service`, so nothing is listening until the
+/// password is in place. A changed certificate is never retried either, since
+/// that is a decision for the user rather than a fault to wait out.
+fn is_transient(error: &Error) -> bool {
+    matches!(error, Error::Connect { .. })
 }
 
 fn start(params: &ConnectionParams) -> Result<Client> {
@@ -415,6 +646,34 @@ fn apply(
         }
     }
     true
+}
+
+#[cfg(test)]
+mod stride_tests {
+    use super::stride_is_plausible;
+
+    #[test]
+    fn an_exact_stride_is_accepted() {
+        assert!(stride_is_plausible(4608, 4608));
+    }
+
+    #[test]
+    fn row_alignment_padding_is_accepted() {
+        assert!(stride_is_plausible(4608 + 16, 4608));
+        assert!(stride_is_plausible(4608 + 64, 4608));
+    }
+
+    #[test]
+    fn a_stride_left_over_from_a_wider_frame_is_rejected() {
+        // The case that aborted the process: 1152 wide, still striding for
+        // 1920. Reading on that description runs off the end of the buffer.
+        assert!(!stride_is_plausible(1920 * 4, 1152 * 4));
+    }
+
+    #[test]
+    fn a_stride_shorter_than_the_row_is_rejected() {
+        assert!(!stride_is_plausible(4000, 4608));
+    }
 }
 
 #[cfg(test)]

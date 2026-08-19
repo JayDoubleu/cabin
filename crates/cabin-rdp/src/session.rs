@@ -64,6 +64,16 @@ pub enum SessionCommand {
 /// Sent from the session to the interface.
 #[derive(Debug)]
 pub enum SessionEvent {
+    /// The session is still trying to reach the guest.
+    ///
+    /// A desktop that has just started does not answer for a few seconds, so
+    /// the session retries rather than reporting a failure the user has to
+    /// clear by hand. See DESIGN.md section 17.1.
+    Connecting {
+        attempt: u32,
+        /// How long the session has been trying, in seconds.
+        waited: u64,
+    },
     Connected {
         width: u32,
         height: u32,

@@ -67,6 +67,20 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         );
     });
 
+    // A desktop created with "Open settings" switched on goes straight there.
+    let podman_for_new = podman.clone();
+    let sidebar_for_new = sidebar.clone();
+    let window_for_new = window.clone();
+    sidebar.connect_settings_requested(move |desktop| {
+        let refresh_target = sidebar_for_new.clone();
+        crate::settings::present(
+            &window_for_new,
+            podman_for_new.clone(),
+            desktop,
+            move || refresh_target.refresh(),
+        );
+    });
+
     // Selecting a desktop opens it. Selecting one that is stopped says so,
     // rather than leaving whatever the pane showed before.
     let podman_for_select = podman.clone();

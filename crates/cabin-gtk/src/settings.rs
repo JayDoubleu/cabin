@@ -6,7 +6,9 @@
 use crate::graphics;
 use crate::runtime;
 use adw::prelude::*;
-use cabin_core::{Desktop, DesktopConfig, Exposure, GraphicsMode, Mount, MountMode, SocketPolicy};
+use cabin_core::{
+    Desktop, DesktopConfig, Exposure, GraphicsMode, Mount, MountKind, MountMode, SocketPolicy,
+};
 use cabin_podman::Podman;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -95,8 +97,11 @@ fn build_mounts_group(
     config: Rc<RefCell<DesktopConfig>>,
 ) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
-        .title("Shared Folders")
-        .description("Folders from this computer, made visible inside the desktop.")
+        .title("Shared Files and Folders")
+        .description(
+            "Items from this computer, made visible inside the desktop. Each one \
+             appears at a location you choose.",
+        )
         .build();
 
     let list = gtk::ListBox::builder()
@@ -111,47 +116,81 @@ fn build_mounts_group(
     };
     rebuild();
 
-    let add = gtk::Button::builder()
-        .label("Add Folder")
+    let buttons = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(6)
         .halign(gtk::Align::Start)
         .margin_top(6)
         .build();
-
-    let parent_widget = parent.as_ref().clone();
-    let rebuild_after_add = rebuild.clone();
-    add.connect_clicked(move |_| {
-        // The file chooser portal returns a path without Cabin needing any
-        // filesystem permission of its own. See DESIGN.md section 7.1.
-        let chooser = gtk::FileDialog::builder()
-            .title("Choose a folder to share")
-            .build();
-        let config = config.clone();
-        let rebuild = rebuild_after_add.clone();
-        let window = parent_widget.root().and_downcast::<gtk::Window>();
-        chooser.select_folder(
-            window.as_ref(),
-            gtk::gio::Cancellable::NONE,
-            move |result: Result<gtk::gio::File, _>| {
-                let Ok(file) = result else { return };
-                let Some(path) = file.path() else { return };
-                let host_path = path.to_string_lossy().into_owned();
-                let guest_path = Mount::suggest_guest_path(&host_path);
-                config.borrow_mut().mounts.push(Mount {
-                    host_path,
-                    guest_path,
-                    mode: MountMode::ReadOnly,
-                    relabel: true,
-                });
-                rebuild();
-            },
-        );
-    });
+    buttons.append(&add_button(
+        parent,
+        config.clone(),
+        rebuild.clone(),
+        MountKind::Directory,
+    ));
+    buttons.append(&add_button(parent, config, rebuild, MountKind::File));
 
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 0);
     box_.append(&list);
-    box_.append(&add);
+    box_.append(&buttons);
     group.add(&box_);
     group
+}
+
+/// A button that adds one share, of either kind.
+///
+/// Sharing a single file is worth having on its own. A configuration file such
+/// as `.gitconfig` should not need its whole directory shared with it.
+fn add_button(
+    parent: &impl IsA<gtk::Widget>,
+    config: Rc<RefCell<DesktopConfig>>,
+    rebuild: Rc<impl Fn() + 'static>,
+    kind: MountKind,
+) -> gtk::Button {
+    let button = gtk::Button::builder()
+        .label(match kind {
+            MountKind::Directory => "Add Folder",
+            MountKind::File => "Add File",
+        })
+        .build();
+
+    let parent_widget = parent.as_ref().clone();
+    button.connect_clicked(move |_| {
+        // The file chooser portal returns a path without Cabin needing any
+        // filesystem permission of its own. See DESIGN.md section 7.1.
+        let chooser = gtk::FileDialog::builder()
+            .title(match kind {
+                MountKind::Directory => "Choose a folder to share",
+                MountKind::File => "Choose a file to share",
+            })
+            .build();
+        let config = config.clone();
+        let rebuild = rebuild.clone();
+        let window = parent_widget.root().and_downcast::<gtk::Window>();
+
+        let chosen = move |result: Result<gtk::gio::File, gtk::glib::Error>| {
+            let Ok(file) = result else { return };
+            let Some(path) = file.path() else { return };
+            let host_path = path.to_string_lossy().into_owned();
+            let guest_path = Mount::suggest_guest_path(&host_path);
+            config.borrow_mut().mounts.push(Mount {
+                host_path,
+                guest_path,
+                mode: MountMode::ReadOnly,
+                relabel: true,
+                kind,
+            });
+            rebuild();
+        };
+
+        match kind {
+            MountKind::Directory => {
+                chooser.select_folder(window.as_ref(), gtk::gio::Cancellable::NONE, chosen)
+            }
+            MountKind::File => chooser.open(window.as_ref(), gtk::gio::Cancellable::NONE, chosen),
+        }
+    });
+    button
 }
 
 fn refresh_mount_rows(list: &gtk::ListBox, config: Rc<RefCell<DesktopConfig>>) {
@@ -161,7 +200,7 @@ fn refresh_mount_rows(list: &gtk::ListBox, config: Rc<RefCell<DesktopConfig>>) {
 
     if config.borrow().mounts.is_empty() {
         let empty = adw::ActionRow::builder()
-            .title("No shared folders")
+            .title("Nothing shared")
             .subtitle("The desktop can only see its own files.")
             .build();
         list.append(&empty);
@@ -171,46 +210,108 @@ fn refresh_mount_rows(list: &gtk::ListBox, config: Rc<RefCell<DesktopConfig>>) {
     let count = config.borrow().mounts.len();
     for index in 0..count {
         let mount = config.borrow().mounts[index].clone();
-        let row = adw::ActionRow::builder()
-            .title(&mount.host_path)
-            .subtitle(format!("Appears at {}", mount.guest_path))
-            .build();
-
-        // Read-only is the default, so the safe choice needs no thought.
-        let writable = gtk::Switch::builder()
-            .active(mount.mode == MountMode::ReadWrite)
-            .valign(gtk::Align::Center)
-            .tooltip_text("Allow the desktop to change these files")
-            .build();
-        let config_for_switch = config.clone();
-        writable.connect_active_notify(move |sw| {
-            if let Some(m) = config_for_switch.borrow_mut().mounts.get_mut(index) {
-                m.mode = if sw.is_active() {
-                    MountMode::ReadWrite
-                } else {
-                    MountMode::ReadOnly
-                };
-            }
-        });
-        row.add_suffix(&gtk::Label::new(Some("Writable")));
-        row.add_suffix(&writable);
-
-        let remove = gtk::Button::builder()
-            .icon_name("user-trash-symbolic")
-            .valign(gtk::Align::Center)
-            .css_classes(vec!["flat"])
-            .tooltip_text("Stop sharing this folder")
-            .build();
-        let config_for_remove = config.clone();
-        let list_for_remove = list.clone();
-        remove.connect_clicked(move |_| {
-            config_for_remove.borrow_mut().mounts.remove(index);
-            refresh_mount_rows(&list_for_remove, config_for_remove.clone());
-        });
-        row.add_suffix(&remove);
-
-        list.append(&row);
+        list.append(&build_mount_row(index, &mount, config.clone(), list));
     }
+}
+
+/// One share, opening to show where it appears inside the desktop.
+///
+/// The location is editable. A suggestion from the source name is right most
+/// of the time and wrong whenever the desktop expects a particular path, and
+/// a configuration file shared to the wrong place does nothing at all.
+fn build_mount_row(
+    index: usize,
+    mount: &Mount,
+    config: Rc<RefCell<DesktopConfig>>,
+    list: &gtk::ListBox,
+) -> adw::ExpanderRow {
+    let row = adw::ExpanderRow::builder()
+        .title(&mount.host_path)
+        .subtitle(format!("Appears at {}", mount.guest_path))
+        .build();
+    row.add_prefix(&gtk::Image::from_icon_name(match mount.kind {
+        MountKind::Directory => "folder-symbolic",
+        MountKind::File => "text-x-generic-symbolic",
+    }));
+
+    let remove = gtk::Button::builder()
+        .icon_name("user-trash-symbolic")
+        .valign(gtk::Align::Center)
+        .css_classes(vec!["flat"])
+        .tooltip_text("Stop sharing this")
+        .build();
+    let config_for_remove = config.clone();
+    let list_for_remove = list.clone();
+    remove.connect_clicked(move |_| {
+        config_for_remove.borrow_mut().mounts.remove(index);
+        refresh_mount_rows(&list_for_remove, config_for_remove.clone());
+    });
+    row.add_suffix(&remove);
+
+    let location = adw::EntryRow::builder()
+        .title("Location inside the desktop")
+        .text(&mount.guest_path)
+        .build();
+    // Applying is a separate action, so a half typed path must not be stored
+    // as though it were finished. The row keeps the last valid value and says
+    // when what is typed is not one.
+    let config_for_location = config.clone();
+    let row_for_location = row.clone();
+    location.connect_changed(move |entry| {
+        let typed = entry.text().to_string();
+        match Mount::check_guest_path(&typed) {
+            Ok(()) => {
+                entry.remove_css_class("error");
+                entry.set_tooltip_text(None);
+                if let Some(m) = config_for_location.borrow_mut().mounts.get_mut(index) {
+                    m.guest_path = typed.trim().to_string();
+                }
+                row_for_location.set_subtitle(&format!("Appears at {}", entry.text()));
+            }
+            Err(why) => {
+                entry.add_css_class("error");
+                entry.set_tooltip_text(Some(why));
+                row_for_location.set_subtitle(why);
+            }
+        }
+    });
+    row.add_row(&location);
+
+    // Read-only is the default, so the safe choice needs no thought.
+    let writable = adw::SwitchRow::builder()
+        .title("Writable")
+        .subtitle("Let the desktop change what is shared.")
+        .active(mount.mode == MountMode::ReadWrite)
+        .build();
+    let config_for_switch = config.clone();
+    writable.connect_active_notify(move |sw| {
+        if let Some(m) = config_for_switch.borrow_mut().mounts.get_mut(index) {
+            m.mode = if sw.is_active() {
+                MountMode::ReadWrite
+            } else {
+                MountMode::ReadOnly
+            };
+        }
+    });
+    row.add_row(&writable);
+
+    if mount.kind == MountKind::File {
+        // Worth stating, because the file looks shared and then stops
+        // following the original with no sign that anything is wrong.
+        let note = adw::ActionRow::builder()
+            .title("Editing on this computer may not show up")
+            .subtitle(
+                "A shared file is bound by itself. Most editors replace a file \
+                 rather than change it, and the desktop keeps seeing the \
+                 original. Share the folder instead if you plan to edit it.",
+            )
+            .css_classes(vec!["warning"])
+            .build();
+        note.set_subtitle_lines(0);
+        row.add_row(&note);
+    }
+
+    row
 }
 
 fn build_graphics_group(config: Rc<RefCell<DesktopConfig>>) -> adw::PreferencesGroup {

@@ -98,6 +98,7 @@ async fn mounts_and_config_survive_a_round_trip() {
         guest_path: "/mnt/host-tmp".to_string(),
         mode: MountMode::ReadOnly,
         relabel: false,
+        kind: cabin_core::MountKind::Directory,
     });
     config.width = 2560;
     config.height = 1440;

@@ -98,7 +98,18 @@ Use `just`. Run `just` alone to list every task.
     through the capabilities exchange, which looks like a client fault.
     `live_session.rs` takes a lock and waits. Separate test binaries still run
     concurrently, so run `live_input.rs` and `live_connect.rs` apart from it.
-22. **Store interface names for remote access, never addresses.** An address
+22. **A desktop is not ready when Podman says it is running.** The RDP port
+    binds about two and a half seconds later, so the first connection always
+    lands in the gap. The session retries. Retry the case where the guest
+    accepts and then hangs up before any frame, not only the refused
+    connection. Never retry a rejected password: `cabin-rdp.service` sets the
+    credentials before the RDP server starts, so a rejection is real.
+23. **A resize makes the framebuffer description lie.** Width updates before
+    stride, so a shrink reports the old, larger stride against a smaller
+    buffer. That passes every bounds check and reads past the end of the
+    allocation. Check the stride against the row before copying. A stride
+    longer than the row is the dangerous one.
+24. **Store interface names for remote access, never addresses.** An address
     changes with the network, and a stored one would leave the desktop unable
     to start after a DHCP lease changed. Names resolve to addresses when the
     container is created. Loopback is always bound as well.

@@ -343,27 +343,36 @@ socket. Audio is scheduled after the first release.
 
 ### 7.1 Mounts
 
-A mount has a host path, a guest path, and a mode.
+A desktop can be given host directories and single files. Both are Podman bind
+mounts. Nothing goes over the RDP connection, so a share behaves the same
+whether the desktop is used from this computer or from a phone, and read-only
+is enforced by the kernel rather than by a client honouring a flag.
 
-| Field | Values |
+| Field | Meaning |
 |---|---|
-| Host path | Any directory, chosen through the file chooser portal |
-| Guest path | An absolute path, default `/mnt/<basename>` |
-| Mode | Read-write or read-only |
+| Source | A host path, always from the file chooser portal. |
+| Location | Where it appears inside the desktop. Suggested, then editable. |
+| Writable | Off by default. |
+| Relabel | SELinux `z`. On by default, which Fedora needs. |
 
-Cabin passes mounts to Podman as bind mounts with the `:ro` or `:rw` option,
-plus `:U` when the user IDs need remapping and `:z` when SELinux relabelling is
-wanted.
+The location is editable rather than derived. A suggestion from the source name
+is right most of the time and wrong whenever the desktop expects a particular
+path, and there is no way to guess which. `Mount::check_guest_path` refuses a
+path that Podman would take literally and produce something unusable from: an
+empty one, a relative one, `/` itself, one containing a colon, and the guest's
+own system directories. Mounting over `/usr` leaves a desktop that cannot
+start, and the failure does not point at the setting that caused it.
 
-The file chooser portal matters here. Cabin runs in a Flatpak sandbox and does
-**not** hold `--filesystem=home`. The portal returns a path for a directory the
-user picked, and Cabin passes that path string to Podman. Podman runs on the
-host and opens the path itself. The application never needs broad filesystem
-access to make a mount work.
+Sharing a single file is offered separately from sharing a folder, because a
+configuration file such as `.gitconfig` should not need its whole directory
+shared with it. A file share carries a warning that a folder share does not:
+a bind mount of a single file follows the inode, and most editors replace a
+file rather than change it, so edits made on the host stop reaching the
+desktop with no sign that anything is wrong.
 
-Changing mounts needs the container to be recreated. Cabin states this in the
-dialogue and offers to do it, preserving the writable layer through a named
-volume for `/home/cabin`.
+Cabin never browses the filesystem itself. Every source path comes from the
+portal, so the application needs no broad filesystem permission of its own.
+See section 8.
 
 ### 7.2 Container runtime sockets
 
@@ -1637,3 +1646,94 @@ that are about Cabin rather than about one desktop:
 - The default guest image.
 
 **Audio.** RDPSND is disabled in the shim. Nothing has been attempted.
+
+---
+
+## 17. Milestone 9 corrections
+
+### 17.1 A desktop that has just started is not ready to answer
+
+Starting a desktop and connecting to it reported "could not connect". Pressing
+Reconnect a moment later worked, so the desktop was fine and the timing was
+not.
+
+Podman reports a container as running before the guest inside it binds the RDP
+port. Measured on the development host, with a probe that connected once a
+second from the moment the container started:
+
+| Case | Gap before the first frame |
+|---|---|
+| Restart of an existing desktop | about 2.5 seconds |
+| First boot with empty volumes | about 2.6 seconds |
+
+So the first connection always lands in the gap. The session now retries for up
+to 90 seconds instead of reporting a failure the user has to clear by hand. The
+window is far wider than the measurement because a loaded host is slower, and
+waiting costs nothing while a spurious error costs a click and some confidence.
+
+Two failure modes need retrying, and only the first is obvious:
+
+- **The port is not bound.** The connection is refused.
+- **The port is bound but the session is not ready.** The connection succeeds
+  and is then dropped before a single frame arrives. This one matters: an
+  early version retried only refused connections and still failed, because the
+  guest accepts and then hangs up.
+
+So the rule is about frames, not about connecting: a session that ends before
+it draws anything is treated as not up yet, and is tried again.
+
+**A rejected password is not retried.** The guest cannot report one by
+accident. `cabin-rdp.service` configures the credentials with `grdctl` and only
+then starts `gnome-remote-desktop-headless.service`, so nothing is listening
+until the password is in place. A changed certificate is not retried either,
+since that is a decision for the user rather than a fault to wait out.
+
+**Commands that arrive while waiting are kept.** The widget states the pane
+size the moment it attaches, so that request is always sitting in the channel
+while the retries run. An early version drained the channel to watch for
+`Disconnect` and threw everything else away, which brought back the fault in
+section 16.2 whenever a desktop was slow to start. The size the interface last
+asked for is also re-applied to each new attempt, because a request handed to
+an attempt that then died would otherwise be lost.
+
+### 17.2 Resizing smaller could abort the process
+
+Found while testing the retry, but not caused by it. It was reachable in
+ordinary use, by dragging the window smaller.
+
+`cabin_rdp_framebuffer` reports the GDI buffer with its width, height and
+stride. During a resize those do not agree. A guest going from 1920 to 1152
+wide reported:
+
+```
+width=1152  height=720  stride=7680   (7680 = 1920 * 4, the old width)
+```
+
+The buffer had already been reallocated for the new width, so it held 1152 * 4
+* 720 bytes, while the description claimed 7680 * 720. Copying on that
+description read a megabyte past the end of the allocation. Rust's
+`copy_nonoverlapping` precondition check caught it and aborted the process,
+which is a better outcome than the silent corruption that would otherwise
+follow.
+
+The client now checks that a stride could really belong to a row of that width
+before it copies. Real row alignment adds a few bytes; anything further out is
+a value left over from a different size, and the frame is skipped. The next
+frame carries a consistent description.
+
+Note that the direction of the mismatch matters. A stride shorter than the row
+is caught by a bounds check, which panics safely. A stride longer than the row
+passes every bounds check and reads memory that is not ours, so it is the
+dangerous one, and it is the one that happens.
+
+`cabin_rdp_framebuffer` also refuses to report a buffer for a client that is no
+longer connected. `cabin_post_disconnect` calls `gdi_free`, and it can run
+inside a poll that still reports the session as alive.
+
+### 17.3 Creating a desktop offers its settings
+
+The create dialogue asks for a name, memory and graphics. Everything else lives
+in the desktop's settings, and a user who has just created a desktop is exactly
+the user who wants them. The dialogue now carries an "Open settings" switch,
+and the sidebar opens the settings as soon as the new desktop appears in the
+list.
