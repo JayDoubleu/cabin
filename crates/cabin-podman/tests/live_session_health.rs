@@ -86,12 +86,20 @@ async fn a_desktop_boots_with_icons_and_applications() {
         in_session(r#"journalctl --user --no-pager 2>/dev/null | grep -ci "parental controls""#);
     let polkit = in_session("systemctl is-active polkit.service");
     let shell_running = in_session("pgrep -c gnome-shell");
-    let monospace = in_session("fc-match monospace");
+    // The font the desktop actually asks for, not the generic alias. The
+    // alias resolves to something whatever is installed, so checking it
+    // passes while the desktop is still asking for a font that is missing.
+    let configured = in_session(
+        "gsettings get org.gnome.desktop.interface monospace-font-name | tr -d \"'\" | sed 's/ [0-9]*$//'",
+    );
+    let monospace = in_session(&format!("fc-match '{configured}'"));
+    let fixed_pitch = in_session("fc-list :spacing=100 family | sort -u | wc -l");
     let apps = in_session(
         r#"for f in /usr/share/applications/*.desktop; do grep -q '^NoDisplay=true' "$f" || echo x; done | wc -l"#,
     );
     println!(
-        "pixbuf errors={pixbuf} parental errors={parental} polkit={polkit} shell={shell_running} apps={apps} monospace={monospace}"
+        "pixbuf errors={pixbuf} parental errors={parental} polkit={polkit} shell={shell_running} \
+         apps={apps} fixed-pitch families={fixed_pitch} {configured} -> {monospace}"
     );
 
     let _ = podman.remove(NAME, true).await;
@@ -117,13 +125,23 @@ async fn a_desktop_boots_with_icons_and_applications() {
         "the parental controls lookup failed, so the shell hides every application"
     );
 
-    // Fedora's font packages are weak dependencies. Without one, fontconfig
-    // answers "monospace" with a proportional face, and a terminal lays every
-    // glyph on a grid the font does not fit. The text comes out spaced apart
-    // and nothing reports it.
+    // GNOME asks for a face by name, and Fedora ships those as weak
+    // dependencies. Ask for one that is not installed and every glyph lands on
+    // a grid its fallback does not fit, so the text comes out spaced apart.
+    // Nothing reports it.
+    //
+    // fc-match always answers with something, so the test is that it answers
+    // with the font that was asked for.
     assert!(
-        monospace.to_lowercase().contains("mono"),
-        "monospace resolved to a proportional font: {monospace:?}"
+        monospace.contains(&configured),
+        "the desktop asks for {configured:?} and fontconfig gave {monospace:?}"
+    );
+
+    // A terminal needs a genuinely fixed pitch face. The variable Noto Sans
+    // Mono is not tagged as one, so having a font called Mono is not enough.
+    assert!(
+        fixed_pitch.parse::<u32>().unwrap_or(0) >= 1,
+        "the desktop has no fixed pitch font at all"
     );
 
     // A desktop with a usable set of applications is the point of it. A floor

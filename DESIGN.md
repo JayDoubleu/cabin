@@ -2322,17 +2322,40 @@ seccomp filters installing at all.
 malcontent cannot simply be removed. It is a hard dependency of `gnome-shell`,
 so removing it removes the session.
 
-### 22.3.2 And the terminal had no monospace font
+### 22.3.2 And the text was spaced out
 
-Text in the terminal came out s p a c e d  a p a r t. Fedora's font packages
-are weak dependencies, so with those off the image held one sans face and
-nothing else, and fontconfig answered `monospace` with it. A terminal asks for
-a monospace font, gets a proportional one, and lays every glyph on a grid the
-font does not fit.
+Text in the terminal came out s p a c e d  a p a r t.
 
-`default-fonts-core-mono` and `default-fonts-core-serif` are now named beside
-the sans one. They sit with the session packages rather than with the
-applications, because a terminal nobody can read is not a working desktop.
+The first answer was wrong, and worth recording because the check that proved
+it passed while the desktop was still broken. The image held no monospace font
+at all, so `default-fonts-core-mono` was added and `fc-match monospace` then
+answered "Noto Sans Mono". The spacing did not change.
+
+`monospace` is an alias. It is not what the desktop asks for. GNOME 50 names
+its faces in `org.gnome.desktop.interface`, and all three were missing:
+
+| Setting | Asks for | Was installed |
+|---|---|---|
+| `font-name` | Adwaita Sans 11 | no |
+| `document-font-name` | Adwaita Sans 12 | no |
+| `monospace-font-name` | Adwaita Mono 11 | no |
+
+Every font in the desktop was therefore a fallback, and a terminal asking for
+a face it does not have lays every glyph on a grid the fallback does not fit.
+
+`adwaita-fonts-all` is what those settings name, and it costs 2 MB. The Noto
+faces stay as the fallback for scripts Adwaita does not cover.
+
+**The variable Noto Sans Mono is not tagged fixed pitch.** `fc-list
+:spacing=100` does not list it, on this image or on a Fedora desktop, so a
+font with "Mono" in its name is not evidence of anything. After the fix
+Adwaita Mono is the only fixed pitch family in the image.
+
+The lesson for the test is the general one: `fc-match` always answers with
+something, so asking whether it answers is not a test. `live_session_health.rs`
+now reads the configured name out of the setting and asserts that fontconfig
+gives back that same face, and separately that at least one fixed pitch family
+exists.
 
 This is the fourth failure in this section with the same shape: a weak
 dependency left out, nothing logged, and a symptom that points somewhere else.

@@ -188,11 +188,16 @@ Use `just`. Run `just` alone to list every task.
     Flathub repository is therefore fetched at build time and added to the
     session by `cabin-flathub.service`. A system wide repository is not a
     substitute: installing into one needs polkit, which cannot start here.
-38. **Name the fonts, or `monospace` resolves to a proportional face.**
-    Fedora's font packages are weak dependencies and the recipe turns those
-    off, so nothing pulls a monospace font in. The terminal then spaces every
-    glyph apart and nothing reports why. `default-fonts-core-mono` and
-    `default-fonts-core-serif` sit with the session packages.
+38. **Install the fonts GNOME asks for by name, not just "a monospace
+    font".** `org.gnome.desktop.interface` names Adwaita Sans and Adwaita
+    Mono, Fedora ships those as weak dependencies, and the recipe turns weak
+    dependencies off. A desktop asking for a face it does not have lays every
+    glyph on a grid its fallback does not fit, so text comes out spaced
+    apart, and nothing reports why. `adwaita-fonts-all` is the package.
+    Checking `fc-match monospace` does not test this: it answered "Noto Sans
+    Mono" while the terminal was still broken. Match the configured name
+    against what fontconfig returns. Note the variable Noto Sans Mono is not
+    tagged fixed pitch, here or on a Fedora desktop.
 39. **Keep the dash favourites to applications the recipe installs.**
     Fedora's default names Firefox, Calendar and Calculator, none of which
     are installed. GNOME drops an entry that names a missing application
