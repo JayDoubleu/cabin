@@ -55,6 +55,13 @@ ARG CABIN_UID=1000
 #   mesa                   software rendering when no GPU is passed in
 #   xwayland               anything not yet ported to Wayland
 #   openssl                generates the desktop's TLS certificate at boot
+#   fonts                  a monospace font, or every terminal is unreadable
+#
+# The fonts are not decoration. Fedora's font packages are weak dependencies,
+# so with them off the image ends up holding a sans face and nothing else, and
+# fontconfig answers "monospace" with that proportional face. A terminal then
+# lays every glyph out on a grid the font does not fit, and the text comes out
+# spaced like t h i s. Nothing reports it.
 RUN dnf -y install --setopt=install_weak_deps=False \
         systemd systemd-container dbus-broker dbus-daemon \
         gnome-shell gnome-session mutter gnome-settings-daemon \
@@ -66,6 +73,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         pipewire pipewire-pulseaudio wireplumber \
         mesa-dri-drivers mesa-libEGL mesa-libGL mesa-vulkan-drivers \
         xorg-x11-server-Xwayland \
+        default-fonts-core-sans default-fonts-core-mono default-fonts-core-serif \
         openssl passwd sudo shadow-utils procps-ng iproute curl \
     && dnf clean all \
     && rm -rf /var/cache/dnf
@@ -89,6 +97,8 @@ RUN dnf -y install --setopt=install_weak_deps=False \
 RUN dnf -y install --setopt=install_weak_deps=False \
         gnome-console nautilus gnome-text-editor gnome-control-center \
         gnome-software flatpak \
+        gnome-calculator gnome-system-monitor gnome-disk-utility file-roller \
+        loupe papers gnome-characters gnome-font-viewer gnome-logs \
         adwaita-icon-theme adwaita-cursor-theme \
         vim-minimal less git \
         podman podman-compose fuse-overlayfs \

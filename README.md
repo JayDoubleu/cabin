@@ -205,7 +205,9 @@ Cabin has a newer recipe than the one you copied.
 
 ### Applications in a desktop
 
-A desktop comes with Console, Files, Text Editor, Settings and Software.
+A desktop comes with Console, Files, Text Editor, Settings and Software in the
+dash, and Calculator, Disks, Document Viewer, Image Viewer, Characters, Fonts,
+Logs, System Monitor and File Roller in the application grid.
 
 Software is the store, and it installs Flatpaks from Flathub. They go into the
 desktop's home, which is a volume, so applications you add survive the desktop

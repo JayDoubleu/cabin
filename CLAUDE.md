@@ -188,12 +188,17 @@ Use `just`. Run `just` alone to list every task.
     Flathub repository is therefore fetched at build time and added to the
     session by `cabin-flathub.service`. A system wide repository is not a
     substitute: installing into one needs polkit, which cannot start here.
-38. **Keep the dash favourites to applications the recipe installs.**
+38. **Name the fonts, or `monospace` resolves to a proportional face.**
+    Fedora's font packages are weak dependencies and the recipe turns those
+    off, so nothing pulls a monospace font in. The terminal then spaces every
+    glyph apart and nothing reports why. `default-fonts-core-mono` and
+    `default-fonts-core-serif` sit with the session packages.
+39. **Keep the dash favourites to applications the recipe installs.**
     Fedora's default names Firefox, Calendar and Calculator, none of which
     are installed. GNOME drops an entry that names a missing application
     without saying so, so the dash came up empty and the desktop looked
     broken. `95-cabin-favourites.gschema.override` sets the list.
-39. **Store interface names for remote access, never addresses.** An address
+40. **Store interface names for remote access, never addresses.** An address
     changes with the network, and a stored one would leave the desktop unable
     to start after a DHCP lease changed. Names resolve to addresses when the
     container is created. Loopback is always bound as well.

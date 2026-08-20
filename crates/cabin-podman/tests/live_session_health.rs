@@ -86,8 +86,12 @@ async fn a_desktop_boots_with_icons_and_applications() {
         in_session(r#"journalctl --user --no-pager 2>/dev/null | grep -ci "parental controls""#);
     let polkit = in_session("systemctl is-active polkit.service");
     let shell_running = in_session("pgrep -c gnome-shell");
+    let monospace = in_session("fc-match monospace");
+    let apps = in_session(
+        r#"for f in /usr/share/applications/*.desktop; do grep -q '^NoDisplay=true' "$f" || echo x; done | wc -l"#,
+    );
     println!(
-        "pixbuf errors={pixbuf} parental errors={parental} polkit={polkit} shell={shell_running}"
+        "pixbuf errors={pixbuf} parental errors={parental} polkit={polkit} shell={shell_running} apps={apps} monospace={monospace}"
     );
 
     let _ = podman.remove(NAME, true).await;
@@ -111,5 +115,22 @@ async fn a_desktop_boots_with_icons_and_applications() {
     assert_eq!(
         parental, "0",
         "the parental controls lookup failed, so the shell hides every application"
+    );
+
+    // Fedora's font packages are weak dependencies. Without one, fontconfig
+    // answers "monospace" with a proportional face, and a terminal lays every
+    // glyph on a grid the font does not fit. The text comes out spaced apart
+    // and nothing reports it.
+    assert!(
+        monospace.to_lowercase().contains("mono"),
+        "monospace resolved to a proportional font: {monospace:?}"
+    );
+
+    // A desktop with a usable set of applications is the point of it. A floor
+    // rather than an exact count, so adding one to the recipe does not fail
+    // the test.
+    assert!(
+        apps.parse::<u32>().unwrap_or(0) >= 10,
+        "the desktop should carry a usable set of applications, found {apps}"
     );
 }

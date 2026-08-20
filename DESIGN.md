@@ -2322,6 +2322,21 @@ seccomp filters installing at all.
 malcontent cannot simply be removed. It is a hard dependency of `gnome-shell`,
 so removing it removes the session.
 
+### 22.3.2 And the terminal had no monospace font
+
+Text in the terminal came out s p a c e d  a p a r t. Fedora's font packages
+are weak dependencies, so with those off the image held one sans face and
+nothing else, and fontconfig answered `monospace` with it. A terminal asks for
+a monospace font, gets a proportional one, and lays every glyph on a grid the
+font does not fit.
+
+`default-fonts-core-mono` and `default-fonts-core-serif` are now named beside
+the sans one. They sit with the session packages rather than with the
+applications, because a terminal nobody can read is not a working desktop.
+
+This is the fourth failure in this section with the same shape: a weak
+dependency left out, nothing logged, and a symptom that points somewhere else.
+
 ### 22.4 The store installs Flatpaks, not RPMs
 
 `gnome-software` is installed, and it deliberately installs Flatpaks only.
