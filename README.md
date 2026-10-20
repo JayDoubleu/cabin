@@ -45,10 +45,10 @@ there.
   ```sh
   systemctl --user enable --now podman.socket
   ```
-- The GNOME 50 runtime and SDK, plus the Rust extension:
+- The GNOME 51 runtime and SDK, plus the Rust extension:
   ```sh
-  flatpak install flathub org.gnome.Platform//50 org.gnome.Sdk//50 \
-      org.freedesktop.Sdk.Extension.rust-stable//25.08
+  flatpak install flathub org.gnome.Platform//51 org.gnome.Sdk//51 \
+      org.freedesktop.Sdk.Extension.rust-stable//26.08
   ```
 
 ## Build

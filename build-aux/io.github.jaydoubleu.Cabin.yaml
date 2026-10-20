@@ -8,7 +8,7 @@
 # change with "just flatpak-sources".
 id: io.github.jaydoubleu.Cabin
 runtime: org.gnome.Platform
-runtime-version: '50'
+runtime-version: '51'
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
@@ -30,20 +30,18 @@ finish-args:
   # RDP runs over TCP to a port the container publishes on loopback.
   - --share=network
 
-  # Guest audio over RDPSND. Scheduled after the first release.
-  - --socket=pulseaudio
-
   # The Podman REST socket. Marking the directory read-only still allows
   # read-write use of the socket inside it, and stops Cabin writing files
   # next to it.
   - --filesystem=xdg-run/podman:ro
 
-  # Per-desktop RDP credentials live in the host keyring.
-  - --talk-name=org.freedesktop.secrets
-
 # Deliberately NOT requested:
 #   --filesystem=home            Mount paths come from the file chooser portal.
 #   --talk-name=org.freedesktop.Flatpak   That would be a sandbox escape.
+#   --socket=pulseaudio          Audio is not implemented yet. See DESIGN.md
+#                                section 6.5.
+#   --talk-name=org.freedesktop.secrets   Credentials will use the Secret
+#                                portal, which needs no talk-name.
 
 modules:
   # FreeRDP is not in the GNOME runtime, and Cabin needs it because
@@ -84,10 +82,21 @@ modules:
       - /bin
       - /share/man
       - /share/FreeRDP
+      # Only the cabin module needs the development files, and module cleanup
+      # runs after every module has built, so cabin still finds them.
+      - /include
+      - /lib/pkgconfig
+      - /lib/cmake
+      - '*.a'
     sources:
       - type: archive
-        url: https://github.com/FreeRDP/FreeRDP/archive/refs/tags/3.30.0.tar.gz
-        sha256: 21b3f72bd688fcd1dbbef37b7129bfc9701906705572fce2a5a80b1e85ecc0ee
+        url: https://github.com/FreeRDP/FreeRDP/archive/refs/tags/3.32.2.tar.gz
+        sha256: 9ccb8357bf0188044a460de775c7ea289ca7d2a2a917eca0f0a7c4dc9c8b08ea
+        x-checker-data:
+          type: anitya
+          project-id: 10442
+          stable-only: true
+          url-template: https://github.com/FreeRDP/FreeRDP/archive/refs/tags/$version.tar.gz
 
   - name: cabin
     buildsystem: meson
@@ -96,4 +105,17 @@ modules:
     sources:
       - type: dir
         path: ..
+        # Build output, local repositories and local tool state are not sources.
+        # Keep cargo-sources.json, guest/, data/ and build-aux/: the offline
+        # build and the guest image need them.
+        skip:
+          - target
+          - _build
+          - _flatpak
+          - .flatpak-builder
+          - build
+          - repo
+          - dist
+          - .git
+          - .claude
       - ../cargo-sources.json

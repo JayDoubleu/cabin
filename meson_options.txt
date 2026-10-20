@@ -1,6 +1,0 @@
-option('profile',
-  type: 'combo',
-  choices: ['default', 'development'],
-  value: 'default',
-  description: 'The build profile. Development uses a separate app id.',
-)

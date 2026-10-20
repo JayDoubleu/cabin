@@ -61,32 +61,72 @@ guest:
     {{podman}} build -t {{guest_image}} -f guest/Containerfile guest/
 
 # Start a throwaway guest and report whether RDP came up.
+#
+# The guest runs as container_engine_t, the same type the app uses. Under the
+# default container_t every image decode fails and the session shows blank
+# squares in place of icons. See DESIGN.md section 22. Never use label=disable.
+#
+# Connect with clipboard sharing turned off. A client that advertises the
+# cliprdr channel makes gnome-remote-desktop mount a FUSE filesystem, the mount
+# needs CAP_SYS_ADMIN, and the daemon calls abort() when it fails. Passing
+# /dev/fuse does not change that. See DESIGN.md section 15.2.
 guest-test password="testpass" port="13389":
-    -{{podman}} rm -f cabin-test
-    @# /dev/fuse is not optional. gnome-remote-desktop mounts a FUSE
-    @# filesystem for clipboard redirection as soon as a client advertises
-    @# the cliprdr channel. Without the device the mount fails and the daemon
-    @# calls abort(), which drops the connection. See DESIGN.md section 14.
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{podman}} rm -f cabin-test >/dev/null 2>&1 || true
     {{podman}} run -d --name cabin-test --systemd=always \
+        --security-opt label=type:container_engine_t \
         --publish 127.0.0.1:{{port}}:3389 \
         --env CABIN_PASSWORD={{password}} \
-        --device /dev/fuse \
         --memory 4g --shm-size 512m \
         {{guest_image}}
-    @echo "Waiting for the desktop session and the RDP port ..."
-    @# systemd finishing is not enough. gnome-remote-desktop only listens once
-    @# GNOME Shell is up, so wait for the port itself.
-    @until {{podman}} exec cabin-test ss -tln 2>/dev/null | grep -q ':3389'; \
-        do sleep 1; done
-    @{{podman}} exec cabin-test sudo -u cabin XDG_RUNTIME_DIR=/run/user/1000 \
+    echo "Waiting for the desktop session and the RDP port ..."
+    # systemd finishing is not enough. gnome-remote-desktop only listens once
+    # GNOME Shell is up, so wait for the port itself. A cold start can take a
+    # while, so the limit is generous, but a stopped container ends the wait.
+    bound=no
+    for _ in $(seq 180); do
+        running=$({{podman}} container inspect -f '{{{{.State.Running}}' cabin-test)
+        if [ "$running" != "true" ]; then
+            code=$({{podman}} container inspect -f '{{{{.State.ExitCode}}' cabin-test)
+            logs=$({{podman}} logs cabin-test 2>&1 || true)
+            echo "The guest stopped with exit code $code."
+            [ -n "$logs" ] && printf '%s\n' "$logs"
+            if [ "$code" = "255" ] && [ -z "$logs" ]; then
+                # Keep this in step with diagnose_early_exit in cabin-podman.
+                echo "The most likely cause is that this computer has run out of"
+                echo "inotify instances, which every desktop needs. Raise the limit with:"
+                echo "    sudo sysctl -w fs.inotify.max_user_instances=1024"
+                echo "To keep it after a restart, put fs.inotify.max_user_instances=1024"
+                echo "in /etc/sysctl.d/99-cabin.conf"
+            fi
+            exit 1
+        fi
+        # Capture the listing before the test. With pipefail, "grep -q" can
+        # exit before podman finishes writing, podman then dies of SIGPIPE,
+        # and a bound port reads as unbound. The pattern also stops a port
+        # such as 33890 from matching.
+        sockets=$({{podman}} exec cabin-test ss -Htln 2>/dev/null || true)
+        if grep -qE ':3389([[:space:]]|$)' <<<"$sockets"; then
+            bound=yes
+            break
+        fi
+        sleep 1
+    done
+    if [ "$bound" != "yes" ]; then
+        echo "The guest is running, but port 3389 never bound."
+        echo "Run 'just guest-shell' and check 'journalctl' in the guest."
+        exit 1
+    fi
+    {{podman}} exec cabin-test sudo -u cabin XDG_RUNTIME_DIR=/run/user/1000 \
         systemctl --user list-units 'cabin*' 'gnome-remote*' \
         --no-legend --no-pager || true
-    @just guest-probe {{port}}
-    @echo ""
-    @echo "Connect an RDP client to 127.0.0.1:{{port}}"
-    @echo "  username: cabin"
-    @echo "  password: {{password}}"
-    @echo "The TLS certificate is self-signed, so the client warns on first connect."
+    just guest-probe {{port}}
+    echo ""
+    echo "Connect an RDP client to 127.0.0.1:{{port}} with clipboard sharing off."
+    echo "  username: cabin"
+    echo "  password: {{password}}"
+    echo "The TLS certificate is self-signed, so the client warns on first connect."
 
 # Check that the guest is really speaking RDP.
 guest-probe port="13389":
@@ -106,7 +146,7 @@ flatpak-sources:
         python build-aux/flatpak-cargo-generator.py Cargo.lock -o cargo-sources.json
 
 # Build and install the Flatpak.
-# rofiles-fuse cannot mount under /mnt/data from inside a toolbox, so it is off.
+# rofiles-fuse can fail to mount inside a toolbox, so it is off.
 flatpak:
     flatpak-builder --user --force-clean --disable-rofiles-fuse --install \
         _flatpak {{manifest}}
@@ -129,14 +169,26 @@ demo:
 freerdp-sysroot dest="~/.local/freerdp-sysroot":
     #!/usr/bin/env bash
     set -euo pipefail
+    if ! command -v dnf >/dev/null; then
+        echo "freerdp-sysroot needs dnf, so it works on Fedora only."
+        echo "On other distributions, install the FreeRDP 3 development package"
+        echo "instead, for example freerdp3-dev on Debian and Ubuntu or freerdp on Arch."
+        exit 1
+    fi
     dest="$(eval echo {{dest}})"
     work="$(mktemp -d)"
     trap 'rm -rf "$work"' EXIT
     echo "Downloading FreeRDP 3 packages ..."
     ( cd "$work" && dnf download --quiet freerdp-devel freerdp-libs libwinpr libwinpr-devel \
         sso-mib-libs uriparser )
+    shopt -s nullglob
+    rpms=( "$work"/*"$(uname -m)".rpm )
+    if [ "${#rpms[@]}" -eq 0 ]; then
+        echo "dnf downloaded no packages for $(uname -m)." >&2
+        exit 1
+    fi
     mkdir -p "$dest"
-    for r in "$work"/*x86_64.rpm; do
+    for r in "${rpms[@]}"; do
         ( cd "$dest" && rpm2cpio "$r" | cpio -idm --quiet )
     done
     echo
@@ -155,6 +207,20 @@ rdp-live:
     cargo test -p cabin-freerdp-sys --test live_connect -- --ignored --nocapture
     cargo test -p cabin-rdp --test live_session -- --ignored --nocapture --test-threads=1
     cargo test -p cabin-rdp --test live_input -- --ignored --nocapture --test-threads=1
+
+# Run every live Podman test. Each binary runs on its own, because they share
+# the host Podman and the guest image.
+podman-live:
+    cargo test -p cabin-podman --test live_podman -- --ignored --test-threads=1
+    cargo test -p cabin-podman --test live_recreate -- --ignored --test-threads=1
+    cargo test -p cabin-podman --test live_overlay -- --ignored --test-threads=1
+    cargo test -p cabin-podman --test live_selinux -- --ignored --test-threads=1
+    cargo test -p cabin-podman --test live_session_health -- --ignored --test-threads=1
+
+# Run the live guest image tests. This rebuilds {{guest_image}} and takes
+# several minutes, so it is apart from podman-live.
+guest-image-live:
+    cargo test -p cabin-podman --test live_images -- --ignored --test-threads=1
 
 # Check the host for everything Cabin needs. Changes nothing.
 doctor:

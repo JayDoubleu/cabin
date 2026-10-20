@@ -67,8 +67,8 @@ About 1.6 GB. It holds Fedora, GNOME, and `gnome-remote-desktop`.
 ### The Flatpak runtime
 
 ```sh
-flatpak install flathub org.gnome.Platform//50 org.gnome.Sdk//50
-flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//25.08
+flatpak install flathub org.gnome.Platform//51 org.gnome.Sdk//51
+flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//26.08
 ```
 
 The Flatpak bundles FreeRDP itself, so nothing else is needed to build or run

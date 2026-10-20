@@ -50,8 +50,17 @@ else
     fixup "sudo sysctl -w fs.inotify.max_user_instances=1024"
 fi
 
-if host grep -rqs "max_user_instances" /etc/sysctl.conf /etc/sysctl.d/ 2>/dev/null; then
-    ok "the inotify limit is set permanently"
+# A mention of the key is not enough: the line can be a comment, the value can
+# be too low, or a later file can set it again. systemd-analyze prints the
+# files in the order systemd-sysctl applies them, so the last assignment wins.
+persistent=$(host systemd-analyze cat-config sysctl.d 2>/dev/null \
+    | awk -F= '/^[[:space:]]*[#;]/ { next }
+        $1 ~ /^[[:space:]]*-?fs[.\/]inotify[.\/]max_user_instances[[:space:]]*$/ {
+            gsub(/[[:space:]]/, "", $2); value = $2
+        }
+        END { print value }')
+if [[ "${persistent}" =~ ^[0-9]+$ ]] && [ "${persistent}" -ge 512 ]; then
+    ok "the inotify limit is set permanently to ${persistent}"
 else
     note "the inotify limit will reset when you restart"
     fixup "echo fs.inotify.max_user_instances=1024 | sudo tee /etc/sysctl.d/99-cabin.conf"
@@ -70,17 +79,17 @@ else
 fi
 
 printf '\nFlatpak\n'
-if host flatpak info org.gnome.Platform//50 >/dev/null 2>&1; then
-    ok "the GNOME 50 runtime is installed"
+if host flatpak info org.gnome.Platform//51 >/dev/null 2>&1; then
+    ok "the GNOME 51 runtime is installed"
 else
-    bad "the GNOME 50 runtime is missing"
-    fixup "flatpak install flathub org.gnome.Platform//50 org.gnome.Sdk//50"
+    bad "the GNOME 51 runtime is missing"
+    fixup "flatpak install flathub org.gnome.Platform//51 org.gnome.Sdk//51"
 fi
-if host flatpak info org.freedesktop.Sdk.Extension.rust-stable//25.08 >/dev/null 2>&1; then
+if host flatpak info org.freedesktop.Sdk.Extension.rust-stable//26.08 >/dev/null 2>&1; then
     ok "the Rust SDK extension is installed"
 else
     note "the Rust SDK extension is missing, needed only to build the Flatpak"
-    fixup "flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//25.08"
+    fixup "flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//26.08"
 fi
 
 printf '\nBuilding natively\n'
