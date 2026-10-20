@@ -112,6 +112,8 @@ modules:
           - target
           - _build
           - _flatpak
+          # The build directory of the CI flatpak-builder action.
+          - flatpak_app
           - .flatpak-builder
           - build
           - repo
