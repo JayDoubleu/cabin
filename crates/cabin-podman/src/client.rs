@@ -576,7 +576,12 @@ impl Podman {
     /// remove a volume that a container still uses. Without this a new
     /// desktop with the same name would silently inherit the old files and
     /// the old certificate.
-    pub async fn delete_desktop(&self, id: &str, name: &str) -> Result<()> {
+    ///
+    /// `config_name` is the name in the desktop's configuration, which named
+    /// the volumes when the desktop was created. It is not always the
+    /// container's name: a container renamed outside Cabin keeps its old
+    /// volumes, and a delete by the new name would miss them and say nothing.
+    pub async fn delete_desktop(&self, id: &str, config_name: &str) -> Result<()> {
         // A container that is already gone is not an error, so a delete
         // that stopped part way can run again and finish.
         match self.remove(id, true).await {
@@ -586,8 +591,8 @@ impl Podman {
         let mut left = Vec::new();
         let mut messages = Vec::new();
         for volume in [
-            cabin_core::home_volume_name(name),
-            cabin_core::state_volume_name(name),
+            cabin_core::home_volume_name(config_name),
+            cabin_core::state_volume_name(config_name),
         ] {
             if let Err(e) = self.remove_volume(&volume).await {
                 messages.push(e.to_string());

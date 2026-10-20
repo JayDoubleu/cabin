@@ -590,11 +590,15 @@ impl Sidebar {
             }
             let podman = sidebar.podman.clone();
             let id = desktop.id.clone();
+            // The pins are kept by the listed name. The volumes were named
+            // from the configuration, and the two differ for a container
+            // renamed outside Cabin.
             let name = desktop.name.clone();
+            let config_name = desktop.config.name.clone();
             let sidebar = sidebar.clone();
             runtime::spawn(
                 async move {
-                    let result = podman.delete_desktop(&id, &name).await;
+                    let result = podman.delete_desktop(&id, &config_name).await;
                     (name, result)
                 },
                 move |(name, result)| {
