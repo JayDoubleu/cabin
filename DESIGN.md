@@ -2667,8 +2667,10 @@ on the host. The parts are these:
   because it builds them from the mount point of the document portal. Cabin
   knew only `/run/user/UID/doc` and `/run/flatpak/doc`, so it took such a
   path for a real one and gave it to Podman. Cabin now also asks the
-  document portal for its mount point (`GetMountPoint`), and turns those
-  paths back into real ones too.
+  document portal for its mount point (`GetMountPoint`) and reads every
+  `fuse.portal` mount from `/proc/self/mountinfo`, and turns those paths
+  back into real ones too. The mount table works when the portal does not
+  answer.
 - gvfsd starts `wsdd` for network discovery, and `wsdd` outlives the session
   bus. Each session left one behind. `session.sh` stops it at the end.
 
@@ -2684,7 +2686,8 @@ Each of these is fixed, and the test checks it:
    A desktop now carries its start time, and a later start time counts as a
    start (rule 46).
 3. The guest ran in UTC, so its clock showed a different hour from the host.
-   The create request now sets `timezone` to `local` (rule 45).
+   The create request now sets `timezone` to `local` (rule 45), when the
+   host has `/etc/localtime`.
 4. Every new desktop showed "Screen Lock disabled" on its first start. GNOME
    Shell shows that once per home folder when no display manager runs.
    `start-shell.sh` marks it as shown.

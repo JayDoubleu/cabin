@@ -145,6 +145,38 @@ def volumes(prefix):
     return sorted(v for v in out.split() if v.startswith(prefix))
 
 
+# The label that Cabin puts on every desktop it makes.
+MANAGED = "io.github.jaydoubleu.cabin.managed=true"
+
+
+def managed_containers():
+    """The names of every Cabin desktop on the host, test or not."""
+    out = podman(
+        "ps", "--all", "--filter", f"label={MANAGED}", "--format", "{{.Names}}"
+    )
+    return set(out.split())
+
+
+def strays(before, expected):
+    """The Cabin desktops that are new since before and not expected.
+
+    A desktop made under a name the script did not choose matches neither
+    the proxy filter nor the cleanup list, so it would stay on the host.
+    The scripts report these and do not remove them: a desktop that the
+    user made while the script ran would look the same.
+    """
+    return sorted(managed_containers() - set(before) - set(expected))
+
+
+def stray_message(names):
+    volumes = " ".join(f"cabin-{n}-home cabin-{n}-state" for n in names)
+    return (
+        f"These Cabin desktops are new and are not test desktops: {names}. "
+        f"If the script made them, remove them with: podman rm -f {' '.join(names)}"
+        f" && podman volume rm {volumes}"
+    )
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Runs in the sandbox. Starts the proxy where Cabin looks for Podman, waits for
@@ -359,6 +391,27 @@ class Ui:
         cannot aim typed keys at an entry in an alert dialogue.
         """
         node.get_editable_text_iface().set_text_contents(text)
+
+    def get_text(self, node):
+        """The whole text of an entry."""
+        # The Accessible is its own text interface, and its own get_text()
+        # method hides the one of Atspi.Text.
+        return Atspi.Text.get_text(node, 0, -1)
+
+    def name_new_desktop(self, name):
+        """Types name into the New Desktop dialogue and checks it took.
+
+        If set_text() misses, Cabin creates the desktop under its own free
+        name, which no cleanup list holds. So read the entry back, and press
+        Cancel and fail when it does not hold the name.
+        """
+        entry = self.find("Name", "text")
+        self.set_text(entry, name)
+        time.sleep(0.5)
+        got = self.get_text(entry)
+        if got != name:
+            self.activate(self.find("Cancel", "button"))
+            raise RuntimeError(f"the Name entry holds {got!r}, not {name!r}")
 
     def click_named(self, name, role=None, contains=False, timeout=10):
         node = self.find(name, role, contains, timeout)

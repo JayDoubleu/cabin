@@ -244,15 +244,18 @@ crate: that also runs `make_demo`, which replaces any container called
     chooser returns a path under `/run/user/<uid>/doc/`, and the desktop's
     user cannot read it. Turn it back into the real host path, or refuse the
     share. Do not widen the sandbox instead (rule 6). The portal can mount
-    somewhere else, so also ask it with `GetMountPoint`. A fixed list of
-    roots let such a path through to Podman.
+    somewhere else, so also ask it with `GetMountPoint`, and also treat
+    every `fuse.portal` mount in `/proc/self/mountinfo` as a root. The mount
+    table still works when the portal does not answer. A fixed list of roots
+    let such a path through to Podman.
 44. **The display inhibits the host shortcuts while it has the focus.**
     Without that, Super opens the overview of the host and of the guest
     together, and Alt+Tab leaves the window. Restore them when the focus
     leaves, so the sidebar and the dialogues keep the usual shortcuts.
 45. **A desktop keeps the time zone of the host.** The create request sets
     `timezone` to `local`. Without it the guest runs in UTC and its clock
-    shows another hour.
+    shows another hour. Leave the field out when `/etc/localtime` is
+    missing: Podman then refuses to start the container at all.
 46. **A desktop's start time, not only its state, shows a restart.** Podman
     can send a stop and the next start in one batch of events, so every list
     says "running". After a refused recreate the viewer then stayed on
@@ -268,7 +271,11 @@ crate: that also runs `make_demo`, which replaces any container called
     `podman-proxy.py` hides every desktop whose name does not start with
     `e2e-` or `shot-`. Name every test desktop that way. The screenshot
     script is the exception: it passes its own demo names to the proxy, and
-    stops if a desktop with one of those names exists.
+    stops if a desktop with one of those names exists. Read the Name entry
+    back before Create: if the text did not take, Cabin uses its own free
+    name, which no cleanup list holds. Both scripts report a new desktop
+    that is not a test desktop. A test that makes a desktop deletes it
+    before its assert, so a failure does not leave it running.
 49. **A desktop's host name is its name.** The create request sets
     `hostname`. Without it the guest takes the container ID, and the prompt
     and window titles in the guest change with every recreate.

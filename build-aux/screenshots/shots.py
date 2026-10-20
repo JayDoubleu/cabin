@@ -90,8 +90,8 @@ def create_desktop(name):
     time.sleep(1.5)
     # The alert dialogue reports its widgets away from where it draws them,
     # so its entry and buttons go through the accessibility actions.
-    ui.set_text(ui.find("Name", "text"), name)
-    time.sleep(1)
+    ui.name_new_desktop(name)
+    time.sleep(0.5)
     ui.activate(ui.find("Create", "button"))
     drive.wait_for(lambda: drive.inspect(name), 30, what=f"{name} to exist")
     time.sleep(1.5)
@@ -180,6 +180,11 @@ def settings_scene(name):
 
 
 def images_scene():
+    # Behind a running desktop the guest shows a hover effect and a tooltip
+    # where the pointer was left. A stopped desktop shows a plain pane, and
+    # this dialogue is wide enough to hide the placeholder title.
+    ui.click_named(STOPPED[0], "label")
+    time.sleep(1.5)
     ui.activate(ui.find("Main menu", "toggle button"))
     time.sleep(1)
     ui.activate(ui.find("Guest Images", "button"))
@@ -217,6 +222,7 @@ def main():
             f"These exist already and may be yours: {taken + volumes}. "
             "Remove them or choose other names."
         )
+    before = drive.managed_containers()
     shell.call("HideOverview")
     names = [f"^{re.escape(name)}$" for name in DEMO]
     app = drive.launch(os.path.join(WORK, "app.log"), names, hide_dangling=True)
@@ -239,7 +245,10 @@ def main():
         ui.activate(ui.find("Cancel", "button"))
         time.sleep(1)
 
-        settings_scene(STOPPED[0])
+        # The running desktop, so that its frame is behind the dialogue. Behind
+        # a stopped one the viewer shows its placeholder title, and the end of
+        # that title shows beside the dialogue as a stray letter.
+        settings_scene(RUNNING)
         keep("settings")
         escape()
 
@@ -251,6 +260,9 @@ def main():
         app.terminate()
         time.sleep(2)
         cleanup()
+        left = drive.strays(before, DEMO)
+        if left:
+            sys.exit(drive.stray_message(left))
 
 
 if __name__ == "__main__":

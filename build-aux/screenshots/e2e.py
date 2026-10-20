@@ -21,6 +21,10 @@ import drive
 OUT = sys.argv[1]
 ONE = "e2e-one"
 TWO = "e2e-two"
+# Only these volumes are removed at the end. A wider match such as every
+# "cabin-e2e-" volume would also take the volumes of a user's own desktop
+# whose name starts with "e2e-".
+VOLUMES = [f"cabin-{name}-{kind}" for name in (ONE, TWO) for kind in ("home", "state")]
 shell = drive.Shell()
 ui = drive.Ui(shell)
 results = []
@@ -111,8 +115,7 @@ def create_desktop(name):
     time.sleep(1.5)
     # The alert dialogue reports its widgets away from where it draws them,
     # so its entry and buttons go through the accessibility actions.
-    ui.set_text(ui.find("Name", "text"), name)
-    time.sleep(0.5)
+    ui.name_new_desktop(name)
     shot(f"new-{name}")
     ui.activate(ui.find("Create", "button"))
     drive.wait_for(lambda: drive.inspect(name), 30, what=f"{name} to exist")
@@ -197,15 +200,22 @@ def step_input():
     shot("guest-search")
     shell.key("Return")
     time.sleep(4)
-    shell.type("clear; date; cat -v\n")
+    # cat -v writes each key as text, so the bytes the guest received can
+    # be read back from the file. Console only opens if Super opened the
+    # guest's overview, so the file also shows that Super reached the guest.
+    guest(ONE, "rm", "-f", KEYS_FILE)
+    shell.type(f"clear; cat -v > {KEYS_FILE}\n")
     time.sleep(1)
-    for key in ("F11", "F12", "Home", "Page_Up"):
+    for key in ("F11", "F12", "Home", "Page_Up", "shift+backslash"):
         shell.key(key)
         time.sleep(0.2)
     shell.key("Return")
     time.sleep(1)
     shot("raw-keys")
-    shell.key("ctrl+c")
+    # End of input, so cat writes everything and exits.
+    shell.key("ctrl+d")
+    time.sleep(1)
+    received = guest(ONE, "sh", "-c", f"cat {KEYS_FILE} 2>/dev/null")
     shell.type("seq 1 200\n")
     time.sleep(1)
     shell.scroll(cx, cy, "up", 5)
@@ -216,15 +226,22 @@ def step_input():
         ["date", "+%z"], capture_output=True, text=True
     ).stdout.strip()
     check(
-        "3. Super reaches the guest, not the host",
-        not host_overview,
-        f"host overview after Super: {host_overview}; see the super-key and raw-keys shots",
+        "3. Super and the raw keys reach the guest, not the host",
+        not host_overview and received == EXPECTED_KEYS,
+        f"host overview after Super: {host_overview}; the guest received "
+        f"{received!r}, expected {EXPECTED_KEYS!r}",
     )
     check(
         "3b. the guest uses the host time zone",
         zone_guest == zone_host,
         f"guest {zone_guest}, host {zone_host}",
     )
+
+
+# Where the guest's terminal writes the keys it receives.
+KEYS_FILE = "/tmp/e2e-keys"
+# What cat -v writes for F11, F12, Home, Page Up and Shift+backslash.
+EXPECTED_KEYS = "^[[23~^[[24~^[[H^[[5~|"
 
 
 def step_resize():
@@ -376,7 +393,7 @@ def step_delete():
         delete_desktop(name)
     shot("deleted")
     left = [n for n in (ONE, TWO) if drive.inspect(n)]
-    volumes = drive.volumes("cabin-e2e-")
+    volumes = [v for v in VOLUMES if v in drive.volumes("cabin-")]
     check(
         "8. delete removes the containers and both volumes",
         not left and not volumes,
@@ -421,14 +438,20 @@ def cleanup():
     for name in (ONE, TWO):
         if drive.inspect(name):
             drive.podman("rm", "--force", name, check=False)
-    for volume in drive.volumes("cabin-e2e-"):
-        drive.podman("volume", "rm", volume, check=False)
+    present = drive.volumes("cabin-")
+    for volume in VOLUMES:
+        if volume in present:
+            drive.podman("volume", "rm", volume, check=False)
 
 
 def main():
     os.makedirs(OUT, exist_ok=True)
-    if drive.inspect(ONE) or drive.inspect(TWO):
-        sys.exit(f"{ONE} or {TWO} exists already. Delete it first.")
+    taken = [name for name in (ONE, TWO) if drive.inspect(name)]
+    present = drive.volumes("cabin-")
+    taken += [v for v in VOLUMES if v in present]
+    if taken:
+        sys.exit(f"These exist already and may be yours: {taken}. Remove them first.")
+    before = drive.managed_containers()
     shell.call("HideOverview")
     app = step_start()
     steps = [
@@ -467,6 +490,12 @@ def main():
         )
         app.terminate()
         cleanup()
+        left = drive.strays(before, (ONE, TWO))
+        check(
+            "no desktop is left under a name the test did not choose",
+            not left,
+            drive.stray_message(left) if left else "none",
+        )
         with open(os.path.join(OUT, "results.json"), "w") as f:
             json.dump(results, f, indent=2)
     sys.exit(0 if all(r["passed"] for r in results) else 1)
