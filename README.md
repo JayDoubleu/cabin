@@ -5,20 +5,40 @@ window.
 
 Each desktop behaves like a small virtual machine. It has its own process tree,
 its own filesystem, its own network stack, and its own GNOME session. It starts
-in under a second, because it is a container and not a virtual machine.
+in a few seconds, because it is a rootless Podman container and not a virtual
+machine.
 
 Connect from this computer through the application window, or from a phone,
-tablet, or another computer with any standard RDP client.
+tablet, or another computer with a standard RDP client that has clipboard
+sharing turned off. [Connecting from another device](#connecting-from-another-device)
+explains why the clipboard matters.
 
-> **Status: usable, not finished.** A desktop starts, renders in the window,
-> and takes keyboard and pointer input. The window can be resized and the guest
-> follows. Desktops can be created, configured, shared with folders, reached
-> from other devices, and deleted.
->
-> Not done: clipboard sharing, which is blocked by a fault in
-> `gnome-remote-desktop`, and audio. Section 15.20 of [DESIGN.md](DESIGN.md)
-> lists everything outstanding, including the gaps between what this document
-> claims and what the code does.
+<!-- Screenshots: a later stage adds them here. Suggested set: the sidebar
+     with a running desktop, the settings dialogue, and Guest Images. -->
+> **Screenshots are coming.**
+
+## Status
+
+**Version 0.1.0. Usable, not finished.** A desktop starts, renders in the
+window, and takes keyboard and pointer input. The window can be resized and
+the guest follows. Desktops can be created, configured, given shared folders,
+reached from other devices, and deleted.
+
+These are not done:
+
+- **Clipboard sharing.** A fault in `gnome-remote-desktop` blocks it. See
+  [DESIGN.md section 15.2](DESIGN.md#152-correction-the-fuse-clipboard-crash-is-not-fixed-by-devfuse).
+- **Audio.**
+- **HiDPI scaling.** On a scaled display the desktop is drawn at the lower
+  resolution and scaled up.
+- **Password storage in the keyring.** Each desktop has its own generated
+  password, but Cabin keeps it in the container's environment, where
+  `podman inspect` shows it. The plan is the Secret portal.
+- **Containers inside a desktop.** Nested Podman does not work yet, so it is
+  not offered. A desktop can use the host's Podman or Docker instead, with a
+  clear warning.
+
+Section 15.20 of [DESIGN.md](DESIGN.md) lists everything outstanding.
 
 ## How it works
 
@@ -34,36 +54,58 @@ Cabin (Flatpak, GTK4)  ──control──►  Podman REST socket
 Two channels, kept independent. If Cabin exits, the desktops keep running and
 other devices can still reach them.
 
+Cabin keeps no database. A desktop's settings live in its container's labels,
+so `podman ps` always shows the truth.
+
+## Install
+
+A Flatpak repository is coming. Until then, build Cabin from source as
+described in [Build](#build).
+
 ## Requirements
 
 Run `just doctor` to check everything below at once. It changes nothing.
 [docs/HOST-SETUP.md](docs/HOST-SETUP.md) explains each item and why it is
 there.
 
-- Fedora, or another Linux with Podman 5 and Flatpak.
+### To run
+
+- Linux with Podman 5 and Flatpak. Cabin is developed and tested on Fedora.
 - The Podman user socket:
   ```sh
   systemctl --user enable --now podman.socket
   ```
-- The GNOME 51 runtime and SDK, plus the Rust extension:
+- A raised inotify limit if you want more than a few desktops at once. See
+  [Running several desktops at once](#running-several-desktops-at-once).
+
+### To build
+
+- [`just`](https://github.com/casey/just).
+- For the Flatpak: `flatpak-builder`, and the GNOME 51 runtime and SDK with
+  the Rust extension:
   ```sh
   flatpak install flathub org.gnome.Platform//51 org.gnome.Sdk//51 \
       org.freedesktop.Sdk.Extension.rust-stable//26.08
   ```
+- For a native build: Rust 1.85 or later, a C compiler, the GTK 4 and
+  libadwaita development packages, and FreeRDP 3. The
+  [native build list](docs/HOST-SETUP.md#a-native-build) gives the Fedora
+  packages.
 
 ## Build
 
-The repository uses [`just`](https://github.com/casey/just).
-
 ```sh
-just guest      # build the guest desktop image (about 1.6 GB)
 just flatpak    # build and install the application
 just flatpak-run
 ```
 
 The Flatpak bundles FreeRDP, so it needs nothing installed on the host beyond
-the runtime. A native build does need FreeRDP 3. If `freerdp-devel` is not
-installed, run `just freerdp-sysroot`, which builds a local one without root.
+the runtime.
+
+On first use, open Guest Images from the main menu and build the guest image.
+Cabin builds it on your computer and never pulls it from a registry. The first
+build takes several minutes. You can also build it from a terminal with
+`just guest`.
 
 For faster iteration, build natively instead:
 
@@ -73,9 +115,15 @@ just run
 just test
 ```
 
+A native build needs FreeRDP 3. On Fedora, install `freerdp-devel`, or run
+`just freerdp-sysroot`, which makes a local copy without root. That recipe
+uses `dnf`, so it works on Fedora only. On another distribution, install its
+FreeRDP 3 development package, for example `freerdp3-dev` on Debian and
+Ubuntu.
+
 ## Try the guest on its own
 
-The guest needs no application to be useful. Start one and connect with any RDP
+The guest needs no application to be useful. Start one and connect with an RDP
 client:
 
 ```sh
@@ -85,13 +133,28 @@ just guest-probe     # confirms the RDP protocol really answers
 ```
 
 Then connect to `127.0.0.1:13389` as user `cabin` with the password you passed
-to `just guest-test`, which defaults to `testpass`.
-
-Any client works: GNOME Connections, Remmina, FreeRDP, Windows Remote Desktop,
-or the Microsoft Remote Desktop app on iOS and Android.
+to `just guest-test`, which defaults to `testpass`. Turn clipboard sharing off
+in the client first, as the next section explains.
 
 The certificate is self-signed and generated per container, so the client warns
 on first connect.
+
+## Connecting from another device
+
+GNOME Connections, Remmina, FreeRDP, Windows Remote Desktop and the Microsoft
+Remote Desktop app on iOS and Android can all connect, with one condition:
+
+**Turn clipboard sharing off in the client before you connect.** If a client
+offers the clipboard channel, `gnome-remote-desktop` in the guest tries to
+mount a FUSE filesystem, which a rootless container cannot do, and the daemon
+aborts. Remmina, GNOME Connections and Windows Remote Desktop offer the
+clipboard by default. With FreeRDP, pass `-clipboard`. DESIGN.md section 15.2
+has the detail.
+
+Each desktop's menu has "Connect from another device". It shows the address,
+port, username and password, and the fingerprint of the desktop's certificate
+once Cabin has connected to it. Compare that fingerprint with the one your
+client shows before you accept the certificate.
 
 ## Running several desktops at once
 
@@ -120,19 +183,33 @@ Defaults are conservative:
 - Containers run rootless.
 - The RDP port binds to `127.0.0.1`. Reaching a desktop from another device is
   opt-in, per desktop.
-- RDP always runs over TLS, and the credentials are per desktop.
+- RDP always runs over TLS with NLA, and each desktop has its own generated
+  password and certificate. Cabin pins the certificate on first connect.
 - No container runtime socket is exposed.
+
+Know these limits:
+
+- **Root in a desktop is your user account.** Rootless Podman maps the guest's
+  root to your own user ID, and the desktop user has `sudo` with no password.
+  So anything in a desktop can change a shared folder that is writable, as
+  you. Share read-only where you can.
+- **The password is visible to your other programs.** Any program that runs
+  as you can read it with `podman inspect`.
 
 ### Reaching a desktop from another device
 
 Turning remote access on asks which networks, not just whether. You can name
-the interfaces to listen on, and Cabin publishes the port on those addresses
-only. Loopback is always included.
+the interfaces to listen on, and Cabin publishes the port on the IPv4 and
+unique-local IPv6 addresses of those interfaces only. Loopback is always
+included. Cabin stores the names, not the addresses, and looks the addresses
+up again each time the desktop starts.
 
 This matters on a laptop. Choosing a VPN interface such as `tailscale0` gives a
 desktop that your own devices can reach from anywhere and that nobody in a cafe
-can reach. Listening on every network is still offered, and it warns that the
-desktop will then accept connections on public Wi-Fi as well.
+can reach. Chosen networks never use a global IPv6 address, because that can
+be reachable from the whole internet. Listening on every network is still
+offered, and it warns that the desktop will then accept connections on public
+Wi-Fi as well, on IPv4 and IPv6.
 
 ### Container runtime access
 
@@ -146,11 +223,48 @@ host. Running Podman inside the desktop would be the safe alternative, and it
 does not work yet, so it is not offered. DESIGN.md section 15.17 records how
 far it got.
 
+### Shared files and folders
+
+A desktop can be given host folders and single files. Both are Podman bind
+mounts, so read-only is enforced by the kernel and behaves the same however you
+connect. You choose where each one appears inside the desktop.
+
+**Relabelling changes your files' SELinux label for good.** Fedora denies a
+container access to your files unless they are relabelled, so the relabel
+switch is on by default. The new label stays after the desktop is deleted.
+Do not relabel a folder that other programs read, such as `~/.ssh`. Cabin
+warns when you pick one. To restore the default label, run
+`restorecon -R <path>`.
+
+Sharing a single file has one catch worth knowing. The mount follows the file
+itself, and most editors replace a file rather than change it, so edits made on
+this computer can stop reaching the desktop. Share the folder when you plan to
+edit.
+
+The application itself asks for very little. It does **not** request
+`--filesystem=home`, and it does **not** request `org.freedesktop.Flatpak`.
+Host directories reach a desktop through the file chooser portal. You pick a
+directory, Cabin asks the portal for its real path on the host, and passes only
+that path to Podman. If the portal cannot give a real path, Cabin refuses the
+share.
+
+### Deleting a desktop
+
+Delete removes the container, the desktop's home volume and its state volume,
+which holds the certificate. Nothing saved inside the desktop survives, and
+Cabin asks first. Changing a setting is different: Cabin recreates the
+container and keeps both volumes, so your files survive. If Podman refuses the
+new settings, the old desktop stays as it was.
+
+## Using Cabin
+
 ### The guest image
 
 A desktop runs from an image Cabin builds on your machine, from
-`guest/Containerfile`, on top of the official Fedora container base. Nothing is
-downloaded from anywhere else, and nothing is published.
+`guest/Containerfile`, on top of the official Fedora container base. The build
+also fetches the Flathub repository file from `dl.flathub.org`, so that the
+Software store in each desktop can install applications from Flathub. Nothing
+else is downloaded, and nothing is published.
 
 Build it from the main menu, under Guest Images, or with `just guest`. The
 first build takes several minutes.
@@ -229,22 +343,16 @@ podman exec -it -u cabin -w /home/cabin <desktop> bash
 Cabin shows the command rather than running it, because launching a terminal on
 your computer would need a permission it deliberately does not ask for.
 
-### Shared files and folders
+## Contributing
 
-A desktop can be given host folders and single files. Both are Podman bind
-mounts, so read-only is enforced by the kernel and behaves the same however you
-connect. You choose where each one appears inside the desktop.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) first. [DESIGN.md](DESIGN.md) explains
+how Cabin works and records why it works that way.
 
-Sharing a single file has one catch worth knowing. The mount follows the file
-itself, and most editors replace a file rather than change it, so edits made on
-this computer can stop reaching the desktop. Share the folder when you plan to
-edit.
+## Reporting a vulnerability
 
-The application itself asks for very little. It does **not** request
-`--filesystem=home`, and it does **not** request `org.freedesktop.Flatpak`.
-Host directories reach a desktop through the file chooser portal: you pick a
-directory, and Cabin passes only that path to Podman.
+Do not open a public issue. [SECURITY.md](SECURITY.md) says how to report one
+privately.
 
 ## Licence
 
-GPL-3.0-or-later.
+GPL-3.0-or-later. See [COPYING](COPYING).
