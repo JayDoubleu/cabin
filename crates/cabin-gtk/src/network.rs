@@ -109,12 +109,10 @@ fn read_address(addr: *const libc::sockaddr, unstable: &HashSet<Ipv6Addr>) -> Op
     }
 }
 
-/// True for an IPv6 address that stays inside the networks it belongs to.
-///
-/// Written out rather than calling `Ipv6Addr::is_unique_local`, which needs a
-/// newer compiler than the minimum this workspace supports.
+/// True for an IPv6 address that stays inside the networks it belongs to:
+/// a unique-local address, fc00::/7.
 fn publishable_v6(address: &Ipv6Addr) -> bool {
-    address.segments()[0] & 0xfe00 == 0xfc00
+    address.is_unique_local()
 }
 
 /// The IPv6 addresses that the kernel marks temporary or deprecated.
@@ -193,10 +191,10 @@ mod tests {
     #[test]
     fn temporary_and_deprecated_addresses_are_found() {
         let table = "\
-fd7a115ca1e00000000000001c33ab45 04 80 00 80 tailscale0
+fd7a115ca1e000000000000000000001 04 80 00 80 tailscale0
 fd000000000000000000000000000001 02 40 00 01 eth0
 fd000000000000000000000000000002 02 40 00 20 eth0
-fe80000000000000b06441fffe280ae1 0b 40 20 80 veth0
+fe800000000000000000000000000001 0b 40 20 80 veth0
 ";
         let unstable = unstable_v6(table);
         assert_eq!(unstable.len(), 2);
