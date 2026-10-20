@@ -63,11 +63,70 @@ const UNRESOLVED_SHARE: &str =
 
 /// The places where the document portal shows files to a sandboxed
 /// application.
+///
+/// These are the fixed roots and every mount of the portal's own file
+/// system type in `/proc/self/mountinfo`. The mount table is the check
+/// that does not depend on the portal answering on the bus.
 fn document_roots() -> Vec<std::path::PathBuf> {
-    vec![
+    let mut roots = vec![
         gtk::glib::user_runtime_dir().join("doc"),
         std::path::PathBuf::from("/run/flatpak/doc"),
-    ]
+    ];
+    if let Ok(table) = std::fs::read_to_string("/proc/self/mountinfo") {
+        for mount_point in portal_mounts(&table) {
+            if !roots.contains(&mount_point) {
+                roots.push(mount_point);
+            }
+        }
+    }
+    roots
+}
+
+/// The file system type of the document portal's FUSE mount.
+const PORTAL_FS_TYPE: &str = "fuse.portal";
+
+/// The mount points in a mount table whose file system is the portal's.
+///
+/// Each line of `mountinfo` has the mount point as its fifth field, then
+/// optional fields, a lone `-`, and the file system type. The kernel writes
+/// a space in a path as `\040`.
+fn portal_mounts(mountinfo: &str) -> Vec<std::path::PathBuf> {
+    mountinfo
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(' ').collect();
+            let mount_point = fields.get(4)?;
+            let separator = fields.iter().position(|f| *f == "-")?;
+            let fs_type = fields.get(separator + 1)?;
+            (*fs_type == PORTAL_FS_TYPE)
+                .then(|| std::path::PathBuf::from(unescape_mountinfo(mount_point)))
+        })
+        .collect()
+}
+
+/// Decodes the octal escapes that the kernel writes in `mountinfo`.
+fn unescape_mountinfo(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 3 < bytes.len() {
+            let digits = &bytes[i + 1..i + 4];
+            if digits.iter().all(|d| (b'0'..=b'7').contains(d)) {
+                let value = digits
+                    .iter()
+                    .fold(0u32, |acc, d| acc * 8 + u32::from(d - b'0'));
+                if let Ok(value) = u8::try_from(value) {
+                    out.push(value);
+                    i += 4;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The fixed roots, and the mount point that the portal itself reports.
@@ -103,7 +162,13 @@ async fn document_mount_point() -> Option<std::path::PathBuf> {
         )
         .await
         .ok()?;
-    let (mut bytes,): (Vec<u8>,) = reply.get()?;
+    let (bytes,): (Vec<u8>,) = reply.get()?;
+    parse_mount_point(bytes)
+}
+
+/// Turns the byte string of `GetMountPoint` into a path. Only an absolute
+/// path is a usable root.
+fn parse_mount_point(mut bytes: Vec<u8>) -> Option<std::path::PathBuf> {
     // A GLib byte string ends with a NUL.
     while bytes.last() == Some(&0) {
         bytes.pop();
@@ -1704,6 +1769,47 @@ mod tests {
         // Only a whole component matches.
         assert_eq!(display_path("/home/username/x", home), "/home/username/x");
         assert_eq!(display_path("/srv/data", home), "/srv/data");
+    }
+
+    #[test]
+    fn the_portal_mount_point_loses_its_nul_and_must_be_absolute() {
+        assert_eq!(
+            parse_mount_point(b"/run/user/1000/doc\0".to_vec()),
+            Some(PathBuf::from("/run/user/1000/doc"))
+        );
+        assert_eq!(
+            parse_mount_point(b"/tmp/session/doc".to_vec()),
+            Some(PathBuf::from("/tmp/session/doc"))
+        );
+        assert_eq!(parse_mount_point(b"doc\0".to_vec()), None);
+        assert_eq!(parse_mount_point(b"\0".to_vec()), None);
+        assert_eq!(parse_mount_point(Vec::new()), None);
+    }
+
+    #[test]
+    fn the_mount_table_names_every_portal_mount() {
+        let table = "\
+22 1 0:21 / /proc rw,nosuid shared:12 - proc proc rw
+85 30 0:45 / /run/user/1000/doc rw,nosuid,nodev shared:44 - fuse.portal portal rw,user_id=1000
+86 30 0:46 / /tmp/e2e\\040run/doc rw master:3 - fuse.portal portal rw
+87 30 0:47 / /run/user/1000/gvfs rw - fuse.gvfsd-fuse gvfsd-fuse rw
+";
+        assert_eq!(
+            portal_mounts(table),
+            vec![
+                PathBuf::from("/run/user/1000/doc"),
+                PathBuf::from("/tmp/e2e run/doc"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_path_under_a_portal_mount_from_the_table_is_a_portal_path() {
+        let table = "86 30 0:46 / /tmp/private/doc rw - fuse.portal portal rw\n";
+        let roots = portal_mounts(table);
+        let (id, _) = split_document_path(Path::new("/tmp/private/doc/abc/Projects"), &roots)
+            .expect("a path under a portal mount is a document");
+        assert_eq!(id, "abc");
     }
 
     #[test]
