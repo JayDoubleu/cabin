@@ -113,14 +113,12 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         .bidirectional()
         .sync_create()
         .build();
-    let toggle_for_tooltip = viewer.sidebar_toggle.clone();
     viewer.sidebar_toggle.connect_active_notify(move |button| {
         button.set_tooltip_text(Some(if button.is_active() {
             "Hide the desktop list"
         } else {
             "Show the desktop list"
         }));
-        let _ = &toggle_for_tooltip;
     });
     viewer.sidebar_toggle.set_active(state.sidebar_visible());
 
@@ -209,12 +207,45 @@ fn build_main_menu(
     });
     box_.append(&images);
 
+    let about = gtk::Button::builder()
+        .child(
+            &adw::ButtonContent::builder()
+                .label("About Cabin")
+                .icon_name("help-about-symbolic")
+                .halign(gtk::Align::Start)
+                .build(),
+        )
+        .css_classes(vec!["flat"])
+        .build();
+    let window_for_about = window.clone();
+    let popover_ref = popover.clone();
+    about.connect_clicked(move |_| {
+        popover_ref.popdown();
+        present_about(&window_for_about);
+    });
+    box_.append(&about);
+
     popover.set_child(Some(&box_));
     gtk::MenuButton::builder()
         .icon_name("open-menu-symbolic")
         .tooltip_text("Main menu")
         .popover(&popover)
         .build()
+}
+
+/// Shows the version, the licence and where to report a problem.
+fn present_about(window: &adw::ApplicationWindow) {
+    let dialog = adw::AboutDialog::builder()
+        .application_name("Cabin")
+        // The application ID, so a development build shows its own icon.
+        .application_icon(crate::APP_ID)
+        .version(env!("CARGO_PKG_VERSION"))
+        .developer_name("Jay W")
+        .license_type(gtk::License::Gpl30)
+        .website("https://github.com/JayDoubleu/cabin")
+        .issue_url("https://github.com/JayDoubleu/cabin/issues")
+        .build();
+    dialog.present(Some(window));
 }
 
 /// Reports a missing Podman socket with the command that fixes it.

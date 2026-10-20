@@ -141,58 +141,64 @@ impl Client {
     ///
     /// The copy is deliberate. The shim's buffer belongs to FreeRDP and is
     /// reused and reallocated as the session runs, so it cannot be handed to
-    /// another thread by reference.
+    /// another thread by reference. The shim does the copy under FreeRDP's
+    /// update lock and never hands out a pointer into that buffer.
     fn framebuffer(&self) -> Option<Frame> {
         let (mut width, mut height, mut stride) = (0u32, 0u32, 0u32);
-        // SAFETY: valid handle and out pointers. Returns null before the first
-        // frame, which is checked.
-        let data =
-            unsafe { sys::cabin_rdp_framebuffer(self.0, &mut width, &mut height, &mut stride) };
-        if data.is_null() || width == 0 || height == 0 {
+        // SAFETY: valid handle and out pointers.
+        let rc = unsafe {
+            sys::cabin_rdp_framebuffer_info(self.0, &mut width, &mut height, &mut stride)
+        };
+        if rc != sys::CABIN_OK || width == 0 || height == 0 {
             return None;
         }
 
         // Check the description before trusting it.
         //
-        // A resize reallocates the primary buffer, and there are moments when
-        // the size and the stride do not agree. A guest that goes from 1920 to
-        // 1152 wide reports width 1152 with the old stride of 7680 still in
-        // place, which describes a buffer half again as large as the one that
-        // exists. Copying on that description reads past the end of the
-        // allocation and aborts the process.
-        //
-        // Real padding aligns a row and is a few bytes. A stride that is
-        // further out than that is a stale value, not a padded one, so the
-        // frame is skipped. The next one carries a consistent description.
+        // A guest that went from 1920 to 1152 wide once reported width 1152
+        // with the old stride of 7680 still in place, which describes a
+        // buffer half again as large as the one that exists. Copying on that
+        // description read past the end of the allocation and aborted the
+        // process. The cause was the drdynvc thread resizing the buffer while
+        // this thread read it, and synchronous dynamic channels remove that
+        // cause. The check stays, because a wrong description must never
+        // reach a copy.
         let row_bytes = width as usize * 4;
-        let stride = stride as usize;
-        if !stride_is_plausible(stride, row_bytes) {
+        if !stride_matches(stride as usize, row_bytes) {
             tracing::debug!("skipping a frame: {width}x{height} cannot have a stride of {stride}");
             return None;
         }
-        let Some(total) = stride.checked_mul(height as usize) else {
-            tracing::warn!("framebuffer size overflows: stride {stride}, height {height}");
+        let Some(total) = row_bytes.checked_mul(height as usize) else {
+            tracing::warn!("framebuffer size overflows: {width}x{height}");
             return None;
         };
 
-        // SAFETY: the shim reports a buffer of stride * height bytes for a
-        // connected client, and the description has just been checked for
-        // self consistency.
-        let raw = unsafe { std::slice::from_raw_parts(data, total) };
-
-        // Drop any row padding, so the Frame is exactly width * 4 per row and
-        // GdkTexture can take it without a stride argument.
-        let mut packed = Vec::with_capacity(row_bytes * height as usize);
-        for row in 0..height as usize {
-            let start = row * stride;
-            packed.extend_from_slice(&raw[start..start + row_bytes]);
+        // The Frame is exactly width * 4 per row, so GdkTexture can take it
+        // without a stride argument.
+        let mut data = vec![0u8; total];
+        // SAFETY: valid handle, and `data` holds the `total` bytes passed.
+        let rc = unsafe {
+            sys::cabin_rdp_copy_framebuffer(
+                self.0,
+                data.as_mut_ptr(),
+                data.len(),
+                width,
+                height,
+                stride,
+            )
+        };
+        if rc != sys::CABIN_OK {
+            // The framebuffer changed after it was described. The next frame
+            // carries the new description.
+            tracing::debug!("skipping a frame: the framebuffer changed during the copy");
+            return None;
         }
 
         Some(Frame {
             width,
             height,
             format: PixelFormat::Bgra8888,
-            data: packed,
+            data,
             damage: Vec::new(),
         })
     }
@@ -225,9 +231,17 @@ impl Client {
         };
     }
 
-    fn send_wheel(&self, delta: i16, horizontal: bool) {
-        // SAFETY: valid handle.
-        unsafe { sys::cabin_rdp_send_wheel(self.0, delta as i32, horizontal as i32) };
+    /// Sends a wheel rotation, split into as many events as it needs.
+    fn send_wheel(&self, delta: i32, horizontal: bool) {
+        let axis = if horizontal {
+            sys::PTR_FLAGS_HWHEEL
+        } else {
+            sys::PTR_FLAGS_WHEEL
+        };
+        for step in crate::session::wheel::encode(delta) {
+            // SAFETY: valid handle. A wheel event carries no position.
+            unsafe { sys::cabin_rdp_send_pointer(self.0, 0, 0, axis | step) };
+        }
     }
 
     fn disconnect(&self) {
@@ -281,6 +295,12 @@ pub fn run_session(
     for attempt in 1u32.. {
         let client = match start(&params) {
             Ok(client) => client,
+            Err(Error::CertificateChanged { seen }) => {
+                // A typed event, so the interface can offer to trust the new
+                // certificate without matching on the error text.
+                let _ = events.send_blocking(SessionEvent::CertificateChanged { seen });
+                return;
+            }
             Err(e) => {
                 if !is_transient(&e) || std::time::Instant::now() >= deadline {
                     report_giving_up(&events, attempt, began, &e.to_string());
@@ -467,11 +487,12 @@ fn run_connected(
 /// A session that never drew is reported as not yet up, so the caller can try
 /// again instead of putting a failure in front of the user.
 ///
-/// This does not call `disconnect`. The guest has already gone in every case
-/// that reaches here, and disconnecting a session that has ended, before the
-/// client is freed, tears the GDI layer down twice. The retry loop then builds
-/// a new client over the wreckage and the first frame it copies reads freed
-/// memory.
+/// This does not call `disconnect` itself. The guest has already gone in every
+/// case that reaches here, and the shim disconnects when the client is freed.
+/// That matters, because FreeRDP's context free does not run PostDisconnect or
+/// close the channels, so a session that was only freed leaked its GDI state
+/// and its channel plugins. The shim records whether a disconnect is still
+/// owed, so a session that `disconnect` already ended is not ended twice.
 fn finish(
     events: &async_channel::Sender<SessionEvent>,
     drew_anything: bool,
@@ -486,15 +507,15 @@ fn finish(
     Outcome::Ran
 }
 
-/// The most padding a real row alignment adds.
+/// True when a stride really belongs to a row of `row_bytes`.
 ///
-/// FreeRDP aligns rows, so a stride slightly above the pixel width is normal.
-/// Anything beyond this is a stride left over from a different size.
-const MAX_ROW_PADDING: usize = 64;
-
-/// True when a stride could really belong to a row of `row_bytes`.
-fn stride_is_plausible(stride: usize, row_bytes: usize) -> bool {
-    stride >= row_bytes && stride - row_bytes <= MAX_ROW_PADDING
+/// FreeRDP's GDI does not pad rows: `gdi_init` with no stride gives a primary
+/// bitmap of exactly width * 4 bytes per row. So any other stride is one left
+/// over from a different size. An earlier check allowed 64 bytes of padding,
+/// and that still accepted a stale stride after a shrink of 16 pixels or
+/// less, which read past the end of the new buffer.
+fn stride_matches(stride: usize, row_bytes: usize) -> bool {
+    stride == row_bytes
 }
 
 /// Keeps track of the size the interface wants, so a new attempt can restate
@@ -650,29 +671,30 @@ fn apply(
 
 #[cfg(test)]
 mod stride_tests {
-    use super::stride_is_plausible;
+    use super::stride_matches;
 
     #[test]
     fn an_exact_stride_is_accepted() {
-        assert!(stride_is_plausible(4608, 4608));
-    }
-
-    #[test]
-    fn row_alignment_padding_is_accepted() {
-        assert!(stride_is_plausible(4608 + 16, 4608));
-        assert!(stride_is_plausible(4608 + 64, 4608));
+        assert!(stride_matches(4608, 4608));
     }
 
     #[test]
     fn a_stride_left_over_from_a_wider_frame_is_rejected() {
         // The case that aborted the process: 1152 wide, still striding for
         // 1920. Reading on that description runs off the end of the buffer.
-        assert!(!stride_is_plausible(1920 * 4, 1152 * 4));
+        assert!(!stride_matches(1920 * 4, 1152 * 4));
+    }
+
+    #[test]
+    fn a_stride_left_over_from_a_slightly_wider_frame_is_rejected() {
+        // A shrink of two pixels leaves a stride 8 bytes too long. That reads
+        // 8 bytes past the end for every row but the last.
+        assert!(!stride_matches(1922 * 4, 1920 * 4));
     }
 
     #[test]
     fn a_stride_shorter_than_the_row_is_rejected() {
-        assert!(!stride_is_plausible(4000, 4608));
+        assert!(!stride_matches(4000, 4608));
     }
 }
 

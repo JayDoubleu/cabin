@@ -9,6 +9,7 @@
 #ifndef CABIN_SHIM_H
 #define CABIN_SHIM_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct cabin_rdp cabin_rdp;
@@ -50,10 +51,20 @@ int cabin_rdp_connect(cabin_rdp* self);
  * and a negative code on error. */
 int cabin_rdp_poll(cabin_rdp* self, uint32_t timeout_ms);
 
-/* Borrows the current framebuffer. The pointer stays valid until the next
- * resize or free. Returns NULL before the first frame. */
-const uint8_t* cabin_rdp_framebuffer(cabin_rdp* self, uint32_t* width, uint32_t* height,
-                                     uint32_t* stride);
+/* Describes the current framebuffer: its size in pixels and the bytes from
+ * one row to the next. Returns CABIN_OK, or CABIN_ERR_NOT_READY when there is
+ * no frame yet or the session has ended. */
+int cabin_rdp_framebuffer_info(cabin_rdp* self, uint32_t* width, uint32_t* height,
+                               uint32_t* stride);
+
+/* Copies the framebuffer into dst as packed rows of width * 4 bytes.
+ *
+ * Pass the description that cabin_rdp_framebuffer_info gave. The copy runs
+ * only if the framebuffer still has that description, and returns
+ * CABIN_ERR_NOT_READY when it does not. No pointer into FreeRDP's buffer is
+ * ever handed out, because a resize can free that buffer at any time. */
+int cabin_rdp_copy_framebuffer(cabin_rdp* self, uint8_t* dst, size_t dst_len, uint32_t width,
+                               uint32_t height, uint32_t stride);
 
 /* Counts completed frames, so a caller can tell whether anything changed. */
 uint64_t cabin_rdp_frame_count(cabin_rdp* self);
@@ -65,8 +76,10 @@ int cabin_rdp_request_resize(cabin_rdp* self, uint32_t width, uint32_t height);
 
 int cabin_rdp_send_key(cabin_rdp* self, uint32_t scancode, int extended, int down);
 int cabin_rdp_send_unicode(cabin_rdp* self, uint16_t code, int down);
+/* Sends a pointer event. A wheel event is a pointer event too: put the
+ * wheel flag and the encoded rotation in flags. The Rust side encodes the
+ * rotation, so that the encoding has unit tests. */
 int cabin_rdp_send_pointer(cabin_rdp* self, uint32_t x, uint32_t y, uint32_t flags);
-int cabin_rdp_send_wheel(cabin_rdp* self, int32_t delta, int horizontal);
 
 void cabin_rdp_disconnect(cabin_rdp* self);
 
