@@ -257,6 +257,7 @@ pub fn present(
         entries: RefCell::new(Vec::new()),
         buttons: vec![apply.clone(), apply_and_run.clone()],
         problem: problem.clone(),
+        busy: std::cell::Cell::new(false),
     });
 
     let page = adw::PreferencesPage::new();
@@ -297,12 +298,17 @@ pub fn present(
         let on_applied = on_applied.clone();
         let desktop = desktop.clone();
         let config = config.clone();
+        let validity = validity.clone();
         button.connect_clicked(move |_| {
+            if validity.busy.get() {
+                return;
+            }
             let updated = config.borrow().clone();
             if !desktop.config.needs_recreate(&updated) {
                 // Nothing to apply. The run action still means something, so
                 // it starts or restarts what is already there.
                 if start_after {
+                    validity.set_busy(true);
                     run_only(
                         &parent_widget,
                         podman.clone(),
@@ -320,7 +326,10 @@ pub fn present(
                 updated,
                 start_after,
                 on_applied.clone(),
-                dialog_ref.clone(),
+                Owner {
+                    dialog: dialog_ref.clone(),
+                    validity: validity.clone(),
+                },
             );
         });
     }
@@ -345,6 +354,11 @@ struct Validity {
     entries: RefCell<Vec<(usize, gtk::glib::WeakRef<adw::EntryRow>)>>,
     buttons: Vec<gtk::Button>,
     problem: gtk::Label,
+    /// Whether a recreate or a start from this dialogue is in progress.
+    /// Both actions work on the same snapshot of the desktop, so a second
+    /// click would race the first. The loser then reports a failure that
+    /// did not happen to the desktop, and the user can act on it.
+    busy: std::cell::Cell<bool>,
 }
 
 impl Validity {
@@ -355,10 +369,15 @@ impl Validity {
             Some("A shared item has a location that cannot be used.".to_string())
         };
         for button in &self.buttons {
-            button.set_sensitive(problem.is_none());
+            button.set_sensitive(problem.is_none() && !self.busy.get());
         }
         self.problem.set_visible(problem.is_some());
         self.problem.set_text(problem.as_deref().unwrap_or(""));
+    }
+
+    fn set_busy(&self, busy: bool) {
+        self.busy.set(busy);
+        self.update();
     }
 
     /// Records whether the share row at `index` holds a usable location.
@@ -1295,6 +1314,13 @@ fn current_selection(list: &gtk::ListBox) -> Vec<String> {
     names
 }
 
+/// The settings dialogue that asked for an apply, with its button state.
+#[derive(Clone)]
+struct Owner {
+    dialog: adw::PreferencesDialog,
+    validity: Rc<Validity>,
+}
+
 fn confirm_and_apply(
     parent: &gtk::Widget,
     podman: Arc<Podman>,
@@ -1302,7 +1328,7 @@ fn confirm_and_apply(
     updated: DesktopConfig,
     start_after: bool,
     on_applied: Rc<dyn Fn()>,
-    settings_dialog: adw::PreferencesDialog,
+    owner: Owner,
 ) {
     // Only a running desktop loses anything, so only a running desktop asks.
     if !desktop.state.is_running() {
@@ -1313,7 +1339,7 @@ fn confirm_and_apply(
             updated,
             start_after,
             on_applied,
-            settings_dialog,
+            owner,
         );
         return;
     }
@@ -1346,7 +1372,7 @@ fn confirm_and_apply(
         let updated = updated.clone();
         let on_applied = on_applied.clone();
         let parent = parent_for_closure.clone();
-        let settings_dialog = settings_dialog.clone();
+        let owner = owner.clone();
 
         apply_now(
             &parent,
@@ -1355,7 +1381,7 @@ fn confirm_and_apply(
             updated,
             start_after,
             on_applied,
-            settings_dialog,
+            owner,
         );
     });
     dialog.present(Some(parent));
@@ -1369,8 +1395,18 @@ fn apply_now(
     updated: DesktopConfig,
     start_after: bool,
     on_applied: Rc<dyn Fn()>,
-    settings_dialog: adw::PreferencesDialog,
+    owner: Owner,
 ) {
+    let Owner {
+        dialog: settings_dialog,
+        validity,
+    } = owner;
+    // Two confirmations can be open at once, so check here as well as on
+    // the click.
+    if validity.busy.get() {
+        return;
+    }
+    validity.set_busy(true);
     let nodes = graphics::render_nodes();
     let interfaces = crate::network::interfaces();
     let parent = parent.clone();
@@ -1401,7 +1437,9 @@ fn apply_now(
                 // gone or parked, a second Apply would act on a removed id
                 // or on the parked container, so the user reopens the
                 // settings from the refreshed list instead.
-                if outcome != ApplyFailure::KeptOld {
+                if outcome == ApplyFailure::KeptOld {
+                    validity.set_busy(false);
+                } else {
                     settings_dialog.close();
                 }
                 // The desktop can have a new id, a new state, or a leftover
