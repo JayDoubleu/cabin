@@ -175,6 +175,7 @@ pub fn present(
                     &ours,
                     podman_for_rows.clone(),
                     &dialog,
+                    refresh_now.clone(),
                     on_changed.clone(),
                 );
                 populate(
@@ -182,13 +183,15 @@ pub fn present(
                     &theirs,
                     podman_for_rows.clone(),
                     &dialog,
+                    refresh_now.clone(),
                     on_changed.clone(),
                 );
                 other_holder.set_visible(show_all.is_active());
 
                 // Offer the clean-up only when there is something to clean
-                // up, and say what it is worth.
-                let stale: Vec<Image> = images.iter().filter(|i| i.dangling).cloned().collect();
+                // up, and say what it is worth. An untagged image that a
+                // container still uses is not pruned, so it is not counted.
+                let stale: Vec<Image> = images.iter().filter(|i| i.prunable()).cloned().collect();
                 let freed: u64 = stale.iter().map(|i| i.size_bytes).sum();
                 reclaim.set_visible(!stale.is_empty());
                 if !stale.is_empty() {
@@ -516,6 +519,7 @@ fn populate(
     images: &[Image],
     podman: Arc<Podman>,
     parent: &adw::Dialog,
+    refresh: Rc<dyn Fn()>,
     on_changed: Rc<dyn Fn()>,
 ) {
     while let Some(child) = list.first_child() {
@@ -561,6 +565,7 @@ fn populate(
             .build();
         let podman = podman.clone();
         let parent = parent.clone();
+        let refresh = refresh.clone();
         let on_changed = on_changed.clone();
         let name = image.display_name();
         let target = image
@@ -574,6 +579,7 @@ fn populate(
                 podman.clone(),
                 name.clone(),
                 target.clone(),
+                refresh.clone(),
                 on_changed.clone(),
             );
         });
@@ -686,6 +692,7 @@ fn confirm_delete(
     podman: Arc<Podman>,
     name: String,
     target: String,
+    refresh: Rc<dyn Fn()>,
     on_changed: Rc<dyn Fn()>,
 ) {
     let dialog = adw::AlertDialog::builder()
@@ -707,6 +714,7 @@ fn confirm_delete(
         }
         let podman = podman.clone();
         let target = target.clone();
+        let refresh = refresh.clone();
         let on_changed = on_changed.clone();
         let parent = parent_for_response.clone();
         runtime::spawn(
@@ -722,6 +730,10 @@ fn confirm_delete(
                     error.add_response("close", "Close");
                     error.present(Some(&parent));
                 }
+                // The dialogue's own lists as well as the sidebar, or the
+                // deleted image stays listed and its recipe still reads as
+                // built.
+                refresh();
                 on_changed();
             },
         );
