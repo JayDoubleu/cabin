@@ -57,23 +57,22 @@ the security consequences.
   ┌────────────────────────────────────┐       ┌──────────────────────────────┐
   │  Cabin (Flatpak, GTK4/libadwaita)  │       │  systemd (PID 1)             │
   │                                    │       │    │                         │
-  │  ┌──────────┐  ┌────────────────┐  │       │    ├─ cabin-firstboot        │
-  │  │ Sidebar  │  │  RDP viewer    │  │       │    │    TLS cert, password   │
-  │  │          │  │  (IronRDP →    │  │       │    │                         │
-  │  │ desktop1 │  │   GdkTexture)  │  │       │    └─ systemd --user (cabin) │
-  │  │ desktop2 │  │                │  │       │         │                    │
-  │  │ [ + new ]│  │                │  │       │         ├─ cabin-keyring     │
-  │  └──────────┘  └────────────────┘  │       │         │                    │
+  │  ┌──────────┐  ┌────────────────┐  │       │    ├─ cabin-prepare          │
+  │  │ Sidebar  │  │  RDP viewer    │  │       │    │    every boot: env,     │
+  │  │          │  │  (FreeRDP via  │  │       │    │    password, TLS cert   │
+  │  │ desktop1 │  │   cabin-       │  │       │    │                         │
+  │  │ desktop2 │  │   freerdp-sys  │  │       │    └─ systemd --user (cabin) │
+  │  │ [ + new ]│  │   → GdkTexture)│  │       │         cabin-session.target │
+  │  └──────────┘  └────────────────┘  │       │         ├─ cabin-keyring     │
   │        │               │           │       │         ├─ cabin-shell       │
   │        │               │           │       │         │   gnome-shell      │
   │        │               │           │       │         │     --headless     │
-  │        │               │           │       │         │     --virtual-     │
-  │        │               │           │       │         │       monitor WxH  │
-  │        │               │           │       │         │                    │
-  │        │               │           │       │         └─ cabin-remote-     │
-  │        │               │           │       │              desktop         │
-  │        │               │           │       │              (gnome-remote-  │
-  │        │               │           │       │               desktop)       │
+  │        │               │           │       │         ├─ cabin-rdp         │
+  │        │               │           │       │         │   grdctl, then the │
+  │        │               │           │       │         │   stock gnome-     │
+  │        │               │           │       │         │   remote-desktop-  │
+  │        │               │           │       │         │   headless unit    │
+  │        │               │           │       │         └─ cabin-flathub     │
   └────────┼───────────────┼───────────┘       └──────────────┼───────────────┘
            │               │                                  │
            │ HTTP          │ RDP over TLS ────────────────────┘
@@ -104,21 +103,29 @@ and a phone can still connect to them over RDP.
 The container runs `/sbin/init`. systemd starts a user session for the `cabin`
 user, which lingers so that the session survives with no login.
 
-The session brings up three units in order:
+`cabin-prepare.service` is a system unit. It runs on every boot, before the
+user session. It reads the container environment from `/proc/1/environ`, sets
+the account password, and writes `/run/cabin/env` for the user units to read.
+`/run` is a tmpfs, so this must happen on every boot and not only the first.
+The script generates the self-signed TLS certificate only when the state
+volume holds none, so the certificate stays stable (section 15.18).
+
+`cabin-session.target` then brings up the user units:
 
 1. `cabin-keyring.service` unlocks the login keyring.
    `gnome-remote-desktop` stores its RDP credentials through libsecret, so the
    keyring must be open before those credentials can be written.
-2. `cabin-shell.service` runs
-   `gnome-shell --headless --virtual-monitor ${WIDTH}x${HEIGHT}`.
-   The headless mutter backend needs no DRM device and no physical monitor.
-3. `cabin-remote-desktop.service` configures `grdctl --headless` and then runs
-   `gnome-remote-desktop-daemon --headless`, which serves RDP.
-
-`cabin-firstboot.service` runs once before the user session. It reads the
-container environment from `/proc/1/environ`, sets the account password,
-generates a self-signed TLS certificate, and writes `/run/cabin/env` for the
-user units to read.
+2. `cabin-shell.service` runs `gnome-shell --headless`. The headless mutter
+   backend needs no DRM device and no physical monitor. The shell creates no
+   virtual monitor of its own by default, because `gnome-remote-desktop`
+   creates the one the client sees (section 14).
+3. `cabin-rdp.service` writes the certificate and the port with `gsettings`,
+   sets the credentials and enables RDP with `grdctl --headless`, and then
+   starts the stock
+   `gnome-remote-desktop-headless.service`, which serves RDP. Cabin does not
+   ship its own daemon unit (section 12.2).
+4. `cabin-flathub.service` adds the Flathub repository for the desktop user
+   (section 22.4). A failure here does not stop the session.
 
 Reading `/proc/1/environ` is deliberate. systemd does not pass the container
 environment down to individual services, so the values from `podman run --env`
@@ -126,9 +133,10 @@ would otherwise be lost.
 
 ### 4.2 Resolution
 
-`--virtual-monitor` sets only the starting size. RDP carries a Display Control
-Virtual Channel. When the client sends a new size, mutter resizes the virtual
-monitor and GNOME re-lays out. This gives the automatic fit behaviour that
+`gnome-remote-desktop` creates the virtual monitor for the session. RDP
+carries a Display Control Virtual Channel, and the client's first request on
+that channel sets the size. When the client sends a new size, mutter resizes
+the virtual monitor and GNOME re-lays out. This gives the automatic fit behaviour that
 VMware Workstation has, with no guest agent and no polling.
 
 The fixed-resolution buttons use the same channel. They send a chosen size
@@ -143,16 +151,17 @@ The headless backend renders with OpenGL. Two paths exist:
 | Software (`llvmpipe`) | None | Always works. Enough for terminals, editors, and browsing. Uses CPU. |
 | Hardware | A DRM render node passed into the container | Faster, lower CPU use. |
 
-`start-shell.sh` selects software rendering when `/dev/dri/renderD128` is
-absent.
+`start-shell.sh` selects software rendering when no `/dev/dri/renderD*` node
+exists in the container. Cabin passes the chosen node at its host path, which
+can have any number, so any render node counts.
 
-This host has two render nodes. The Intel node is the sensible default: it
+The development host has two render nodes. The Intel node is the sensible default: it
 needs no extra container configuration, while NVIDIA needs the Container Device
 Interface and a matching driver inside the guest. Cabin therefore prefers the
 first non-NVIDIA node, offers software rendering as an alternative, and lists
 every node it finds. Section 7.3 covers the setting.
 
-**Never infer the driver from the node number.** On this host the card numbers
+**Never infer the driver from the node number.** On the development host the card numbers
 and the render node numbers disagree:
 
 | Device | Driver |
@@ -164,7 +173,7 @@ and the render node numbers disagree:
 
 Cabin reads the driver name from
 `/sys/class/drm/<node>/device/driver` for each node. A rule such as "renderD128
-is the integrated GPU" would pass the NVIDIA node to every desktop on this
+is the integrated GPU" would pass the NVIDIA node to every desktop on that
 machine.
 
 ### 4.4 Image variants
@@ -198,11 +207,16 @@ This choice matters. It means:
 |---|---|
 | `cabin-core` | Domain model. A `Desktop`, its `Config`, mounts, GPU mode, socket policy. Serialises to and from container labels. No I/O. |
 | `cabin-podman` | Podman REST client over the rootless UNIX socket. Create, start, stop, remove, inspect, events, image pull and build. |
-| `cabin-rdp` | The RDP client. Wraps IronRDP and exposes a GTK widget. |
-| `cabin-gtk` | The application. Windows, sidebar, preferences, actions. Owns the binary. |
+| `cabin-freerdp-sys` | A C shim and hand-written FFI to FreeRDP 3. No bindgen, see section 15.1. |
+| `cabin-rdp` | The RDP client. Runs a FreeRDP session through `cabin-freerdp-sys` on its own thread and produces frames. Has no GTK types. |
+| `cabin-gtk` | The application. Windows, sidebar, the display widget, preferences, actions. Owns the binary. |
 
 The split keeps the RDP work testable without a GTK main loop, and keeps the
 Podman client usable from a future command line tool.
+
+Sections 3 to 5 describe the current design. Sections 6 and 7 hold the
+original plan, with notes where the code went a different way. Sections 12
+and later are the record of what was found, in the order it was found.
 
 ### 5.3 User interface
 
@@ -222,16 +236,23 @@ Podman client usable from a future command line tool.
 └───────────────┴────────────────────────────────────────────────┘
 ```
 
-The header bar of a running desktop carries:
+> **Updated by section 18.4.** The layout is now an `AdwOverlaySplitView`.
 
-- A state indicator and the desktop name.
-- A display menu: **Fit to window**, then 1280x720, 1920x1080, 2560x1440,
-  3840x2160, and a custom entry.
+The header bar of the desktop pane carries:
+
+- A button that hides or shows the desktop list.
 - A fullscreen button.
-- An overflow menu: Restart, Stop, Settings, Show logs, Delete.
+- A display menu: **Fit to window**, then 1280x720, 1920x1080, 2560x1440 and
+  3840x2160, and "Resize window to match" (section 18.5). There is no custom
+  size.
+- A button that opens the settings of the desktop on show.
 
-The sidebar row for a stopped desktop shows a Start button on hover. The row
-for a running desktop shows CPU and memory use.
+Each sidebar row carries a Start or Stop button and a menu with Settings,
+Restart, Open a shell, Connect from another device and Delete. The main menu
+holds Guest Images and About Cabin.
+
+A log viewer and a display of CPU and memory use were in the first plan. They
+are not built.
 
 ### 5.4 Podman client
 
@@ -250,6 +271,10 @@ updates the sidebar from that stream, so the list never polls.
 ## 6. The RDP viewer
 
 This is the only part with no ready-made component. It deserves the most care.
+
+> **Sections 6.1 to 6.3 are the original plan.** The client runs on FreeRDP 3
+> through `cabin-freerdp-sys`, not on IronRDP. Section 15 describes the
+> client as built, and section 15.6 describes the session thread.
 
 ### 6.1 Stack choice
 
@@ -353,15 +378,26 @@ is enforced by the kernel rather than by a client honouring a flag.
 | Source | A host path, always from the file chooser portal. |
 | Location | Where it appears inside the desktop. Suggested, then editable. |
 | Writable | Off by default. |
-| Relabel | SELinux `z`. On by default, which Fedora needs. |
+| Relabel | SELinux `z`. On by default, which Fedora needs. The label change on the host is permanent. |
+
+**The relabel stays after the desktop is gone.** Podman's `z` option changes
+the SELinux label of the host copy, recursively, and nothing changes it back.
+`restorecon -R <path>` on the host restores the default label. The switch says
+this, and a folder that other services read, such as `~/.ssh`, `~/.gnupg` or
+a folder that holds one of them, gets an extra warning. Relabel stays on by
+default because without it a Fedora host denies the desktop every access.
 
 The location is editable rather than derived. A suggestion from the source name
 is right most of the time and wrong whenever the desktop expects a particular
 path, and there is no way to guess which. `Mount::check_guest_path` refuses a
 path that Podman would take literally and produce something unusable from: an
-empty one, a relative one, `/` itself, one containing a colon, and the guest's
-own system directories. Mounting over `/usr` leaves a desktop that cannot
-start, and the failure does not point at the setting that caused it.
+empty one, a relative one, `/` itself, one containing a colon or `..`, and the
+guest's own system directories and everything below them. The check cleans the
+path first, the same way Podman does, so `//usr` and `/./etc` are refused too.
+Mounting over `/usr` leaves a desktop that cannot start, and the failure does
+not point at the setting that caused it. A location that another share, the
+home volume or the host socket already uses is refused as well, because
+Podman would refuse the create after the dialogue had closed.
 
 Sharing a single file is offered separately from sharing a folder, because a
 configuration file such as `.gitconfig` should not need its whole directory
@@ -374,37 +410,58 @@ Cabin never browses the filesystem itself. Every source path comes from the
 portal, so the application needs no broad filesystem permission of its own.
 See section 8.
 
+**The portal path is not the host path.** In the Flatpak the chooser returns a
+document portal path under `/run/user/<uid>/doc/`. Host Podman cannot give
+that path to a desktop, because the portal's FUSE mount refuses every user
+except the one that owns it. So Cabin asks the portal for the real host path
+(`GetHostPaths`, or the `document-portal.host-path` attribute on older
+portals) and gives that path to Podman. If the portal gives no real path, the
+dialogue refuses the share. It never passes the portal path on.
+
 ### 7.2 Container runtime sockets
 
-The setting has three values.
+The dialogue offers three values.
 
 | Value | Effect |
 |---|---|
-| **None** (default) | No socket is exposed. |
-| **Nested** | The guest runs its own rootless Podman. Cabin adds `/dev/fuse` and the needed annotations. |
-| **Host socket** | The host Podman or Docker socket is bind-mounted into the guest. |
+| **None** (default) | No socket is exposed. The desktop cannot build or run containers. |
+| **Podman on this computer** | The host user's Podman socket is bind-mounted into the guest. |
+| **Docker on this computer** | The host Docker socket, `/var/run/docker.sock`, is bind-mounted into the guest. |
 
-**Nested is the default recommendation** and the setting dialogue says so.
+**None is the default and the safe choice.**
 
-The **Host socket** option carries a warning that the user must dismiss before
-it applies. The wording is plain:
+A fourth value, **Nested**, exists in `SocketPolicy`. It lets the guest run
+its own rootless Podman and passes `/dev/net/tun` for pasta networking. It
+does not work yet, so the dialogue withholds it. Section 15.17 records how far
+it got.
 
-> Exposing the host container socket gives this desktop the same power over
-> your computer as the account that runs it. A process in the desktop can start
-> a privileged container and read or change any file. Only enable this for
+Both host socket options carry a warning that the user must accept before
+they apply. The wording is plain:
+
+> Exposing the host Podman socket gives this desktop the same power over your
+> computer as the account that runs it. A process in the desktop can start a
+> privileged container and read or change any file. Only enable this for
 > desktops you fully trust.
 
 For the Docker socket the warning is stronger, because the Docker daemon runs
 as root, so the guest gains root on the host.
 
-Both options are offered, as requested. The default is safe, the risk is
-stated once and clearly, and the choice is per desktop, not global.
+If the Podman socket is missing, the create fails with a message that gives
+the command to enable it. Cabin does not skip the mount, because a skip would
+leave the guest pointed at a socket with nothing behind it, and with SELinux
+labelling turned off for no reason. The Docker socket is not tested by Cabin:
+inside the Flatpak Cabin cannot see `/var/run`, and Podman resolves the bind
+source on the host. If the Docker socket is absent, Podman refuses the create
+and the user sees that error.
+
+Two host socket options are offered. The default is safe, the risk is stated
+once and clearly, and the choice is per desktop, not global.
 
 ### 7.3 Graphics setting
 
 | Value | Effect |
 |---|---|
-| **Automatic** (default) | Cabin picks the first non-NVIDIA render node. On this host that is the Intel one. |
+| **Automatic** (default) | Cabin picks the first non-NVIDIA render node. On the development host that is the Intel one. |
 | **Software rendering** | No device is passed. `llvmpipe` is used. |
 | **A specific render node** | Cabin lists every `/dev/dri/renderD*` with its driver name, so the choice is informed. |
 
@@ -413,9 +470,15 @@ Interface and matching guest drivers. Cabin does not silently attempt that.
 
 ### 7.4 Creating a desktop
 
-The create dialogue asks for a name, a base image, a memory limit, a CPU limit,
-and a home volume size. Everything else takes a default and is changed later in
-Settings.
+The create dialogue asks for a name, an image (a recipe, section 21.2), a
+memory limit and the graphics mode, and has an "Open settings" switch (section
+17.3). Everything else takes a default and is changed later in Settings. There
+is no CPU limit and no home volume size.
+
+The dialogue refuses a name that any container on the host holds, or that old
+volumes still carry, as the name is typed. It gives the new desktop a host
+port that no other container publishes, running or not, because a stopped
+desktop holds no socket and a bind test alone would give its port away.
 
 The guest image is built by Cabin itself, on the machine that runs it. Section
 19 has the detail. The create dialogue checks for it and offers to build it,
@@ -442,6 +505,13 @@ DHCP lease changed, and the reason would not be obvious. Cabin resolves the
 names to addresses when it creates the container, and an interface that has no
 address at that moment simply contributes nothing.
 
+Podman binds the addresses it was given at create time, so Cabin resolves the
+names again before each start and restart. If the addresses have changed,
+Cabin recreates the container first, with the same volumes. Only a start error
+that says "cannot assign requested address" is reported as a changed address.
+A port that another program holds is a different fault and is reported as
+itself.
+
 **Chosen networks never publishes on a global IPv6 address.** A global
 address is reachable from the whole internet unless the router filters it, so
 publishing on it would make chosen networks as wide as every network. Only
@@ -460,14 +530,19 @@ unique-local address as well as on IPv4.
 to connect from the computer the desktop runs on. Offering loopback as a
 checkbox would suggest it can be turned off, which it cannot.
 
-This matters because a laptop joins networks it does not trust. On the
-development host the interfaces are:
+This matters because a laptop joins networks it does not trust. A typical
+laptop has interfaces like these:
 
 ```
 docker0      172.17.0.1
-tailscale0   100.64.0.1, fd7a:115c:a1e0::1
-wlp0s20f3    192.0.2.10
+tailscale0   192.0.2.10, 2001:db8::10
+wlp0s20f3    192.0.2.20
 ```
+
+The addresses are documentation examples (RFC 5737 and RFC 3849). On a real
+tailnet the IPv4 address is in `100.64.0.0/10` and the IPv6 address is in
+`fd7a:115c:a1e0::/48`, which is unique-local, so chosen networks publishes on
+both.
 
 Choosing `tailscale0` alone gives a desktop that is reachable from the user's
 own devices anywhere in the world and reachable from nobody in a cafe. That
@@ -488,16 +563,24 @@ assumption.
    guest shares the host kernel. Treat a Cabin desktop as a strong
    configuration boundary, not as a sandbox for hostile code. Use a real
    virtual machine for that.
-2. **Rootless by default.** Containers run as the user, with a user namespace.
-   A root process in the guest maps to an unprivileged host user ID.
+2. **Rootless, but guest root is you.** Containers run as the user, with a
+   user namespace. Cabin sets no user namespace option, so rootless Podman
+   maps guest root to the host user's own UID, not to a subordinate ID. The
+   `cabin` user has passwordless `sudo`. So any process in the desktop can act
+   as the host user on every shared folder that is mounted read-write. Share
+   read-only where you can.
 3. **Loopback only.** The RDP port publishes to `127.0.0.1` by default. Remote
    access from other devices is opt-in per desktop, and the dialogue names the
-   interface it will listen on.
-4. **TLS always.** RDP runs over TLS with a per-container self-signed
-   certificate. Cabin pins the fingerprint on first connect and warns if it
-   changes.
-5. **Credentials are per desktop.** They are generated, not defaulted, and
-   stored in the host keyring through the Secret portal.
+   interfaces it will listen on (section 7.5).
+4. **TLS and NLA always.** RDP runs over TLS with CredSSP, and each desktop
+   has its own self-signed certificate. Cabin pins the fingerprint on first
+   connect, refuses a changed certificate, and asks the user before it trusts
+   a new one (section 15.18).
+5. **Credentials are per desktop.** Cabin generates them and does not default
+   them. Today Cabin passes the password to the guest as the `CABIN_PASSWORD`
+   container environment variable, so any host process of the user can read
+   it with `podman inspect`. Storage in the host keyring through the Secret
+   portal is planned and not done. Section 13.4 tracks it.
 6. **The socket settings are the sharp edge.** Section 7.2 covers them.
 
 ---
@@ -537,14 +620,17 @@ Sandbox permissions:
 |---|---|
 | `--socket=wayland`, `--socket=fallback-x11` | Display |
 | `--device=dri` | Rendering the viewer |
+| `--share=ipc` | Shared memory for X11 |
 | `--share=network` | RDP to the published port |
-| `--socket=pulseaudio` | Guest audio, later |
 | `--filesystem=xdg-run/podman:ro` | The Podman REST socket |
-| `--talk-name=org.freedesktop.secrets` | Storing desktop credentials |
 
 Cabin does **not** request `--filesystem=home` and does **not** request
 `--talk-name=org.freedesktop.Flatpak`. Mount paths come from the file chooser
 portal, as section 7.1 explains.
+
+Audio and keyring storage are not built, so their permissions are not
+requested either. Audio will need `--socket=pulseaudio`. The keyring will use
+the Secret portal, which needs no `--talk-name`.
 
 Note that `--filesystem=xdg-run/podman:ro` marks the directory read-only. The
 socket inside it is still read-write, which is what a UNIX socket needs. The
@@ -552,9 +638,15 @@ flag stops Cabin creating files next to it.
 
 ### 9.2 Building
 
-Cabin builds from a Fedora toolbox. `flatpak-builder`, `flatpak`, and `bwrap`
-all work inside the container, and the GNOME 51 SDK is installed in the user
-Flatpak installation, which the toolbox sees through the shared home directory.
+Cabin builds on the host or from a Fedora toolbox. The toolbox is the tested
+development environment. `flatpak-builder`, `flatpak`, and `bwrap` all work
+inside the container, and the GNOME 51 SDK is installed in the user Flatpak
+installation, which the toolbox sees through the shared home directory.
+
+CI runs `just lint`, `just test`, a check that `cargo-sources.json` matches
+`Cargo.lock`, validation of the desktop file and the metainfo, and a Flatpak
+test build. `.github/workflows/ci.yml` has the detail. It does not run the
+live tests, because CI has no host Podman and no guest image.
 
 ```sh
 just build          # native build, fast iteration
@@ -577,6 +669,10 @@ just guest          # build the guest image
 | 6 | Fit-to-window and fixed resolutions | The headline feature | Done, verified against the guest |
 | 7 | Create, delete, mounts, GPU and socket settings | Feature complete | Done |
 | 8 | Clipboard, audio, connection profiles for other devices | Polish | Connection profiles done, see section 15.14. Clipboard blocked, see 15.2. Audio not started |
+| 9 | Readiness retry, safe resize, settings on create | A desktop is usable straight after it starts | Done, see section 17 |
+| 10 | The interface catches up | Daily use, not only tests | Done, see section 18 |
+| 11 | Guest images built and managed in Cabin | No pulled image, no manual build | Done, see sections 19 and 20 |
+| 12 | Named recipes, and a choice of image per desktop | Users can change the desktop safely | Done, see section 21 |
 
 Milestone 1 comes first on purpose. It carries nearly all the technical risk,
 and it needs no Rust at all.
@@ -585,21 +681,20 @@ and it needs no Rust at all.
 
 ## 11. Open questions
 
-1. **Does `gnome-shell --headless` start cleanly with no logind seat?** If it
-   does not, the fallback is to run the session under `dbus-run-session`
-   without a systemd user session. Milestone 1 answers this.
-2. **Does the keyring unlock reliably at boot?** If libsecret proves awkward,
-   the alternative is `grdctl --system` with a gdm handover, which stores
-   credentials in a file instead.
+1. ~~**Does `gnome-shell --headless` start cleanly with no logind seat?**~~
+   Answered in section 12.5. It does: the shell runs as `cabin-shell.service`
+   in the systemd user session.
+2. ~~**Does the keyring unlock reliably at boot?**~~ Answered in section
+   12.5. `cabin-keyring.service` unlocks it at every boot.
 3. **Is a whole-texture upload per frame fast enough at 4K?** Measure before
    optimising. Section 6.2 has the fallback.
 4. ~~**How well does IronRDP interoperate with `gnome-remote-desktop`?**~~
    Answered in section 14. CredSSP interoperates. The graphics pipeline does
    not exist in IronRDP, and the guest requires it, so the connection is
    refused. Section 6.1 is superseded.
-5. **`polkit.service` does not start in the guest.** Section 12.3 records the
-   investigation. GNOME Shell and RDP both work without it. The effect is that
-   privileged actions in Settings will refuse. This is open.
+5. ~~**`polkit.service` does not start in the guest.**~~ Answered in section
+   22.3.1. A drop-in relaxes the unit's hardening, `NoNewPrivileges=yes` stays
+   on (CLAUDE.md rules 5 and 36), and polkit now starts.
 
 
 ---
@@ -662,10 +757,12 @@ The investigation established the following, in order:
    binary runs correctly and stays up.
 
 Step 6 is where the work stopped. The remaining `polkitd` exit is unexplained.
+Section 22.3.1 later found the set of directives that lets polkit start, and
+the guest now ships that drop-in, `polkit.service.d/10-cabin-container.conf`.
 
 `geoclue` and `rtkit-daemon` are masked in the image. Neither can work in a
-container and neither is needed. `polkit` is left unmasked and failing, and is
-tracked as open question 5.
+container and neither is needed. At the time of this prototype `polkit` was
+left unmasked and failing. Section 22.3.1 resolved that.
 
 Note the general lesson for the guest image: **`NoNewPrivileges=yes` must stay
 on.** Turning it off stops seccomp filters installing, because a seccomp filter
@@ -751,25 +848,36 @@ reflects them.
 
 ### 13.3 Live tests
 
-`crates/cabin-podman/tests/live_podman.rs` runs against a real Podman socket.
-The tests are ignored by default because they need `podman.socket` and the
-guest image.
+The files under `crates/cabin-podman/tests/` named `live_*.rs` run against a
+real Podman socket. The tests are ignored by default because they need
+`podman.socket` and the guest image.
 
 ```sh
-cargo test -p cabin-podman -- --ignored --test-threads=1
+just podman-live         # every live Podman test, one binary at a time
+just guest-image-live    # rebuilds the guest image, takes several minutes
 ```
 
 They cover the create, list, start, stop, and remove cycle, that mounts and
-sizes survive a round trip through container labels, and that a container
-without Cabin labels never appears in the desktop list.
+sizes survive a round trip through container labels, that a container
+without Cabin labels never appears in the desktop list, that a refused
+recreate keeps the desktop, and that a delete removes the volumes.
+
+Do not run `cargo test -p cabin-podman -- --ignored` on its own. That sweep
+also runs two binaries that are not ordinary tests:
+
+- `live_images` rebuilds `localhost/cabin-guest:f44`, which takes minutes.
+- `make_demo` is a helper behind `just demo`. It force-removes any container
+  called `demo` and makes a new demo desktop. The `demo` volumes stay, so a
+  real desktop with that name keeps its files but loses its container.
 
 ### 13.4 Password handling is not final
 
 `create.rs` generates a per-desktop password and passes it to the guest as an
 environment variable, so `podman inspect` reveals it. That is the same exposure
 the guest already has, so it adds no new risk, but it is not where the password
-belongs. Section 8 states the intent: the host keyring, through the Secret
-portal. This is still to do.
+belongs. The plan is the host keyring, through the Secret portal
+(`org.freedesktop.portal.Secret`), which needs no extra Flatpak permission.
+This is still to do. Section 8 states the current exposure.
 
 ---
 
@@ -1293,8 +1401,11 @@ which on Linux are evdev codes offset by eight.
 The main block needs no table: evdev numbered its keys from the AT scancodes in
 the first place, so evdev 1 is Escape and the AT scancode for Escape is `0x01`,
 and that identity holds to the end of the keypad at evdev 83. Above that the
-keys live in the `0xE0` prefixed set and `keymap.rs` carries a small table for
-the arrows, navigation keys and Super.
+identity does not hold, and `keymap.rs` carries two small tables. Most of
+those keys live in the `0xE0` prefixed set: the arrows, the navigation keys
+and Super. Some are plain set 1 keys with a different number, such as F11,
+F12, the ISO key beside left Shift and the JIS keys. An early version had only
+the first table, so F11, F12 and the UK backslash key did nothing.
 
 An unmapped key is dropped rather than approximated. Sending a wrong scancode
 would type the wrong character, which is worse than typing nothing.
@@ -1331,6 +1442,25 @@ outlives the container. This is verified by
 `crates/cabin-podman/tests/live_recreate.rs`, which recreates a desktop with a
 changed configuration and checks the new settings applied.
 
+**A recreate keeps the old container until the new one exists.** The old
+container holds the only copy of the configuration and the password, because
+Cabin keeps no state of its own. So a recreate renames the old container to
+`<name>-cabin-old`, creates the new one, and removes the old one only after
+that. If Podman refuses the new configuration, the old container gets its
+name back and starts again if it was running. An earlier version removed the
+old container first, so a refused create deleted the desktop. The sidebar
+hides a leftover `-cabin-old` container only when its labels show that it
+belongs to a desktop that still exists, and `check_name` refuses a name that
+ends in `-cabin-old`.
+
+**A delete removes the volumes, and a recreate must not.** Deleting a desktop
+removes the container, then the home volume `cabin-<name>-home` and the state
+volume `cabin-<name>-state`. The volumes go last, because Podman does not remove a volume that a
+container still uses. Without this, a new desktop with the same name took over
+the old files and the old certificate. A bare container remove keeps the named
+volumes, which is what a recreate depends on. `Podman::delete_desktop` is the
+only route that removes them.
+
 The settings dialogue makes the safe choice the easy one:
 
 - A new shared folder starts **read-only**. Making it writable is a switch the
@@ -1339,14 +1469,17 @@ The settings dialogue makes the safe choice the easy one:
   filesystem permission of its own. Section 7.1 explains why that matters.
 - The two dangerous socket options warn before they take effect, and the row
   snaps back to its previous value if the warning is declined. The safe option
-  is labelled "Recommended" and the dangerous ones say what they grant: the
-  power of your user account, or root on your computer.
+  is "None", and its subtitle says that the desktop cannot build or run
+  containers. The dangerous ones say what they grant: the power of your user
+  account, or root on your computer. An earlier version labelled the nested
+  option "Recommended". Section 15.17 withdrew that option.
 - Applying is an explicit button, and it confirms first, because it restarts
   the desktop and closes whatever is running in it. The confirmation says the
   user's files are kept, because otherwise "recreated" sounds like data loss.
 
 Deleting a desktop asks first and says plainly that everything saved inside it
-goes with it.
+goes with it. That is now true of the volumes as well as the container. If
+the container goes and a volume stays, the sidebar says so.
 
 ### 15.14 Connecting from another device
 
@@ -1477,11 +1610,16 @@ both, which is why the callback existed and did nothing.
 which is now a named volume separate from the home directory. Without that,
 every settings change would regenerate the certificate and look exactly like an
 interception. It is a separate volume from the home directory on purpose,
-because it holds the private key and nothing in the desktop session should be
-able to read it.
+because it holds the private key, and the home volume is the one a user shares
+and backs up. The key is not hidden from the session: `gnome-remote-desktop`
+runs as the session user and has to read it, so that user owns it. Hiding the
+key from the session would need the RDP daemon to run as a different user,
+which is a design change.
 
 **A deleted desktop must be forgotten.** Otherwise a new desktop reusing the
-name would present a different certificate and be reported as an attack.
+name would present a different certificate and be reported as an attack. A
+delete now removes the state volume too (section 15.13), and Cabin forgets
+the pin once the container is gone.
 
 The store is a file per desktop in the application's data directory, keyed by
 name rather than container id, because the id changes whenever a desktop is
@@ -1521,20 +1659,24 @@ broken.
 
 An audit of the tree against this document, rather than a list from memory.
 
-**The password is not in the keyring.** Section 8 says the Secret portal. It is
-still an environment variable on the container, which `podman inspect` shows.
+**The password is not in the keyring.** The Secret portal is the plan
+(section 13.4). It is still an environment variable on the container, which
+`podman inspect` shows.
 
 **Clipboard sharing is blocked upstream.** Section 15.2 has the detail. It
 cannot be enabled until `gnome-remote-desktop` degrades instead of aborting
 when the FUSE mount fails.
 
 **Audio is not started.** The RDPSND channel is deliberately disabled in the
-shim.
+shim, and the Flatpak does not ask for the PulseAudio socket.
 
-**`polkit` does not run in the guest.** Open question 5. Privileged actions in
-Settings inside the desktop will refuse.
+**There is no HiDPI scaling.** Cabin sends the size of the pane in logical
+pixels and no scale factor, so on a scaled host display the desktop is drawn
+at the lower resolution and scaled up.
 
-Three things work but have never been checked in the way they will be used:
+**Nested Podman is not offered.** Section 15.17 records how far it got.
+
+Four things work but have never been checked in the way they will be used:
 
 - The render path has only been seen under XWayland, never native Wayland.
 - The widget's own event controllers and the keycode mapping are unit tested,
@@ -1542,6 +1684,8 @@ Three things work but have never been checked in the way they will be used:
   never been exercised together against a guest.
 - The odd-dimension resize rounding has no test, because GTK kept constraining
   the pane to even sizes.
+- polkit runs (section 22.3.1), but nobody has tried a privileged action in
+  Settings inside the desktop, which also needs an authentication agent.
 
 ---
 
@@ -1679,7 +1823,8 @@ that are about Cabin rather than about one desktop:
   can be turned off once rather than declined repeatedly.
 - Show which runtimes were detected, with a Test button that proves the socket
   answers.
-- The default guest image.
+
+(The default guest image is done, see section 21.5.)
 
 **Audio.** RDPSND is disabled in the shim. Nothing has been attempted.
 
@@ -1765,6 +1910,25 @@ dangerous one, and it is the one that happens.
 `cabin_rdp_framebuffer` also refuses to report a buffer for a client that is no
 longer connected. `cabin_post_disconnect` calls `gdi_free`, and it can run
 inside a poll that still reports the session as alive.
+
+**Later correction: the cause was a race.** The torn description came from
+FreeRDP's `drdynvc` worker thread. Every graphics pipeline PDU ran there,
+including `ResetGraphics`, which frees and reallocates the primary buffer
+while the session thread copied it. Three changes followed:
+
+- The shim sets `FreeRDP_SynchronousDynamicChannels`, so all channel work runs
+  on the session thread. This removes the cause.
+- The shim copies the frame itself, under FreeRDP's update lock, into a buffer
+  that the caller gives. It copies only when the width, height and stride
+  still match the description the caller read. No pointer into FreeRDP's
+  buffer leaves the shim.
+- The stride check stays, and it is now exact. FreeRDP's GDI does not pad
+  rows, so the stride must be exactly width * 4. The allowance for alignment
+  described above still accepted a stale stride after a small shrink.
+
+`cabin_rdp_free` also disconnects a session that is still connected. Freeing
+the context alone skips `PostDisconnect` and the channel close, so GDI state
+and channel plugins leaked.
 
 ### 17.3 Creating a desktop offers its settings
 
@@ -1899,12 +2063,15 @@ the Flatpak, beside the executable, and finally in the source tree so that
 Containerfile, or a partly installed one would be chosen over a complete one
 and the build would fail for a reason that points nowhere.
 
-**The context is a tar built in memory.** File modes are deliberately not
-preserved: the Containerfile runs `chmod` on everything it copies, so the
-archive does not need them, and leaving them out means the build behaves the
-same however the files were checked out. Entries are sorted, so the same tree
-always produces the same archive and Podman's layer cache is not defeated by
-the order the filesystem happens to return.
+**The context is a tar built in memory.** Only the execute bit of each file is
+kept. The shipped Containerfile runs `chmod` on everything it copies, but a
+custom recipe that copies a script and runs it needs the bit, and an earlier
+version that set every file to 0644 broke that. Keeping only that bit means
+the build otherwise behaves the same however the files were checked out. A
+link to a file is packed as the file, and any other link is an error that
+names the path. Entries are sorted, so the same tree always produces the same
+archive and Podman's layer cache is not defeated by the order the filesystem
+happens to return.
 
 **Build output is streamed.** A guest image takes minutes, and a progress
 display that only appears at the end is not a progress display. The build
