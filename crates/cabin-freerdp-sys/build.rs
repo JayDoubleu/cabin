@@ -11,13 +11,13 @@ fn main() {
 
     // freerdp-client3 pulls in freerdp3 and winpr3, and carries the client
     // entry points the shim uses.
-    let lib = pkg_config::Config::new()
-        .atleast_version("3.0.0")
-        .probe("freerdp-client3")
-        .expect(
-            "FreeRDP 3 was not found. Install freerdp-devel, or run \
-             \"just freerdp-sysroot\" and export the variables it prints.",
-        );
+    //
+    // This first probe only reads the include paths. It must not print the
+    // link directives yet: rustc links libraries in the order the build
+    // script names them, and GNU ld with --as-needed drops a shared library
+    // that comes before the static shim which uses it. rust-lld does not
+    // care about the order, so the fault shows only with the system linker.
+    let lib = probe(false);
 
     let mut build = cc::Build::new();
     build.file("src/shim.c").std("gnu17").warnings(true);
@@ -29,4 +29,19 @@ fn main() {
         build.include(path);
     }
     build.compile("cabin_freerdp_shim");
+
+    // Now name the FreeRDP libraries, after the shim, so the linker sees
+    // the shim's undefined symbols before it reaches the libraries.
+    probe(true);
+}
+
+fn probe(link: bool) -> pkg_config::Library {
+    pkg_config::Config::new()
+        .atleast_version("3.0.0")
+        .cargo_metadata(link)
+        .probe("freerdp-client3")
+        .expect(
+            "FreeRDP 3 was not found. Install freerdp-devel, or run \
+             \"just freerdp-sysroot\" and export the variables it prints.",
+        )
 }
