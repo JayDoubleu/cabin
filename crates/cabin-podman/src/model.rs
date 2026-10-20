@@ -103,8 +103,11 @@ pub struct CreateContainer {
     pub stop_signal: i32,
     /// "local" gives the guest the time zone of the host, which Podman reads
     /// on the host. Without it the guest runs in UTC, and its clock and every
-    /// file time show a different hour from the host.
-    pub timezone: String,
+    /// file time show a different hour from the host. It is left out when
+    /// the host has no `/etc/localtime`, because Podman then refuses to
+    /// start the container with "finding local timezone for container".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
     /// The desktop's name. Without it Podman uses the container ID, and the
     /// guest's shell prompt and window titles show a hex string that changes
     /// with every recreate.

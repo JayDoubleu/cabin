@@ -245,7 +245,7 @@ impl Podman {
             )]),
             resource_limits,
             stop_signal: SIGRTMIN_3,
-            timezone: "local".to_string(),
+            timezone: timezone_for(std::path::Path::new("/etc/localtime").exists()),
             hostname: config.name.clone(),
         };
 
@@ -823,6 +823,18 @@ fn explain_bind_failure(name: &str, error: Error) -> Error {
     }
 }
 
+/// Chooses the time zone field for a new container.
+///
+/// Podman resolves "local" through `/etc/localtime` on the host when the
+/// container starts, and fails the start if that file is missing. Every
+/// desktop would then fail with only a Podman error to explain it, so the
+/// field is left out and the guest runs in UTC. In the Flatpak, Flatpak
+/// builds the sandbox's `/etc/localtime` from the host's zone, so in the
+/// normal case the same check reads the host.
+fn timezone_for(localtime_exists: bool) -> Option<String> {
+    localtime_exists.then(|| "local".to_string())
+}
+
 fn build_limits(config: &DesktopConfig) -> Option<ResourceLimits> {
     let memory = config.memory_mb.map(|mb| Memory {
         limit: (mb * 1024 * 1024) as i64,
@@ -875,6 +887,12 @@ extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_host_time_zone_is_asked_for_only_when_the_host_has_one() {
+        assert_eq!(timezone_for(true).as_deref(), Some("local"));
+        assert_eq!(timezone_for(false), None);
+    }
 
     #[test]
     fn an_empty_log_and_255_points_at_the_inotify_limit() {
