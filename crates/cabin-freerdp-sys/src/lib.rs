@@ -31,6 +31,15 @@ pub const PTR_FLAGS_DOWN: u32 = 0x8000;
 pub const PTR_FLAGS_BUTTON1: u32 = 0x1000;
 pub const PTR_FLAGS_BUTTON2: u32 = 0x2000;
 pub const PTR_FLAGS_BUTTON3: u32 = 0x4000;
+/// A vertical wheel event. The low nine bits carry the rotation.
+pub const PTR_FLAGS_WHEEL: u32 = 0x0200;
+/// A horizontal wheel event. The low nine bits carry the rotation.
+pub const PTR_FLAGS_HWHEEL: u32 = 0x0400;
+/// The sign bit of the rotation. The rotation is nine bit two's complement,
+/// so this bit is part of the value, not a separate sign.
+pub const PTR_FLAGS_WHEEL_NEGATIVE: u32 = 0x0100;
+/// Selects the rotation from the flags.
+pub const WHEEL_ROTATION_MASK: u32 = 0x01FF;
 
 extern "C" {
     pub fn cabin_rdp_new() -> *mut cabin_rdp;
@@ -53,12 +62,21 @@ extern "C" {
     pub fn cabin_rdp_connect(client: *mut cabin_rdp) -> c_int;
     pub fn cabin_rdp_poll(client: *mut cabin_rdp, timeout_ms: u32) -> c_int;
 
-    pub fn cabin_rdp_framebuffer(
+    pub fn cabin_rdp_framebuffer_info(
         client: *mut cabin_rdp,
         width: *mut u32,
         height: *mut u32,
         stride: *mut u32,
-    ) -> *const u8;
+    ) -> c_int;
+
+    pub fn cabin_rdp_copy_framebuffer(
+        client: *mut cabin_rdp,
+        dst: *mut u8,
+        dst_len: usize,
+        width: u32,
+        height: u32,
+        stride: u32,
+    ) -> c_int;
 
     pub fn cabin_rdp_frame_count(client: *mut cabin_rdp) -> u64;
     pub fn cabin_rdp_display_ready(client: *mut cabin_rdp) -> c_int;
@@ -71,7 +89,6 @@ extern "C" {
     ) -> c_int;
     pub fn cabin_rdp_send_unicode(client: *mut cabin_rdp, code: u16, down: c_int) -> c_int;
     pub fn cabin_rdp_send_pointer(client: *mut cabin_rdp, x: u32, y: u32, flags: u32) -> c_int;
-    pub fn cabin_rdp_send_wheel(client: *mut cabin_rdp, delta: i32, horizontal: c_int) -> c_int;
     pub fn cabin_rdp_disconnect(client: *mut cabin_rdp);
     pub fn cabin_rdp_last_error(client: *mut cabin_rdp) -> u32;
 }
@@ -104,11 +121,14 @@ mod tests {
             let client = cabin_rdp_new();
             assert!(!client.is_null());
             let (mut w, mut h, mut s) = (0u32, 0u32, 0u32);
-            let buf = cabin_rdp_framebuffer(client, &mut w, &mut h, &mut s);
-            assert!(
-                buf.is_null(),
+            let rc = cabin_rdp_framebuffer_info(client, &mut w, &mut h, &mut s);
+            assert_eq!(
+                rc, CABIN_ERR_NOT_READY,
                 "there should be no framebuffer before connecting"
             );
+            let mut buf = [0u8; 16];
+            let rc = cabin_rdp_copy_framebuffer(client, buf.as_mut_ptr(), buf.len(), 2, 2, 8);
+            assert_eq!(rc, CABIN_ERR_NOT_READY, "nothing should be copied");
             cabin_rdp_free(client);
         }
     }

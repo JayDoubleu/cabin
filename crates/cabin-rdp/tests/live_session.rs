@@ -3,7 +3,11 @@
 //!
 //! Needs a running guest:
 //!     just guest-clean && just guest-test
-//!     cargo test -p cabin-rdp -- --ignored --nocapture
+//!     just rdp-live
+//!
+//! Do not run this file at the same time as live_connect.rs or live_input.rs.
+//! The guest serves one RDP session at a time, so concurrent tests reject each
+//! other. `just rdp-live` runs the files one after the other.
 
 use cabin_rdp::{
     run_session, ConnectionParams, Credentials, PixelFormat, SessionCommand, SessionEvent,

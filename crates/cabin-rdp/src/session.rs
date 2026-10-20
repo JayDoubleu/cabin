@@ -1,18 +1,15 @@
 //! The message contract between the RDP session and the user interface.
 //!
-//! The session runs on its own thread with its own Tokio runtime. It never
-//! touches GTK types. Everything crosses through these two enums, over bounded
-//! channels, so a slow interface applies back pressure instead of growing a
-//! queue. See DESIGN.md section 6.2.
+//! The session runs on a plain thread of its own, in `run_session`, and never
+//! touches GTK types. Everything crosses through these two enums.
+//!
+//! - Commands go to the session over a `std::sync::mpsc` channel, which has
+//!   no bound. Input is small and the session drains it on every poll.
+//! - Events come back over an `async_channel`, and the caller chooses the
+//!   bound. The viewer uses a bound of one, so a slow interface applies back
+//!   pressure on frames instead of growing a queue. See DESIGN.md section 6.2.
 
 use crate::frame::Frame;
-use tokio::sync::mpsc;
-
-/// How many frames may wait for the interface before the session blocks.
-/// One is deliberate: a stale frame has no value, so the session should wait
-/// rather than build a backlog.
-const FRAME_QUEUE: usize = 1;
-const COMMAND_QUEUE: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct Credentials {
@@ -51,9 +48,12 @@ pub enum SessionCommand {
         button: u8,
         pressed: bool,
     },
+    /// Wheel rotation in RDP units, where 120 is one notch. Positive
+    /// vertical is away from the user. The session splits a large value into
+    /// several events, so any value is safe to send.
     PointerScroll {
-        horizontal: i16,
-        vertical: i16,
+        horizontal: i32,
+        vertical: i32,
     },
     ClipboardOffer {
         text: String,
@@ -94,43 +94,13 @@ pub enum SessionEvent {
     Disconnected {
         reason: String,
     },
+    /// The guest presented a certificate that does not match the one recorded
+    /// for it. The session does not retry this, because only the user can
+    /// decide whether the change is expected. `seen` is the new fingerprint.
+    CertificateChanged {
+        seen: String,
+    },
     Error(String),
-}
-
-/// The interface's end of a session.
-pub struct SessionHandle {
-    commands: mpsc::Sender<SessionCommand>,
-    events: mpsc::Receiver<SessionEvent>,
-}
-
-impl SessionHandle {
-    /// Builds a connected pair. The returned halves belong to the session
-    /// thread.
-    pub fn channel() -> (
-        Self,
-        mpsc::Receiver<SessionCommand>,
-        mpsc::Sender<SessionEvent>,
-    ) {
-        let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE);
-        let (event_tx, event_rx) = mpsc::channel(FRAME_QUEUE);
-        (
-            Self {
-                commands: command_tx,
-                events: event_rx,
-            },
-            command_rx,
-            event_tx,
-        )
-    }
-
-    /// Sends a command. Returns false when the session has already ended.
-    pub fn send(&self, command: SessionCommand) -> bool {
-        self.commands.try_send(command).is_ok()
-    }
-
-    pub async fn next_event(&mut self) -> Option<SessionEvent> {
-        self.events.recv().await
-    }
 }
 
 /// PC/AT scancodes for the keys Cabin sends itself.
@@ -142,6 +112,90 @@ pub mod scancode {
     pub const ESCAPE: u16 = 0x01;
     /// The left Super key. Toggles the Activities overview. Extended.
     pub const LEFT_SUPER: u16 = 0x5B;
+}
+
+/// Wheel rotation, from what GTK reports to what RDP carries.
+pub mod wheel {
+    /// One wheel notch, in RDP units.
+    pub const NOTCH: i32 = 120;
+
+    /// How far a touchpad moves, in pixels, for one notch.
+    ///
+    /// A touchpad reports pixels, not notches. Sending one notch per pixel
+    /// scrolled a page for a small finger movement.
+    pub const PIXELS_PER_NOTCH: f64 = 12.0;
+
+    /// The largest rotation one RDP wheel event can carry.
+    ///
+    /// The field is nine bit two's complement, so the range is -256 to 255.
+    /// Cabin uses the same magnitude in both directions.
+    pub const MAX_STEP: i32 = 255;
+
+    /// The largest rotation taken from one GTK event.
+    ///
+    /// A fast fling can report a very large delta. Without a limit, one event
+    /// could become thousands of RDP events.
+    pub const MAX_PER_EVENT: i32 = NOTCH * 20;
+
+    /// What a GTK scroll delta counts.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Unit {
+        /// Wheel notches. A mouse wheel reports this.
+        Wheel,
+        /// Surface pixels. A touchpad reports this.
+        Pixels,
+    }
+
+    /// Turns a stream of fractional deltas into whole RDP units.
+    ///
+    /// A touchpad reports many small deltas. Each one alone is less than one
+    /// RDP unit, so rounding each one drops all of them. The accumulator keeps
+    /// the part that was not sent and adds it to the next delta.
+    #[derive(Debug, Clone, Copy, Default, PartialEq)]
+    pub struct Accumulator {
+        remainder: f64,
+    }
+
+    impl Accumulator {
+        /// Adds a GTK delta and returns the whole RDP units to send now.
+        pub fn feed(&mut self, delta: f64, unit: Unit) -> i32 {
+            if !delta.is_finite() {
+                return 0;
+            }
+            let units = match unit {
+                Unit::Wheel => delta * NOTCH as f64,
+                Unit::Pixels => delta / PIXELS_PER_NOTCH * NOTCH as f64,
+            };
+            let total = self.remainder + units;
+            let whole = total.trunc();
+            self.remainder = total - whole;
+            let limit = MAX_PER_EVENT as f64;
+            whole.clamp(-limit, limit) as i32
+        }
+
+        /// Forgets any part of a unit that was not sent.
+        pub fn reset(&mut self) {
+            self.remainder = 0.0;
+        }
+    }
+
+    /// Splits a rotation into RDP wheel events and encodes each one.
+    ///
+    /// Each value is the rotation field of one pointer event, ready to be
+    /// combined with the wheel flag. A negative step is nine bit two's
+    /// complement, so the encoding sets the sign bit itself. The guest decodes
+    /// it that way. An earlier version sent the sign and the magnitude, and
+    /// the guest read a scroll of -120 as -136, and -1 as -255.
+    pub fn encode(delta: i32) -> Vec<u32> {
+        let mut steps = Vec::new();
+        let mut left = delta;
+        while left != 0 {
+            let step = left.clamp(-MAX_STEP, MAX_STEP);
+            steps.push((step as u32) & cabin_freerdp_sys::WHEEL_ROTATION_MASK);
+            left -= step;
+        }
+        steps
+    }
 }
 
 /// Rounds a size for the Display Control channel.
@@ -179,18 +233,111 @@ mod tests {
             assert_eq!(clamp_resolution(w, h), (w, h));
         }
     }
+}
 
-    #[tokio::test]
-    async fn commands_reach_the_session() {
-        let (handle, mut rx, _events) = SessionHandle::channel();
-        assert!(handle.send(SessionCommand::Disconnect));
-        assert!(matches!(rx.recv().await, Some(SessionCommand::Disconnect)));
+#[cfg(test)]
+mod wheel_tests {
+    use super::wheel::*;
+    use cabin_freerdp_sys::PTR_FLAGS_WHEEL_NEGATIVE;
+
+    /// Decodes a step the way the guest does, to check the round trip.
+    fn decode(step: u32) -> i32 {
+        if step & PTR_FLAGS_WHEEL_NEGATIVE != 0 {
+            step as i32 - 0x200
+        } else {
+            step as i32
+        }
     }
 
-    #[tokio::test]
-    async fn sending_fails_once_the_session_is_gone() {
-        let (handle, rx, _events) = SessionHandle::channel();
-        drop(rx);
-        assert!(!handle.send(SessionCommand::Disconnect));
+    #[test]
+    fn one_notch_up_is_positive() {
+        assert_eq!(encode(120), vec![0x078]);
+    }
+
+    #[test]
+    fn one_notch_down_is_twos_complement() {
+        // FreeRDP's own clients send this value for one notch down.
+        assert_eq!(encode(-120), vec![0x188]);
+    }
+
+    #[test]
+    fn the_smallest_step_down_is_all_ones() {
+        assert_eq!(encode(-1), vec![0x1FF]);
+    }
+
+    #[test]
+    fn only_a_negative_step_sets_the_sign_bit() {
+        for delta in [-1, -120, -255] {
+            assert_ne!(encode(delta)[0] & PTR_FLAGS_WHEEL_NEGATIVE, 0, "{delta}");
+        }
+        for delta in [1, 120, 255] {
+            assert_eq!(encode(delta)[0] & PTR_FLAGS_WHEEL_NEGATIVE, 0, "{delta}");
+        }
+    }
+
+    #[test]
+    fn a_large_rotation_splits_without_wrapping() {
+        assert_eq!(encode(300), vec![255, 45]);
+        let steps = encode(-600);
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps.iter().map(|s| decode(*s)).sum::<i32>(), -600);
+    }
+
+    #[test]
+    fn nothing_is_sent_for_no_rotation() {
+        assert!(encode(0).is_empty());
+    }
+
+    #[test]
+    fn every_value_round_trips() {
+        for delta in -1000..=1000 {
+            let sum: i32 = encode(delta).iter().map(|s| decode(*s)).sum();
+            assert_eq!(sum, delta);
+        }
+    }
+
+    #[test]
+    fn a_wheel_notch_is_120_units() {
+        let mut acc = Accumulator::default();
+        assert_eq!(acc.feed(1.0, Unit::Wheel), 120);
+        assert_eq!(acc.feed(-1.0, Unit::Wheel), -120);
+    }
+
+    #[test]
+    fn touchpad_pixels_are_scaled_to_notches() {
+        let mut acc = Accumulator::default();
+        assert_eq!(acc.feed(PIXELS_PER_NOTCH, Unit::Pixels), NOTCH);
+    }
+
+    #[test]
+    fn small_deltas_add_up_instead_of_vanishing() {
+        let mut acc = Accumulator::default();
+        // A hundredth of a notch is 1.2 units. Rounded one at a time, a whole
+        // notch of these would be lost.
+        let sent: i32 = (0..100).map(|_| acc.feed(0.01, Unit::Wheel)).sum();
+        assert!((119..=120).contains(&sent), "sent {sent}");
+    }
+
+    #[test]
+    fn the_sign_is_kept() {
+        let mut acc = Accumulator::default();
+        assert!(acc.feed(-3.0, Unit::Pixels) < 0);
+        let mut acc = Accumulator::default();
+        assert!(acc.feed(3.0, Unit::Pixels) > 0);
+    }
+
+    #[test]
+    fn a_huge_delta_is_limited() {
+        let mut acc = Accumulator::default();
+        assert_eq!(acc.feed(1.0e9, Unit::Pixels), MAX_PER_EVENT);
+        assert_eq!(acc.feed(f64::NAN, Unit::Wheel), 0);
+    }
+
+    #[test]
+    fn reset_drops_the_remainder() {
+        let mut acc = Accumulator::default();
+        acc.feed(0.005, Unit::Wheel);
+        acc.reset();
+        assert_eq!(acc, Accumulator::default());
     }
 }

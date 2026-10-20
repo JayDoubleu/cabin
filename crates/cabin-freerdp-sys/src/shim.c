@@ -13,6 +13,7 @@
 #include <freerdp/gdi/gfx.h>
 #include <freerdp/event.h>
 #include <freerdp/error.h>
+#include <freerdp/update.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,9 @@ struct cabin_rdp
 	uint64_t frames;
 	uint32_t last_error;
 	int connected;
+	/* Set while freerdp_connect has succeeded and no disconnect has run.
+	 * See cabin_rdp_free for why the shim tracks this itself. */
+	int needs_disconnect;
 	DispClientContext* disp;
 	pEndPaint original_end_paint;
 	char* expected_fingerprint;
@@ -194,6 +198,22 @@ static BOOL cabin_pre_connect(freerdp* instance)
 	if (!freerdp_settings_set_bool(settings, FreeRDP_SupportEchoChannel, FALSE))
 		return FALSE;
 
+	/* Process the dynamic channels on the session thread, not on a thread of
+	 * their own.
+	 *
+	 * By default drdynvc starts a worker thread, and every graphics pipeline
+	 * PDU runs there. That includes ResetGraphics, which reaches
+	 * cabin_desktop_resize and frees and reallocates the primary buffer. The
+	 * session thread copies that same buffer, so a resize in the middle of a
+	 * copy gave a torn description (the new width with the old stride) or a
+	 * read from freed memory. With this set, all channel work runs inside
+	 * freerdp_check_event_handles on the session thread, which is the model
+	 * the Rust side assumes. drdynvc reads the setting when it loads, so it
+	 * must be set before freerdp_client_load_addins. See DESIGN.md section
+	 * 17.2. */
+	if (!freerdp_settings_set_bool(settings, FreeRDP_SynchronousDynamicChannels, TRUE))
+		return FALSE;
+
 	if (!freerdp_client_load_addins(instance->context->channels, settings))
 		return FALSE;
 
@@ -323,10 +343,23 @@ cabin_rdp* cabin_rdp_new(void)
 	return self;
 }
 
+/* A session that ends on its own still needs freerdp_disconnect.
+ *
+ * freerdp_client_context_free does not run PostDisconnect and does not close
+ * the channels. Without a disconnect, gdi_free never runs, so the framebuffer
+ * and the codec state leak, and the channel plugins are never told to stop.
+ * The shim records whether a disconnect is still owed, so every client that
+ * connected gets exactly one, whichever path ends the session. */
 void cabin_rdp_free(cabin_rdp* self)
 {
 	if (!self)
 		return;
+	if (self->ctx && self->needs_disconnect)
+	{
+		freerdp_disconnect(self->ctx->context.instance);
+		self->needs_disconnect = 0;
+		self->connected = 0;
+	}
 	if (self->ctx)
 		freerdp_client_context_free(&self->ctx->context);
 	free(self->expected_fingerprint);
@@ -404,6 +437,8 @@ int cabin_rdp_connect(cabin_rdp* self)
 		return CABIN_ERR_GENERIC;
 
 	freerdp* instance = self->ctx->context.instance;
+	/* A failed freerdp_connect disconnects by itself, so a disconnect is owed
+	 * only after a success. */
 	if (!freerdp_connect(instance))
 	{
 		self->last_error = freerdp_get_last_error(&self->ctx->context);
@@ -418,6 +453,7 @@ int cabin_rdp_connect(cabin_rdp* self)
 		}
 	}
 
+	self->needs_disconnect = 1;
 	return CABIN_OK;
 }
 
@@ -450,31 +486,86 @@ int cabin_rdp_poll(cabin_rdp* self, uint32_t timeout_ms)
 	return 1;
 }
 
-/* Reports the current framebuffer, or NULL when there is not one to report.
+/* Finds the primary bitmap, or NULL when there is not one to read.
  *
  * The connected flag is not belt and braces. PostDisconnect calls gdi_free,
  * which releases the primary buffer, and it can run inside a poll that still
- * reports the session as alive. A caller that then asks for the framebuffer
- * gets a pointer into freed memory, and copying from it crashes rather than
- * showing a bad frame. cabin_post_disconnect clears the flag before it frees
- * anything, so checking it here closes that window. */
-const uint8_t* cabin_rdp_framebuffer(cabin_rdp* self, uint32_t* width, uint32_t* height,
-                                     uint32_t* stride)
+ * reports the session as alive. A caller that then reads the framebuffer reads
+ * freed memory, and that crashes rather than showing a bad frame.
+ * cabin_post_disconnect clears the flag before it frees anything, so checking
+ * it here closes that window.
+ *
+ * The caller must hold the update lock. */
+static const GDI_BITMAP* primary_bitmap(cabin_rdp* self)
 {
 	if (!self || !self->ctx || !self->connected)
 		return NULL;
-
 	rdpGdi* gdi = self->ctx->context.gdi;
-	if (!gdi || !gdi->primary_buffer)
+	if (!gdi || !gdi->primary || !gdi->primary->bitmap)
 		return NULL;
+	const GDI_BITMAP* bitmap = gdi->primary->bitmap;
+	if (!bitmap->data || bitmap->width <= 0 || bitmap->height <= 0)
+		return NULL;
+	return bitmap;
+}
 
-	if (width)
-		*width = (uint32_t)gdi->width;
-	if (height)
-		*height = (uint32_t)gdi->height;
-	if (stride)
-		*stride = (uint32_t)gdi->stride;
-	return (const uint8_t*)gdi->primary_buffer;
+/* Both framebuffer functions take the update lock. gdi_resize_ex takes it
+ * when it replaces the primary bitmap, and FreeRDP holds it while it paints.
+ * Synchronous dynamic channels already keep all of that on the session
+ * thread, so the lock is defence in depth: if FreeRDP ever moves the work to
+ * another thread again, a copy still sees one consistent bitmap. The pointer
+ * never leaves the lock, because the bitmap can be freed as soon as the lock
+ * is released. */
+int cabin_rdp_framebuffer_info(cabin_rdp* self, uint32_t* width, uint32_t* height,
+                               uint32_t* stride)
+{
+	if (!self || !self->ctx || !self->connected)
+		return CABIN_ERR_NOT_READY;
+
+	rdpUpdate* update = self->ctx->context.update;
+	rdp_update_lock(update);
+	const GDI_BITMAP* bitmap = primary_bitmap(self);
+	if (bitmap)
+	{
+		if (width)
+			*width = (uint32_t)bitmap->width;
+		if (height)
+			*height = (uint32_t)bitmap->height;
+		if (stride)
+			*stride = bitmap->scanline;
+	}
+	rdp_update_unlock(update);
+	return bitmap ? CABIN_OK : CABIN_ERR_NOT_READY;
+}
+
+int cabin_rdp_copy_framebuffer(cabin_rdp* self, uint8_t* dst, size_t dst_len, uint32_t width,
+                               uint32_t height, uint32_t stride)
+{
+	if (!self || !self->ctx || !dst)
+		return CABIN_ERR_GENERIC;
+	if (!self->connected)
+		return CABIN_ERR_NOT_READY;
+
+	const size_t row_bytes = (size_t)width * 4;
+	if (width == 0 || height == 0 || stride < row_bytes || dst_len / row_bytes < height)
+		return CABIN_ERR_GENERIC;
+
+	int rc = CABIN_ERR_NOT_READY;
+	rdpUpdate* update = self->ctx->context.update;
+	rdp_update_lock(update);
+	const GDI_BITMAP* bitmap = primary_bitmap(self);
+	/* Copy only when the bitmap is still the one the caller checked. A
+	 * mismatch means it changed between the two calls, and the next frame
+	 * carries the new description. */
+	if (bitmap && (uint32_t)bitmap->width == width && (uint32_t)bitmap->height == height &&
+	    bitmap->scanline == stride)
+	{
+		for (uint32_t row = 0; row < height; row++)
+			memcpy(dst + (size_t)row * row_bytes, bitmap->data + (size_t)row * stride, row_bytes);
+		rc = CABIN_OK;
+	}
+	rdp_update_unlock(update);
+	return rc;
 }
 
 uint64_t cabin_rdp_frame_count(cabin_rdp* self)
@@ -544,26 +635,12 @@ int cabin_rdp_send_pointer(cabin_rdp* self, uint32_t x, uint32_t y, uint32_t fla
 	           : CABIN_ERR_GENERIC;
 }
 
-int cabin_rdp_send_wheel(cabin_rdp* self, int32_t delta, int horizontal)
-{
-	if (!self || !self->ctx)
-		return CABIN_ERR_GENERIC;
-	UINT16 flags = horizontal ? PTR_FLAGS_HWHEEL : PTR_FLAGS_WHEEL;
-	if (delta < 0)
-	{
-		flags |= PTR_FLAGS_WHEEL_NEGATIVE;
-		delta = -delta;
-	}
-	flags |= (UINT16)(delta & 0xFF);
-	return freerdp_input_send_mouse_event(self->ctx->context.input, flags, 0, 0) ? CABIN_OK
-	                                                                            : CABIN_ERR_GENERIC;
-}
-
 void cabin_rdp_disconnect(cabin_rdp* self)
 {
 	if (!self || !self->ctx)
 		return;
 	freerdp_disconnect(self->ctx->context.instance);
+	self->needs_disconnect = 0;
 	self->connected = 0;
 }
 

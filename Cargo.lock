@@ -101,7 +101,6 @@ dependencies = [
  "async-channel",
  "cabin-freerdp-sys",
  "thiserror",
- "tokio",
  "tracing",
 ]
 

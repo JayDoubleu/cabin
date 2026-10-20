@@ -12,7 +12,7 @@ use adw::prelude::*;
 use cabin_core::Desktop;
 use cabin_rdp::{ConnectionParams, Credentials, SessionEvent};
 use std::cell::{Cell, RefCell};
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
 const PAGE_EMPTY: &str = "empty";
 const PAGE_DESKTOP: &str = "desktop";
@@ -86,7 +86,9 @@ impl Viewer {
 
         let sidebar_toggle = gtk::ToggleButton::builder()
             .icon_name("sidebar-show-symbolic")
-            .tooltip_text("Show the desktop list")
+            // Matches active(true). The window updates it on notify::active,
+            // and setting the same value again emits no notify.
+            .tooltip_text("Hide the desktop list")
             .active(true)
             .build();
         header.pack_start(&sidebar_toggle);
@@ -284,21 +286,80 @@ impl Viewer {
         );
         let weak = Rc::downgrade(self);
         let desktop = desktop.clone();
-        self.set_action(weak, desktop);
+        self.set_action(move || {
+            if let Some(viewer) = weak.upgrade() {
+                viewer.open(desktop.clone());
+            }
+        });
     }
 
-    fn set_action(&self, viewer: Weak<Self>, desktop: Desktop) {
+    /// The pane for a desktop whose certificate is not the recorded one.
+    ///
+    /// Reconnecting would only fail again, because it checks the same pin.
+    /// So the pane offers to trust the new certificate instead, and asks
+    /// first. The session never does this by itself.
+    fn show_certificate_changed(self: &Rc<Self>, desktop: &Desktop, seen: &str) {
+        self.set_placeholder(
+            "security-low-symbolic",
+            &format!("{} presented a new certificate", desktop.name),
+            "This desktop presented a different security certificate than last \
+             time. That is expected if the desktop was rebuilt from scratch. If it \
+             was not, something may be intercepting the connection.",
+            Some("Trust New Certificate"),
+        );
+        let weak = Rc::downgrade(self);
+        let desktop = desktop.clone();
+        let seen = seen.to_string();
+        self.set_action(move || {
+            if let Some(viewer) = weak.upgrade() {
+                viewer.confirm_new_certificate(&desktop, &seen);
+            }
+        });
+    }
+
+    /// Asks before trusting a changed certificate, then reconnects.
+    fn confirm_new_certificate(self: &Rc<Self>, desktop: &Desktop, seen: &str) {
+        let dialog = adw::AlertDialog::builder()
+            .heading("Trust the New Certificate?")
+            .body(format!(
+                "Trust it only if you know why {} changed, for example because \
+                 it was rebuilt.\n\nIt now presents:\n{seen}",
+                desktop.name
+            ))
+            .build();
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("trust", "Trust");
+        dialog.set_response_appearance("trust", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        let weak = Rc::downgrade(self);
+        let desktop = desktop.clone();
+        let seen = seen.to_string();
+        dialog.connect_response(None, move |_, response| {
+            if response != "trust" {
+                return;
+            }
+            let Some(viewer) = weak.upgrade() else {
+                return;
+            };
+            // Record the fingerprint the user saw, rather than forgetting the
+            // pin. Forgetting would accept whatever the next connection
+            // presents, which need not be the certificate shown here.
+            tracing::info!("trusting a new certificate for {}", desktop.name);
+            crate::pinning::record(&desktop.name, &seen);
+            viewer.open(desktop.clone());
+        });
+        dialog.present(Some(&self.content));
+    }
+
+    fn set_action(&self, on_click: impl Fn() + 'static) {
         // A button keeps every handler ever connected, and this button is
         // reused, so an old handler would reopen a stale desktop.
         if let Some(id) = self.action_handler.take() {
             self.action.disconnect(id);
         }
-        let id = self.action.connect_clicked(move |_| {
-            let Some(viewer) = viewer.upgrade() else {
-                return;
-            };
-            viewer.open(desktop.clone());
-        });
+        let id = self.action.connect_clicked(move |_| on_click());
         self.action_handler.set(Some(id));
     }
 
@@ -352,6 +413,14 @@ impl Viewer {
             .as_ref()
             .is_some_and(|s| s.desktop.state.is_running());
         if was_stopped {
+            // Record the running state first. Opening fetches the password
+            // before it attaches, and starting a desktop sends several Podman
+            // events, so a later list would otherwise see "stopped" again and
+            // open the same desktop a second time.
+            *self.shown.borrow_mut() = Some(Shown {
+                desktop: current.clone(),
+                live: false,
+            });
             self.open(current.clone());
         }
     }
@@ -359,6 +428,13 @@ impl Viewer {
     /// Connects to `desktop` and draws it.
     pub fn attach(self: &Rc<Self>, desktop: &Desktop, password: String) {
         let Some(port) = desktop.rdp_port else {
+            // Detach first, so the session this replaces can no longer write
+            // to the pane, and the pane names the desktop it now shows.
+            self.detach();
+            *self.shown.borrow_mut() = Some(Shown {
+                desktop: desktop.clone(),
+                live: false,
+            });
             self.show_failure(desktop, "The desktop publishes no RDP port.");
             return;
         };
@@ -391,6 +467,8 @@ impl Viewer {
         };
 
         let (command_tx, command_rx) = std::sync::mpsc::channel();
+        // One frame at most waits for the interface. A stale frame has no
+        // value, so the session should wait rather than build a backlog.
         let (event_tx, event_rx) = async_channel::bounded(1);
 
         let name = desktop.name.clone();
@@ -464,6 +542,12 @@ impl Viewer {
                         viewer.session_ended(&desktop, &reason);
                         return;
                     }
+                    SessionEvent::CertificateChanged { seen } => {
+                        tracing::warn!("{} presented a new certificate", desktop.name);
+                        viewer.mark_ended();
+                        viewer.show_certificate_changed(&desktop, &seen);
+                        return;
+                    }
                     SessionEvent::Error(message) => {
                         tracing::error!("session failed: {message}");
                         viewer.session_ended(&desktop, &message);
@@ -477,11 +561,16 @@ impl Viewer {
 
     /// Records that the session for `desktop` has gone, and says why.
     fn session_ended(self: &Rc<Self>, desktop: &Desktop, reason: &str) {
+        self.mark_ended();
+        self.show_failure(desktop, reason);
+    }
+
+    /// Records that the session on screen has stopped running.
+    fn mark_ended(&self) {
         if let Some(shown) = self.shown.borrow_mut().as_mut() {
             shown.live = false;
         }
         self.display.clear_command_sender();
-        self.show_failure(desktop, reason);
     }
 
     /// Ends the current session, if there is one, and invalidates it.

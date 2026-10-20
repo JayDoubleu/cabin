@@ -8,6 +8,7 @@
 //! sends a resize request per frame and the guest re-lays out continuously.
 //! See DESIGN.md section 6.4.
 
+use cabin_rdp::session::wheel;
 use cabin_rdp::Frame;
 use gtk::glib;
 use gtk::prelude::*;
@@ -36,6 +37,15 @@ mod imp {
         pub last_requested: Cell<Option<(u32, u32)>>,
         /// Set when a fixed resolution is chosen instead of fit.
         pub fixed_size: Cell<Option<(u32, u32)>>,
+        /// The keys the guest holds down, so they can be released when the
+        /// display loses focus.
+        pub held_keys: RefCell<crate::keymap::HeldKeys>,
+        /// The part of a wheel unit not yet sent, for each axis.
+        pub scroll_x: Cell<wheel::Accumulator>,
+        pub scroll_y: Cell<wheel::Accumulator>,
+        /// The window whose activation is watched, and the handler, so the
+        /// handler can be removed when the widget leaves that window.
+        pub active_watch: RefCell<Option<(glib::WeakRef<gtk::Window>, glib::SignalHandlerId)>>,
     }
 
     #[glib::object_subclass]
@@ -64,6 +74,20 @@ mod imp {
     }
 
     impl WidgetImpl for CabinDisplay {
+        fn realize(&self) {
+            self.parent_realize();
+            self.obj().watch_window_activation();
+        }
+
+        fn unrealize(&self) {
+            if let Some((window, id)) = self.active_watch.take() {
+                if let Some(window) = window.upgrade() {
+                    window.disconnect(id);
+                }
+            }
+            self.parent_unrealize();
+        }
+
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
             self.parent_size_allocate(width, height, baseline);
             if self.fit_to_window.get() {
@@ -166,15 +190,22 @@ impl CabinDisplay {
 
     /// Detaches the session, so no further input is sent.
     pub fn clear_command_sender(&self) {
+        // Release first, while the sender still exists. A new session then
+        // starts with no keys down, as the guest does.
+        self.release_held_keys();
         let imp = self.imp();
         imp.commands.replace(None);
         imp.last_requested.set(None);
+        imp.scroll_x.set(wheel::Accumulator::default());
+        imp.scroll_y.set(wheel::Accumulator::default());
     }
 
     /// Ends the session cleanly, so its thread stops rather than being left to
     /// discover the disconnection on its own.
     pub fn disconnect_session(&self) {
         self.cancel_pending_resize();
+        // Before the Disconnect, or the session ends without them.
+        self.release_held_keys();
         self.send(cabin_rdp::SessionCommand::Disconnect);
         self.clear_command_sender();
         self.imp().texture.replace(None);
@@ -246,6 +277,13 @@ impl CabinDisplay {
         });
         self.add_controller(keys);
 
+        // GTK sends no release for a key lifted after focus leaves, so the
+        // guest would keep it held. Release everything on the way out.
+        let focus = gtk::EventControllerFocus::new();
+        let widget = self.clone();
+        focus.connect_leave(move |_| widget.release_held_keys());
+        self.add_controller(focus);
+
         let motion = gtk::EventControllerMotion::new();
         let widget = self.clone();
         motion.connect_motion(move |_, x, y| {
@@ -271,13 +309,27 @@ impl CabinDisplay {
 
         let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
         let widget = self.clone();
-        scroll.connect_scroll(move |_, dx, dy| {
-            // RDP counts wheel notches in units of 120, and its vertical sign
-            // is the opposite of GTK's.
-            widget.send(cabin_rdp::SessionCommand::PointerScroll {
-                horizontal: (dx * 120.0) as i16,
-                vertical: (-dy * 120.0) as i16,
-            });
+        scroll.connect_scroll(move |controller, dx, dy| {
+            // A mouse wheel reports notches and a touchpad reports pixels, so
+            // the unit decides the scale. See cabin_rdp::session::wheel.
+            let unit = match controller.unit() {
+                gtk::gdk::ScrollUnit::Surface => wheel::Unit::Pixels,
+                _ => wheel::Unit::Wheel,
+            };
+            let imp = widget.imp();
+            let mut x = imp.scroll_x.get();
+            let mut y = imp.scroll_y.get();
+            // RDP's vertical sign is the opposite of GTK's.
+            let horizontal = x.feed(dx, unit);
+            let vertical = y.feed(-dy, unit);
+            imp.scroll_x.set(x);
+            imp.scroll_y.set(y);
+            if horizontal != 0 || vertical != 0 {
+                widget.send(cabin_rdp::SessionCommand::PointerScroll {
+                    horizontal,
+                    vertical,
+                });
+            }
             gtk::glib::Propagation::Stop
         });
         self.add_controller(scroll);
@@ -290,11 +342,55 @@ impl CabinDisplay {
             tracing::trace!("no scancode for keycode {hardware_keycode}");
             return;
         };
-        self.send(cabin_rdp::SessionCommand::KeyPress {
+        if self.send(cabin_rdp::SessionCommand::KeyPress {
             scancode,
             extended,
             pressed,
+        }) {
+            self.imp()
+                .held_keys
+                .borrow_mut()
+                .record(scancode, extended, pressed);
+        }
+    }
+
+    /// Releases in the guest every key it believes is held.
+    fn release_held_keys(&self) {
+        let keys = self.imp().held_keys.borrow_mut().take_all();
+        for (scancode, extended) in keys {
+            self.send(cabin_rdp::SessionCommand::KeyPress {
+                scancode,
+                extended,
+                pressed: false,
+            });
+        }
+    }
+
+    /// Releases held keys when the window stops being the active one.
+    ///
+    /// Focus leave alone is not enough. When the whole window loses
+    /// activation, for example on Alt+Tab, the focus widget inside it may
+    /// not get a leave event.
+    fn watch_window_activation(&self) {
+        let imp = self.imp();
+        if let Some((window, id)) = imp.active_watch.take() {
+            if let Some(window) = window.upgrade() {
+                window.disconnect(id);
+            }
+        }
+        let Some(window) = self.root().and_downcast::<gtk::Window>() else {
+            return;
+        };
+        let weak = self.downgrade();
+        let id = window.connect_is_active_notify(move |window| {
+            if window.is_active() {
+                return;
+            }
+            if let Some(widget) = weak.upgrade() {
+                widget.release_held_keys();
+            }
         });
+        imp.active_watch.replace(Some((window.downgrade(), id)));
     }
 
     fn send_button(&self, button: u8, x: f64, y: f64, pressed: bool) {

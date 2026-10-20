@@ -3,10 +3,12 @@
 //! This crate owns the connection to a guest and produces frames. It knows
 //! nothing about GTK, so it can be tested without a display.
 //!
-//! # Status
+//! # How it works
 //!
-//! The types and the message contract are defined and tested. The IronRDP
-//! session itself is not wired up yet. That is milestone 4 in DESIGN.md.
+//! The session runs on FreeRDP 3, through the C shim in `cabin-freerdp-sys`.
+//! See DESIGN.md sections 14 and 15 for why. [`run_session`] is the entry
+//! point. It blocks its thread until the session ends, so the caller gives it
+//! a thread of its own and talks to it through the channels in [`session`].
 //!
 //! # Required capabilities
 //!
@@ -20,7 +22,7 @@ pub mod session;
 
 pub use client::{run_session, ConnectionParams};
 pub use frame::{Frame, PixelFormat, Rect};
-pub use session::{Credentials, SessionCommand, SessionEvent, SessionHandle};
+pub use session::{Credentials, SessionCommand, SessionEvent};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

@@ -82,14 +82,19 @@ fn connects_and_receives_frames() {
 
     let (mut w, mut h, mut stride) = (0u32, 0u32, 0u32);
     // SAFETY: valid handle and out pointers.
-    let buf = unsafe { cabin_rdp_framebuffer(client.0, &mut w, &mut h, &mut stride) };
-    assert!(!buf.is_null(), "no framebuffer after {frames} frames");
+    let rc = unsafe { cabin_rdp_framebuffer_info(client.0, &mut w, &mut h, &mut stride) };
+    assert_eq!(rc, CABIN_OK, "no framebuffer after {frames} frames");
     println!("frames={frames} size={w}x{h} stride={stride}");
     assert_eq!(w, 1920);
     assert_eq!(h, 1080);
 
-    // SAFETY: the shim guarantees stride * height bytes are readable.
-    let pixels = unsafe { std::slice::from_raw_parts(buf, (stride * h) as usize) };
+    let mut buffer = vec![0u8; w as usize * 4 * h as usize];
+    // SAFETY: valid handle, and the buffer holds the length passed.
+    let rc = unsafe {
+        cabin_rdp_copy_framebuffer(client.0, buffer.as_mut_ptr(), buffer.len(), w, h, stride)
+    };
+    assert_eq!(rc, CABIN_OK, "the framebuffer could not be copied");
+    let pixels = buffer.as_slice();
     let non_black = pixels.chunks(4).filter(|p| p[0] | p[1] | p[2] != 0).count();
     println!("non-black pixels: {non_black}");
     assert!(
@@ -103,7 +108,8 @@ fn connects_and_receives_frames() {
         let mut raw = Vec::with_capacity(pixels.len());
         raw.extend_from_slice(&w.to_le_bytes());
         raw.extend_from_slice(&h.to_le_bytes());
-        raw.extend_from_slice(&stride.to_le_bytes());
+        // The copy is packed, so the dump states a packed stride.
+        raw.extend_from_slice(&(w * 4).to_le_bytes());
         raw.extend_from_slice(pixels);
         std::fs::write(&path, raw).expect("could not write the dump");
         println!("wrote {path}");
