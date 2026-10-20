@@ -252,9 +252,9 @@ disk outside the home directory. The `just flatpak` recipe already does this.
 
 ## Style
 
-The repository follows the global instructions in `~/.claude/CLAUDE.md`:
-Simplified Technical English, British spelling in prose, and no em-dashes
-anywhere. Code identifiers keep their original spelling.
+Write prose, comments and commit messages in Simplified Technical English,
+with British spelling. Do not use em-dashes anywhere. Code identifiers keep
+their original spelling.
 
 Comments explain why, not what. Several comments in this tree record a
 constraint that was found the hard way. Do not delete those when refactoring.
