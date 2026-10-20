@@ -38,7 +38,17 @@ fn main() -> gtk::glib::ExitCode {
         )
         .init();
 
-    let app = adw::Application::builder().application_id(APP_ID).build();
+    // A second launch normally hands over to the running instance and exits
+    // with no output. A developer who runs a new build beside the installed
+    // one needs it to start on its own. docs/HOST-SETUP.md describes this.
+    let mut flags = gtk::gio::ApplicationFlags::empty();
+    if std::env::var_os("CABIN_DEV_INSTANCE").is_some() {
+        flags |= gtk::gio::ApplicationFlags::NON_UNIQUE;
+    }
+    let app = adw::Application::builder()
+        .application_id(APP_ID)
+        .flags(flags)
+        .build();
 
     app.connect_activate(app::activate);
     app.run()
