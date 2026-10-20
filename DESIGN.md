@@ -494,11 +494,11 @@ assumption.
 
 | Item | Value |
 |---|---|
-| Runtime | `org.gnome.Platform//50` |
-| SDK | `org.gnome.Sdk//50` |
-| Rust | `org.freedesktop.Sdk.Extension.rust-stable//25.08` |
+| Runtime | `org.gnome.Platform//51` |
+| SDK | `org.gnome.Sdk//51` |
+| Rust | `org.freedesktop.Sdk.Extension.rust-stable//26.08` |
 | Build system | Meson, which drives Cargo |
-| Bundled | FreeRDP 3.30.0, built from source |
+| Bundled | FreeRDP 3.32.2, built from source |
 
 FreeRDP is not in the GNOME runtime, so the manifest builds it. The build turns
 off everything Cabin does not use: FreeRDP's own clients, servers and tools,
@@ -539,7 +539,7 @@ flag stops Cabin creating files next to it.
 ### 9.2 Building
 
 Cabin builds from a Fedora toolbox. `flatpak-builder`, `flatpak`, and `bwrap`
-all work inside the container, and the GNOME 50 SDK is installed in the user
+all work inside the container, and the GNOME 51 SDK is installed in the user
 Flatpak installation, which the toolbox sees through the shared home directory.
 
 ```sh
