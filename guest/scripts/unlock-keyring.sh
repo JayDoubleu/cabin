@@ -9,8 +9,8 @@ if [ -S "${CONTROL}" ]; then
 fi
 
 # The output goes under XDG_RUNTIME_DIR because this runs as the desktop user.
-# /run/cabin belongs to root and holds the password, so it must stay closed to
-# the user. An earlier version wrote there: bash then could not open the file,
+# /run/cabin belongs to root, so the desktop user cannot create files in it.
+# An earlier version wrote there: bash then could not open the file,
 # never started the daemon, and the error was discarded, so no keyring ran.
 #
 # Errors are not hidden. If the daemon fails, the unit fails and the journal
