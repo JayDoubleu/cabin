@@ -2663,8 +2663,14 @@ on the host. The parts are these:
   window list selects by window type.
 - A Podman command in the session must get the real `HOME` and `XDG_*`
   values. With the private ones it opens a new, empty store.
-- The file chooser portal returns paths under the private runtime folder, so
-  the share dialogue shows such a path. A real session never does that.
+- The file chooser portal returns paths under the private runtime folder,
+  because it builds them from the mount point of the document portal. Cabin
+  knew only `/run/user/UID/doc` and `/run/flatpak/doc`, so it took such a
+  path for a real one and gave it to Podman. Cabin now also asks the
+  document portal for its mount point (`GetMountPoint`), and turns those
+  paths back into real ones too.
+- gvfsd starts `wsdd` for network discovery, and `wsdd` outlives the session
+  bus. Each session left one behind. `session.sh` stops it at the end.
 
 ### 23.3 What the first run found
 
@@ -2701,6 +2707,37 @@ Each of these is fixed, and the test checks it:
   upstream.
 - A new desktop is created stopped, and the user starts it from the sidebar.
   The pane says so.
-- The guest's host name is the short container id, so the shell prompt shows
-  something like `cabin@4b512ef612a5`.
+- The guest's host name was the short container id, so the shell prompt
+  showed something like `cabin@4b512ef612a5`. The screenshots made this
+  visible, and the create request now sets the host name to the desktop's
+  name (section 23.5).
+
+### 23.5 The screenshots
+
+`take.sh` in the same folder makes the images in `docs/screenshots`, which
+the README and the metainfo use. Run it on the host:
+
+    build-aux/screenshots/take.sh
+
+It uses the same private session, on a 1600x1000 virtual monitor. The
+window is 1440x900, so it is not maximised and the shot keeps the shadow
+and the rounded corners, as a GNOME screenshot of a window does. The parts
+are these:
+
+- `shots.py` makes the demo desktops `fedora-dev`, `web-project` and
+  `sandbox`. A screenshot shows their names, so they have no test prefix.
+  The script stops if any of them, or their volumes, exist already, and it
+  deletes them at the end.
+- `podman-proxy.py` takes the names to show as an argument, and can hide
+  untagged images. The user's old builds then stay out of the Guest Images
+  shot. A prune still sees every image.
+- The share in the settings shot is added through the real file chooser and
+  is never applied. Paths in the home folder show as `~`, so the shot shows
+  `~/Projects/web-project`.
+- There is no shot of Connect From Another Device. That dialogue shows the
+  real addresses of this computer, and remote access would publish a demo
+  desktop on the real network.
+
+Look at every image before you commit it. The work shots and Cabin's output
+go to `~/.cache/cabin-shots`.
 

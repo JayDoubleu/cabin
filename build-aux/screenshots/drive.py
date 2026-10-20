@@ -148,22 +148,27 @@ def volumes(prefix):
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Runs in the sandbox. Starts the proxy where Cabin looks for Podman, waits for
-# its socket, then becomes Cabin. $1 is the proxy source, $2 the real socket.
+# its socket, then becomes Cabin. $1 is the proxy source, $2 the real socket,
+# $3 and $4 the optional name patterns and image option of the proxy.
 LAUNCH = """
 mkdir -p "$XDG_RUNTIME_DIR/podman"
-python3 -c "$1" "$XDG_RUNTIME_DIR/podman/podman.sock" "$2" &
+python3 -c "$1" "$XDG_RUNTIME_DIR/podman/podman.sock" "$2" "$3" "$4" &
 while [ ! -S "$XDG_RUNTIME_DIR/podman/podman.sock" ]; do sleep 0.1; done
 exec cabin
 """
 
 
-def launch(log_path):
+def launch(log_path, names=None, hide_dangling=False):
     """Starts the installed Flatpak in the session and returns the process.
 
     Cabin runs with the permissions of its manifest, behind podman-proxy.py,
     which hides every desktop but the test ones. session.sh puts a hard link
     to the real socket in the private runtime folder, and Flatpak binds
     xdg-run/podman of that folder into the sandbox at its host path.
+
+    names is a list of anchored patterns for the desktops that Cabin may see,
+    in place of the "e2e-" and "shot-" prefixes. hide_dangling hides untagged
+    images. See podman-proxy.py.
     """
     with open(os.path.join(HERE, "podman-proxy.py")) as source:
         proxy = source.read()
@@ -181,6 +186,8 @@ def launch(log_path):
             "sh",
             proxy,
             real,
+            ",".join(names or []),
+            "hide-dangling" if hide_dangling else "",
         ],
         stdout=log,
         stderr=subprocess.STDOUT,

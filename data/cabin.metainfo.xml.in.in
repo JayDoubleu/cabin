@@ -33,6 +33,25 @@
 
   <launchable type="desktop-id">@APP_ID@.desktop</launchable>
 
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/JayDoubleu/cabin/main/docs/screenshots/main.png</image>
+      <caption>A running Fedora desktop in the main window, beside the list of desktops</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/JayDoubleu/cabin/main/docs/screenshots/new-desktop.png</image>
+      <caption>Create a desktop with a name, a memory limit, graphics and an image</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/JayDoubleu/cabin/main/docs/screenshots/settings.png</image>
+      <caption>Share folders, choose the renderer and allow remote access for each desktop</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/JayDoubleu/cabin/main/docs/screenshots/images.png</image>
+      <caption>Build guest images from recipes and remove the images you do not need</caption>
+    </screenshot>
+  </screenshots>
+
   <url type="homepage">https://github.com/JayDoubleu/cabin</url>
   <url type="bugtracker">https://github.com/JayDoubleu/cabin/issues</url>
 

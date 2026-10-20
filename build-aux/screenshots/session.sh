@@ -113,6 +113,9 @@ up() {
         kill $shell
         wait $shell 2> /dev/null || true
     ' || true
+    # gvfsd starts wsdd for network discovery, and wsdd outlives the session
+    # bus. Each session left one behind until this stopped them.
+    pkill -f "wsdd .*--listen $run/" 2> /dev/null || true
     # The document portal and gvfs of the private session leave FUSE mounts.
     for mount in "$run/doc" "$run/gvfs"; do
         fusermount -u "$mount" 2> /dev/null || true

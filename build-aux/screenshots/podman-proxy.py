@@ -1,6 +1,6 @@
 """Hides every desktop but the test ones from Cabin in the private session.
 
-Usage: podman-proxy.py LISTEN_SOCKET REAL_SOCKET
+Usage: podman-proxy.py LISTEN_SOCKET REAL_SOCKET [NAMES [hide-dangling]]
 
 drive.py runs this inside the Flatpak sandbox, beside Cabin, on the socket
 path where Cabin looks for Podman.
@@ -14,6 +14,12 @@ desktop list, so Cabin sees only desktops whose names start with "e2e-" or
 unfiltered list that Cabin uses to refuse names and ports in use, so those
 checks still see every container.
 
+NAMES replaces the default patterns with a comma separated list of anchored
+regular expressions, such as "^fedora-dev$,^web-project$". take.sh uses that
+to give its demo desktops natural names. "hide-dangling" also hides untagged
+images from the image list, so the Guest Images screenshot does not show the
+user's old builds. A prune still sees every image.
+
 Cabin sends one request per connection with "Connection: close", so only the
 request line of each connection needs to change.
 """
@@ -26,6 +32,7 @@ from urllib.parse import parse_qsl, quote, urlsplit
 
 PREFIXES = ["^e2e-", "^shot-"]
 MANAGED = "io.github.jaydoubleu.cabin.managed=true"
+HIDE_DANGLING = False
 
 
 def rewrite(line):
@@ -35,6 +42,10 @@ def rewrite(line):
     except ValueError:
         return line
     url = urlsplit(target)
+    if method == "GET" and HIDE_DANGLING and url.path.endswith("/images/json"):
+        filters = json.dumps({"dangling": ["false"]}, separators=(",", ":"))
+        target = url.path + "?filters=" + quote(filters, safe="")
+        return f"{method} {target} {version}\r\n".encode("latin-1")
     if method != "GET" or not url.path.endswith("/containers/json"):
         return line
     query = parse_qsl(url.query, keep_blank_values=True)
@@ -100,4 +111,7 @@ async def main(listen, real):
 
 if __name__ == "__main__":
     # drive.py passes this source with "python3 -c", so sys.argv[0] is "-c".
+    if len(sys.argv) > 3 and sys.argv[3]:
+        PREFIXES = sys.argv[3].split(",")
+    HIDE_DANGLING = len(sys.argv) > 4 and sys.argv[4] == "hide-dangling"
     asyncio.run(main(sys.argv[1], sys.argv[2]))
