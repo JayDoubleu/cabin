@@ -237,7 +237,7 @@ fn build_main_menu(
 fn present_about(window: &adw::ApplicationWindow) {
     let dialog = adw::AboutDialog::builder()
         .application_name("Cabin")
-        // The application ID, so a development build shows its own icon.
+        // The icon is installed under the application ID.
         .application_icon(crate::APP_ID)
         .version(env!("CARGO_PKG_VERSION"))
         .developer_name("Jay W")
