@@ -196,6 +196,34 @@ const SOCKET_CHOICES: &[(SocketPolicy, &str, &str)] = &[
     ),
 ];
 
+/// Why the Flatpak does not offer the Docker socket.
+const DOCKER_IN_FLATPAK: &str = "Not available in the Flatpak. The sandbox cannot see \
+     the Docker socket, so Cabin cannot check it, and Cabin does not ask for more \
+     access to the host. A native build offers this option.";
+
+/// True when Cabin runs inside a Flatpak sandbox.
+fn in_flatpak() -> bool {
+    std::path::Path::new("/.flatpak-info").exists()
+}
+
+/// The runtime choices the dialogue offers.
+///
+/// The Flatpak leaves out the Docker socket. A desktop that already has it
+/// keeps it in the list, so the dialogue shows the truth and the user can
+/// change it, rather than a different choice that Apply would then make.
+fn socket_choices(
+    flatpak: bool,
+    stored: SocketPolicy,
+) -> Vec<(SocketPolicy, &'static str, &'static str)> {
+    SOCKET_CHOICES
+        .iter()
+        .copied()
+        .filter(|(policy, _, _)| {
+            !flatpak || *policy != SocketPolicy::HostDocker || *policy == stored
+        })
+        .collect()
+}
+
 pub fn present(
     parent: &impl IsA<gtk::Widget>,
     podman: Arc<Podman>,
@@ -971,15 +999,20 @@ fn build_socket_group(
         )
         .build();
 
-    let labels: Vec<&str> = SOCKET_CHOICES.iter().map(|(_, label, _)| *label).collect();
-    let selected = SOCKET_CHOICES
+    let flatpak = in_flatpak();
+    let choices = socket_choices(flatpak, config.borrow().socket);
+    let labels: Vec<&str> = choices.iter().map(|(_, label, _)| *label).collect();
+    let docker_offered = choices
+        .iter()
+        .any(|(policy, _, _)| *policy == SocketPolicy::HostDocker);
+    let selected = choices
         .iter()
         .position(|(policy, _, _)| *policy == config.borrow().socket)
         .unwrap_or(0) as u32;
 
     let row = adw::ComboRow::builder()
         .title("Share a runtime with this desktop")
-        .subtitle(SOCKET_CHOICES[selected as usize].2)
+        .subtitle(choices[selected as usize].2)
         .model(&gtk::StringList::new(&labels))
         .selected(selected)
         .build();
@@ -988,7 +1021,7 @@ fn build_socket_group(
     let previous = Rc::new(std::cell::Cell::new(selected));
     row.connect_selected_notify(move |row| {
         let index = row.selected() as usize;
-        let (policy, _, description) = SOCKET_CHOICES[index];
+        let (policy, _, description) = choices[index];
         row.set_subtitle(description);
 
         // A declined warning snaps the row back, which lands here again. The
@@ -1034,6 +1067,16 @@ fn build_socket_group(
     });
 
     group.add(&row);
+    if !docker_offered {
+        // A combo row cannot disable one item, so the missing choice gets a
+        // row of its own that says why it is missing.
+        let docker = adw::ActionRow::builder()
+            .title("Docker on this computer")
+            .subtitle(DOCKER_IN_FLATPAK)
+            .sensitive(false)
+            .build();
+        group.add(&docker);
+    }
     group
 }
 
@@ -1611,6 +1654,29 @@ mod tests {
                 path: "/dev/dri/renderD128".to_string()
             }
         );
+    }
+
+    fn policies(choices: &[(SocketPolicy, &str, &str)]) -> Vec<SocketPolicy> {
+        choices.iter().map(|(policy, _, _)| *policy).collect()
+    }
+
+    #[test]
+    fn the_flatpak_does_not_offer_the_docker_socket() {
+        let offered = policies(&socket_choices(true, SocketPolicy::None));
+        assert!(!offered.contains(&SocketPolicy::HostDocker));
+        assert!(offered.contains(&SocketPolicy::HostPodman));
+    }
+
+    #[test]
+    fn the_flatpak_still_shows_a_docker_socket_a_desktop_has() {
+        let offered = policies(&socket_choices(true, SocketPolicy::HostDocker));
+        assert!(offered.contains(&SocketPolicy::HostDocker));
+    }
+
+    #[test]
+    fn a_native_build_offers_the_docker_socket() {
+        let offered = policies(&socket_choices(false, SocketPolicy::None));
+        assert!(offered.contains(&SocketPolicy::HostDocker));
     }
 
     #[test]

@@ -449,10 +449,16 @@ as root, so the guest gains root on the host.
 If the Podman socket is missing, the create fails with a message that gives
 the command to enable it. Cabin does not skip the mount, because a skip would
 leave the guest pointed at a socket with nothing behind it, and with SELinux
-labelling turned off for no reason. The Docker socket is not tested by Cabin:
-inside the Flatpak Cabin cannot see `/var/run`, and Podman resolves the bind
-source on the host. If the Docker socket is absent, Podman refuses the create
-and the user sees that error.
+labelling turned off for no reason. The Docker socket is not tested by Cabin.
+Podman resolves the bind source on the host, so in a native build a missing
+socket makes Podman refuse the create, and the user sees that error.
+
+The Flatpak does not offer the Docker option. Inside the sandbox Cabin cannot
+see `/var/run`, so it cannot check the socket, and the Flatpak does not ask
+for more access to the host to do so. The dialogue shows the option as a
+disabled row that says why. A desktop that already has the Docker socket, for
+example one made by a native build, keeps it, and the dialogue still shows
+that choice so the user can change it.
 
 Two host socket options are offered. The default is safe, the risk is stated
 once and clearly, and the choice is per desktop, not global.

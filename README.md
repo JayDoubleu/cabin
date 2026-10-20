@@ -223,6 +223,9 @@ host. Running Podman inside the desktop would be the safe alternative, and it
 does not work yet, so it is not offered. DESIGN.md section 15.17 records how
 far it got.
 
+The Flatpak offers the Podman socket only. The sandbox cannot see the Docker
+socket, so Cabin cannot check it there. A native build offers both.
+
 ### Shared files and folders
 
 A desktop can be given host folders and single files. Both are Podman bind
