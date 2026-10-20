@@ -213,6 +213,7 @@ rdp-live:
 podman-live:
     cargo test -p cabin-podman --test live_podman -- --ignored --test-threads=1
     cargo test -p cabin-podman --test live_recreate -- --ignored --test-threads=1
+    cargo test -p cabin-podman --test live_delete -- --ignored --test-threads=1
     cargo test -p cabin-podman --test live_overlay -- --ignored --test-threads=1
     cargo test -p cabin-podman --test live_selinux -- --ignored --test-threads=1
     cargo test -p cabin-podman --test live_session_health -- --ignored --test-threads=1

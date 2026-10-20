@@ -10,6 +10,7 @@ cost real time.
 |---|---|
 | `crates/cabin-core` | Domain model. No I/O. Serialises to container labels. |
 | `crates/cabin-podman` | libpod REST client over the rootless UNIX socket. |
+| `crates/cabin-freerdp-sys` | C shim and FFI bindings to FreeRDP 3. Hand-written, no bindgen (rule 9). |
 | `crates/cabin-rdp` | RDP client. No GTK types, so it tests without a display. |
 | `crates/cabin-gtk` | The application. Owns the `cabin` binary. |
 | `guest/` | The guest desktop image: Containerfile, units, scripts. |
@@ -21,6 +22,12 @@ cost real time.
 Use `just`. Run `just` alone to list every task.
 
 `just test` must pass before any commit. `just lint` must be clean.
+
+The live tests need the host Podman and the guest image, so CI does not run
+them. Run them with `just podman-live`, `just rdp-live` and
+`just guest-image-live`. Do not run `cargo test -- --ignored` across a whole
+crate: that also runs `make_demo`, which replaces any container called
+`demo`, and `live_images`, which rebuilds the guest image.
 
 ## Rules that are easy to get wrong
 
@@ -75,7 +82,9 @@ Use `just`. Run `just` alone to list every task.
     looks fine.
 15. **The TLS certificate stays in its own volume.** Pinning means nothing if a
     reconfigure regenerates the certificate, and the private key must not sit in
-    the home directory where the desktop session could read it.
+    the home volume, which the user shares and backs up. The key is not hidden
+    from the session: `gnome-remote-desktop` runs as the session user and must
+    read it, so that user owns it.
 16. **Run tests with `just`, not bare `cargo`.** The recipes export the FreeRDP
     sysroot variables, without which the build script fails.
 17. **Never call bare `podman` in a test.** Inside a toolbox that is the
@@ -104,11 +113,14 @@ Use `just`. Run `just` alone to list every task.
     accepts and then hangs up before any frame, not only the refused
     connection. Never retry a rejected password: `cabin-rdp.service` sets the
     credentials before the RDP server starts, so a rejection is real.
-23. **A resize makes the framebuffer description lie.** Width updates before
-    stride, so a shrink reports the old, larger stride against a smaller
-    buffer. That passes every bounds check and reads past the end of the
-    allocation. Check the stride against the row before copying. A stride
-    longer than the row is the dangerous one.
+23. **A resize makes the framebuffer description lie.** FreeRDP's `drdynvc`
+    worker thread ran `ResetGraphics`, which reallocates the primary buffer,
+    while the session thread copied it. A shrink then reported the new width
+    with the old, larger stride. That passes every bounds check and reads past
+    the end of the allocation. Keep `FreeRDP_SynchronousDynamicChannels` set,
+    which removes the race. Keep the copy inside the shim under the update
+    lock. Keep the check that the stride is exactly width * 4: FreeRDP's GDI
+    does not pad rows, and a stride longer than the row is the dangerous one.
 24. **An `AdwAlertDialog` closes on any response.** So a field it cannot
     accept must be checked as it is typed, with the response disabled, not
     rejected on the click. Rejecting after the fact costs the user the whole
@@ -206,7 +218,27 @@ Use `just`. Run `just` alone to list every task.
 40. **Store interface names for remote access, never addresses.** An address
     changes with the network, and a stored one would leave the desktop unable
     to start after a DHCP lease changed. Names resolve to addresses when the
-    container is created. Loopback is always bound as well.
+    container is created, and again before each start or restart. If they
+    changed, the container is recreated first. Loopback is always bound as
+    well.
+41. **Delete removes the volumes. Recreate must keep them.** `delete_desktop`
+    removes the container and then `cabin-<name>-home` and
+    `cabin-<name>-state`, or a new desktop with the same name takes over the
+    old files and certificate. A recreate keeps both volumes, and keeps the
+    old container under `<name>-cabin-old` until the new one exists. The old
+    container is the only copy of the configuration and the password, so a
+    recreate that removes it first loses the desktop when Podman refuses the
+    new configuration. Use `recreate_desktop` and `delete_desktop`, never a
+    bare `remove` followed by a create.
+42. **Chosen networks never publishes on a global IPv6 address.** It uses the
+    IPv4 and unique-local (`fc00::/7`) addresses of the named interfaces. A
+    global address can be reachable from the whole internet, which would make
+    chosen networks as wide as every network. Skip link-local, temporary and
+    deprecated addresses too. DESIGN.md section 7.5 has the reasons.
+43. **Never give Podman a document portal path.** In the Flatpak the file
+    chooser returns a path under `/run/user/<uid>/doc/`, and the desktop's
+    user cannot read it. Turn it back into the real host path, or refuse the
+    share. Do not widen the sandbox instead (rule 6).
 
 ## Environment notes
 
@@ -214,9 +246,9 @@ Building works from a Fedora toolbox. `flatpak-builder`, `flatpak`, and `bwrap`
 are all available inside it, and the GNOME SDK in the user Flatpak installation
 is visible through the shared home directory.
 
-Pass `--disable-rofiles-fuse` to `flatpak-builder`. `rofiles-fuse` cannot mount
-under `/mnt/data` from inside a toolbox container. The `just flatpak` recipe
-already does this.
+Pass `--disable-rofiles-fuse` to `flatpak-builder`. `rofiles-fuse` can fail to
+mount inside a toolbox container, for example when the checkout is on a second
+disk outside the home directory. The `just flatpak` recipe already does this.
 
 ## Style
 
