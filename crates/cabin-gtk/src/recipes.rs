@@ -164,8 +164,37 @@ pub fn check_name(name: &str, taken: &[String]) -> Result<(), String> {
         }
         return Err(format!("The name cannot contain '{bad}'."));
     }
+    check_separators(name)?;
     if taken.iter().any(|t| t == name) {
         return Err(format!("A recipe called {name} already exists."));
+    }
+    Ok(())
+}
+
+/// Checks where '-' and '_' sit, as the OCI reference grammar requires.
+///
+/// A path component is letters and digits joined by '_', '__' or one or more
+/// '-'. Any other run, or a separator at the end, gives a tag that Podman
+/// refuses with "invalid reference format", and a recipe cannot be renamed.
+fn check_separators(name: &str) -> Result<(), String> {
+    if !name
+        .chars()
+        .last()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    {
+        return Err("The name must end with a letter or a digit.".to_string());
+    }
+    let mut run = String::new();
+    for c in name.chars().chain(std::iter::once('a')) {
+        if matches!(c, '-' | '_') {
+            run.push(c);
+            continue;
+        }
+        let allowed = run.is_empty() || run == "_" || run == "__" || run.chars().all(|r| r == '-');
+        if !allowed {
+            return Err("Use '-', '_' or '__' between letters and digits.".to_string());
+        }
+        run.clear();
     }
     Ok(())
 }
@@ -243,32 +272,7 @@ LABEL io.github.jaydoubleu.cabin.guest="true"
 /// Creates a recipe, ready to build.
 pub fn create(name: &str, basis: Basis) -> Result<Recipe, String> {
     let name = name.trim().to_string();
-    let dir = custom_root().join(&name);
-    if dir.exists() {
-        return Err(format!("{} already exists", dir.display()));
-    }
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-
-    match basis {
-        Basis::Layer => std::fs::write(dir.join("Containerfile"), starter(&name))
-            .map_err(|e| format!("could not write the recipe: {e}"))?,
-        Basis::FullCopy => {
-            // The whole tree, because the base Containerfile copies the
-            // scripts and units beside it. A copy of the one file would build
-            // nothing, and the failure would name a missing path rather than
-            // the missing copy.
-            let Some(base) = guestdir::shipped() else {
-                let _ = std::fs::remove_dir_all(&dir);
-                return Err("Cabin could not find the files it ships with.".to_string());
-            };
-            guestdir::copy_context(&base, &dir)?;
-            // Marks it as a copy, and of which version. The mark is what
-            // tells a copy that is current from one taken three releases ago.
-            guestdir::record_origin(&dir)?;
-        }
-    }
-
+    let dir = make_dir(&name, |dir| fill(dir, &name, basis))?;
     Ok(Recipe {
         tag: tag_for(&name),
         dir,
@@ -276,6 +280,56 @@ pub fn create(name: &str, basis: Basis) -> Result<Recipe, String> {
         kind: Kind::Custom,
         customised: basis == Basis::FullCopy,
     })
+}
+
+/// Makes a new recipe directory and runs `fill` in it.
+///
+/// Kept apart from `create` so a test can make the fill step fail.
+fn make_dir(
+    name: &str,
+    fill: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    let dir = custom_root().join(name);
+    if dir.exists() {
+        return Err(format!("{} already exists", dir.display()));
+    }
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+
+    // A half made recipe blocks its own name: a copy with no Containerfile is
+    // not listed, so the name check passes and this then fails on "already
+    // exists". A copy with no origin mark is listed as a layer and asks for
+    // the base image. So any failure from here removes what was made. The
+    // check above makes sure the directory is new, so nothing of the user's
+    // is removed.
+    if let Err(message) = fill(&dir) {
+        let _ = std::fs::remove_dir_all(&dir);
+        // The marker sits beside the directory, not inside it.
+        guestdir::forget_origin(&dir);
+        return Err(message);
+    }
+    Ok(dir)
+}
+
+/// Writes a new recipe's files into its empty directory.
+fn fill(dir: &std::path::Path, name: &str, basis: Basis) -> Result<(), String> {
+    match basis {
+        Basis::Layer => std::fs::write(dir.join("Containerfile"), starter(name))
+            .map_err(|e| format!("could not write the recipe: {e}")),
+        Basis::FullCopy => {
+            // The whole tree, because the base Containerfile copies the
+            // scripts and units beside it. A copy of the one file would build
+            // nothing, and the failure would name a missing path rather than
+            // the missing copy.
+            let Some(base) = guestdir::shipped() else {
+                return Err("Cabin could not find the files it ships with.".to_string());
+            };
+            guestdir::copy_context(&base, dir)?;
+            // Marks it as a copy, and of which version. The mark is what
+            // tells a copy that is current from one taken three releases ago.
+            guestdir::record_origin(dir)
+        }
+    }
 }
 
 /// Deletes a recipe's files. The image it built, if any, is left alone.
@@ -324,6 +378,22 @@ mod tests {
         assert!(check_name("1st", &[]).is_err());
         assert!(check_name("with space", &[]).is_err());
         assert!(check_name("", &[]).is_err());
+    }
+
+    #[test]
+    fn rejects_separators_a_tag_cannot_hold() {
+        // Each of these makes a tag that Podman refuses with "invalid
+        // reference format", which names the request, not the name.
+        for name in ["dev-", "dev_", "a_-b", "a-_b", "a___b"] {
+            assert!(check_name(name, &[]).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn accepts_every_separator_a_tag_can_hold() {
+        for name in ["a__b", "a--b", "a-b", "a_b", "dev-tools", "py3_11"] {
+            assert!(check_name(name, &[]).is_ok(), "{name}");
+        }
     }
 
     #[test]
@@ -380,6 +450,26 @@ mod tests {
         delete(&name).expect("delete");
         assert!(!recipe.dir.exists());
         assert!(!custom().iter().any(|r| r.name == name));
+    }
+
+    #[test]
+    fn a_failed_create_leaves_nothing_behind() {
+        // A half made recipe would block its own name, and a stale origin
+        // mark would be inherited by the next recipe of the same name.
+        let name = format!("failprobe{}", std::process::id());
+        let result = make_dir(&name, |dir| {
+            std::fs::write(dir.join("Containerfile"), "FROM scratch").unwrap();
+            guestdir::record_origin(dir)?;
+            Err("the copy failed".to_string())
+        });
+        assert_eq!(result, Err("the copy failed".to_string()));
+        let dir = custom_root().join(&name);
+        assert!(!dir.exists(), "the half made directory is still there");
+        assert!(
+            !guestdir::has_origin(&dir),
+            "the origin mark is still there"
+        );
+        assert!(check_name(&name, &[]).is_ok());
     }
 
     #[test]
