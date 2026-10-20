@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn state_and_home_are_separate_volumes() {
         // Sharing one volume would put the TLS key in the user's home
-        // directory, where anything in the desktop could read it.
+        // directory, which the user shares and backs up.
         assert_ne!(state_volume_name("a"), home_volume_name("a"));
     }
 
@@ -98,6 +98,8 @@ pub struct Desktop {
     pub name: String,
     pub state: State,
     pub config: DesktopConfig,
-    /// The host port that the guest's RDP port maps to, when running.
+    /// The host port that the guest's RDP port maps to. Podman reports the
+    /// mapping for a stopped container too, so a stopped desktop still holds
+    /// its port.
     pub rdp_port: Option<u16>,
 }
