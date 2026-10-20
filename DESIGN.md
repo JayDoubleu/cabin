@@ -206,7 +206,7 @@ This choice matters. It means:
 | Crate | Responsibility |
 |---|---|
 | `cabin-core` | Domain model. A `Desktop`, its `Config`, mounts, GPU mode, socket policy. Serialises to and from container labels. No I/O. |
-| `cabin-podman` | Podman REST client over the rootless UNIX socket. Create, start, stop, remove, inspect, events, image pull and build. |
+| `cabin-podman` | Podman REST client over the rootless UNIX socket. Create, start, stop, remove, inspect, events, image build, list and delete. |
 | `cabin-freerdp-sys` | A C shim and hand-written FFI to FreeRDP 3. No bindgen, see section 15.1. |
 | `cabin-rdp` | The RDP client. Runs a FreeRDP session through `cabin-freerdp-sys` on its own thread and produces frames. Has no GTK types. |
 | `cabin-gtk` | The application. Windows, sidebar, the display widget, preferences, actions. Owns the binary. |
@@ -263,8 +263,9 @@ device requests, label filters, and health state.
 The socket is a user service. If `podman.socket` is inactive, Cabin explains
 this and offers the exact command to enable it.
 
-Container events stream over `/libpod/events`. Cabin subscribes once and
-updates the sidebar from that stream, so the list never polls.
+Container events stream over `/libpod/events`. Cabin keeps one subscription
+and updates the sidebar from that stream, so the list never polls. If Podman
+closes the stream, Cabin connects to it again.
 
 ---
 
@@ -1242,10 +1243,12 @@ touches a FreeRDP pointer.
 The frame channel holds one item. A stale frame has no value, so a slow
 interface should make the session wait rather than build a queue.
 
-The framebuffer is copied rather than borrowed, and the copy strips row
-padding. FreeRDP's buffer belongs to FreeRDP, is reused between frames and is
-reallocated on resize, so it cannot cross a thread by reference.
-`GdkMemoryTexture` then takes the packed buffer with a stride of `width * 4`.
+The framebuffer is copied rather than borrowed. The shim does the copy under
+FreeRDP's update lock, into a buffer that the caller gives. FreeRDP's buffer
+belongs to FreeRDP, is reused between frames and is reallocated on resize, so
+it cannot cross a thread by reference. FreeRDP's GDI does not pad rows, so the
+stride equals `width * 4`, and `GdkMemoryTexture` takes the buffer with that
+stride. Section 17.2 records why.
 
 ### 15.7 Verified in the running application
 
@@ -1816,9 +1819,11 @@ of the settings are, rather than implying it is the whole set.
 Raised while testing, deliberately not built yet.
 
 **Detect the container runtimes that are present.** The socket setting offers
-Podman and Docker whether or not either is installed. It should read
-`$XDG_RUNTIME_DIR/podman/podman.sock` and `/var/run/docker.sock`, mark what it
-finds, and say plainly that the others are absent. The wording is already
+Podman, and Docker in a native build, whether or not either is installed. It
+should mark what it finds and say plainly that the others are absent. Cabin
+can test for `$XDG_RUNTIME_DIR/podman/podman.sock` directly. Docker detection
+has to happen on the host, for example through a Podman call, because inside
+the Flatpak Cabin cannot see `/var/run` (section 7.2). The wording is already
 corrected: the setting shares the runtime that is on the computer, and does not
 give the desktop one of its own, which the old title implied.
 
@@ -1889,7 +1894,9 @@ Found while testing the retry, but not caused by it. It was reachable in
 ordinary use, by dragging the window smaller.
 
 `cabin_rdp_framebuffer` reports the GDI buffer with its width, height and
-stride. During a resize those do not agree. A guest going from 1920 to 1152
+stride. (That function no longer exists. The later correction below split it
+into `cabin_rdp_framebuffer_info` and `cabin_rdp_copy_framebuffer`.) During a
+resize those do not agree. A guest going from 1920 to 1152
 wide reported:
 
 ```
