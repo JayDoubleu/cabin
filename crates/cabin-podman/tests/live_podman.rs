@@ -112,6 +112,16 @@ async fn create_list_start_stop_remove() {
         "the guest must use the time zone of the host"
     );
 
+    // The prompt in the guest's terminal shows the host name.
+    let hostname = on_host(&[
+        "podman",
+        "exec",
+        TEST_NAME,
+        "cat",
+        "/proc/sys/kernel/hostname",
+    ]);
+    assert_eq!(hostname, TEST_NAME, "the guest is named after the desktop");
+
     podman.stop(&id, 20).await.expect("stop should succeed");
     podman
         .remove(&id, false)

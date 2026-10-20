@@ -105,6 +105,10 @@ pub struct CreateContainer {
     /// on the host. Without it the guest runs in UTC, and its clock and every
     /// file time show a different hour from the host.
     pub timezone: String,
+    /// The desktop's name. Without it Podman uses the container ID, and the
+    /// guest's shell prompt and window titles show a hex string that changes
+    /// with every recreate.
+    pub hostname: String,
 }
 
 /// The annotation Podman reads the container's SELinux label back from.

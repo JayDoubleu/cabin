@@ -70,6 +70,66 @@ fn document_roots() -> Vec<std::path::PathBuf> {
     ]
 }
 
+/// The fixed roots, and the mount point that the portal itself reports.
+///
+/// The file chooser builds its paths from that mount point, which is under
+/// the runtime folder of the session. A session with a different runtime
+/// folder, such as the private one of the end-to-end test, then returns
+/// paths that no fixed root matches, and Cabin passed them to Podman.
+async fn document_roots_with_portal() -> Vec<std::path::PathBuf> {
+    let mut roots = document_roots();
+    if let Some(mount_point) = document_mount_point().await {
+        if !roots.contains(&mount_point) {
+            roots.push(mount_point);
+        }
+    }
+    roots
+}
+
+/// Asks the document portal where it mounts its file system.
+async fn document_mount_point() -> Option<std::path::PathBuf> {
+    use gtk::gio;
+    let bus = gio::bus_get_future(gio::BusType::Session).await.ok()?;
+    let reply = bus
+        .call_future(
+            Some("org.freedesktop.portal.Documents"),
+            "/org/freedesktop/portal/documents",
+            "org.freedesktop.portal.Documents",
+            "GetMountPoint",
+            None,
+            Some(gtk::glib::VariantTy::new("(ay)").ok()?),
+            gio::DBusCallFlags::NONE,
+            5000,
+        )
+        .await
+        .ok()?;
+    let (mut bytes,): (Vec<u8>,) = reply.get()?;
+    // A GLib byte string ends with a NUL.
+    while bytes.last() == Some(&0) {
+        bytes.pop();
+    }
+    let path = String::from_utf8(bytes).ok()?;
+    path.starts_with('/')
+        .then(|| std::path::PathBuf::from(path))
+}
+
+/// A host path as the dialogues show it, with the home folder as "~".
+///
+/// The full path of a folder in the home folder is long enough to wrap in a
+/// row, and the start of it is the same for every share.
+fn display_path(host_path: &str, home: &std::path::Path) -> String {
+    match std::path::Path::new(host_path).strip_prefix(home) {
+        Ok(rest) if home.is_absolute() && home != std::path::Path::new("/") => {
+            if rest.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", rest.to_string_lossy())
+            }
+        }
+        _ => host_path.to_string(),
+    }
+}
+
 /// Splits a document portal path into the document id and the components
 /// below the document itself.
 ///
@@ -143,7 +203,7 @@ async fn host_path_for(file: gtk::gio::File) -> Result<String, &'static str> {
     let Some(path) = file.path() else {
         return Err(UNRESOLVED_SHARE);
     };
-    let Some((id, rest)) = split_document_path(&path, &document_roots()) else {
+    let Some((id, rest)) = split_document_path(&path, &document_roots_with_portal().await) else {
         return Ok(path.to_string_lossy().into_owned());
     };
     if let Some(document) = document_host_path(&id).await {
@@ -623,7 +683,7 @@ fn present_mount_options(
             MountKind::Directory => "Share This Folder",
             MountKind::File => "Share This File",
         })
-        .body(&mount.host_path)
+        .body(display_path(&mount.host_path, &gtk::glib::home_dir()))
         .build();
 
     let group = adw::PreferencesGroup::new();
@@ -784,7 +844,7 @@ fn build_mount_row(
     validity: Rc<Validity>,
 ) -> adw::ExpanderRow {
     let row = adw::ExpanderRow::builder()
-        .title(&mount.host_path)
+        .title(display_path(&mount.host_path, &gtk::glib::home_dir()))
         .subtitle(format!("Appears at {}", mount.guest_path))
         .build();
     // A path is data. One holding an ampersand or an angle bracket would
@@ -1631,6 +1691,19 @@ mod tests {
             join_host_path("/home/user/.gitconfig", &rest),
             "/home/user/.gitconfig"
         );
+    }
+
+    #[test]
+    fn a_path_in_the_home_folder_shows_as_a_tilde() {
+        let home = Path::new("/home/user");
+        assert_eq!(
+            display_path("/home/user/Projects/web", home),
+            "~/Projects/web"
+        );
+        assert_eq!(display_path("/home/user", home), "~");
+        // Only a whole component matches.
+        assert_eq!(display_path("/home/username/x", home), "/home/username/x");
+        assert_eq!(display_path("/srv/data", home), "/srv/data");
     }
 
     #[test]

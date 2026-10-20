@@ -243,7 +243,9 @@ crate: that also runs `make_demo`, which replaces any container called
 43. **Never give Podman a document portal path.** In the Flatpak the file
     chooser returns a path under `/run/user/<uid>/doc/`, and the desktop's
     user cannot read it. Turn it back into the real host path, or refuse the
-    share. Do not widen the sandbox instead (rule 6).
+    share. Do not widen the sandbox instead (rule 6). The portal can mount
+    somewhere else, so also ask it with `GetMountPoint`. A fixed list of
+    roots let such a path through to Podman.
 44. **The display inhibits the host shortcuts while it has the focus.**
     Without that, Super opens the overview of the host and of the guest
     together, and Alt+Tab leaves the window. Restore them when the focus
@@ -264,7 +266,12 @@ crate: that also runs `make_demo`, which replaces any container called
     Cabin opens the first running desktop, and the guest serves one session
     at a time, so a test would take over a session in use.
     `podman-proxy.py` hides every desktop whose name does not start with
-    `e2e-` or `shot-`. Name every test desktop that way.
+    `e2e-` or `shot-`. Name every test desktop that way. The screenshot
+    script is the exception: it passes its own demo names to the proxy, and
+    stops if a desktop with one of those names exists.
+49. **A desktop's host name is its name.** The create request sets
+    `hostname`. Without it the guest takes the container ID, and the prompt
+    and window titles in the guest change with every recreate.
 
 ## Environment notes
 
