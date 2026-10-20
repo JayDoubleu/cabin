@@ -91,11 +91,22 @@ mod tests {
 
     #[test]
     fn ordinary_names_are_left_alone() {
-        // Names without an escaped character keep the key they had before,
-        // so their recorded pins are still found.
+        // The earlier map kept letters, digits, '-' and '_', and wrote every
+        // other character as '_'. A name made only of the kept characters has
+        // the same key as before, so its recorded pin is still found.
         assert_eq!(key_for("fedora-dev"), "fedora-dev");
         assert_eq!(key_for("my_desktop2"), "my_desktop2");
+    }
+
+    #[test]
+    fn a_name_with_a_dot_has_a_new_key() {
+        // The earlier map gave "work.dev" the key "work_dev". The new key
+        // differs, so a desktop with a '.' in its name records its pin again
+        // on the next connection. The old file is not removed, because
+        // "work_dev" is also the key of a desktop called "work_dev", and
+        // removing it could delete that desktop's pin.
         assert_eq!(key_for("work.dev"), "work.dev");
+        assert_ne!(key_for("work.dev"), "work_dev");
     }
 
     #[test]
