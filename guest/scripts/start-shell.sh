@@ -24,6 +24,15 @@ if ! compgen -G '/dev/dri/renderD*' >/dev/null; then
     export GALLIUM_DRIVER=llvmpipe
 fi
 
+# GNOME Shell tells a user once that the screen cannot lock without the GNOME
+# display manager, and it records that in this file. No display manager runs
+# here, so every new desktop showed the notice on its first start. Cabin shows
+# the desktop in a window on a computer that has its own lock screen, so the
+# notice tells the user nothing. The home is a volume, so the build cannot put
+# the file there (CLAUDE.md rule 37).
+mkdir -p "${XDG_DATA_HOME:-${HOME}/.local/share}/gnome-shell"
+touch "${XDG_DATA_HOME:-${HOME}/.local/share}/gnome-shell/lock-warning-shown"
+
 if [ -n "${CABIN_SHELL_MONITOR:-}" ]; then
     exec /usr/bin/gnome-shell --headless --virtual-monitor "${CABIN_SHELL_MONITOR}"
 fi
