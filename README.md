@@ -13,9 +13,11 @@ tablet, or another computer with a standard RDP client that has clipboard
 sharing turned off. [Connecting from another device](#connecting-from-another-device)
 explains why the clipboard matters.
 
-<!-- Screenshots: a later stage adds them here. Suggested set: the sidebar
-     with a running desktop, the settings dialogue, and Guest Images. -->
-> **Screenshots are coming.**
+![The Cabin window with three desktops in the sidebar and a running Fedora GNOME desktop in the viewer](docs/screenshots/main.png)
+
+| New desktop | Desktop settings | Guest images |
+|---|---|---|
+| ![The New Desktop dialogue](docs/screenshots/new-desktop.png) | ![The settings of a desktop, with a shared folder, graphics, container runtime and remote access](docs/screenshots/settings.png) | ![The Guest Images manager with the shipped recipe and its image](docs/screenshots/images.png) |
 
 ## Status
 
@@ -59,8 +61,35 @@ so `podman ps` always shows the truth.
 
 ## Install
 
-A Flatpak repository is coming. Until then, build Cabin from source as
-described in [Build](#build).
+Cabin has its own signed Flatpak repository on GitHub Pages. This command adds
+the repository and installs Cabin:
+
+```sh
+flatpak install --user --from https://jaydoubleu.github.io/cabin/io.github.jaydoubleu.Cabin.flatpakref
+flatpak run io.github.jaydoubleu.Cabin
+```
+
+The GNOME 51 runtime comes from Flathub. GNOME Software and `flatpak update`
+get new versions of Cabin from the repository.
+
+To add the repository without an install:
+
+```sh
+flatpak remote-add --user --if-not-exists cabin https://jaydoubleu.github.io/cabin/cabin.flatpakrepo
+flatpak install --user cabin io.github.jaydoubleu.Cabin
+```
+
+Each GitHub release also has a single-file bundle, `Cabin-<version>.flatpak`.
+
+Cabin builds the guest image on this computer, and does not download a
+finished one. If no image exists, the New Desktop dialogue offers to build it.
+The first build takes a few minutes. Later desktops start in a few seconds. Make sure that the [requirements](#to-run) are met first.
+
+The first time a desktop takes the focus, GNOME asks whether Cabin may inhibit
+shortcuts. Allow it, so that keys such as Super reach the desktop. Press
+Super+Escape to give the shortcuts back to your own session.
+
+To build Cabin from source, see [Build](#build).
 
 ## Requirements
 
