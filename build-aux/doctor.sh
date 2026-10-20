@@ -50,8 +50,17 @@ else
     fixup "sudo sysctl -w fs.inotify.max_user_instances=1024"
 fi
 
-if host grep -rqs "max_user_instances" /etc/sysctl.conf /etc/sysctl.d/ 2>/dev/null; then
-    ok "the inotify limit is set permanently"
+# A mention of the key is not enough: the line can be a comment, the value can
+# be too low, or a later file can set it again. systemd-analyze prints the
+# files in the order systemd-sysctl applies them, so the last assignment wins.
+persistent=$(host systemd-analyze cat-config sysctl.d 2>/dev/null \
+    | awk -F= '/^[[:space:]]*[#;]/ { next }
+        $1 ~ /^[[:space:]]*-?fs[.\/]inotify[.\/]max_user_instances[[:space:]]*$/ {
+            gsub(/[[:space:]]/, "", $2); value = $2
+        }
+        END { print value }')
+if [[ "${persistent}" =~ ^[0-9]+$ ]] && [ "${persistent}" -ge 512 ]; then
+    ok "the inotify limit is set permanently to ${persistent}"
 else
     note "the inotify limit will reset when you restart"
     fixup "echo fs.inotify.max_user_instances=1024 | sudo tee /etc/sysctl.d/99-cabin.conf"
