@@ -37,7 +37,11 @@ LABEL io.github.jaydoubleu.cabin.guest="true"
 #
 # The id is 1000 so that files in a shared folder belong to the same person
 # inside the desktop as outside it.
-ARG CABIN_USER=cabin
+#
+# The name must stay "cabin". The RDP client, the connection dialogue, "Open a
+# shell", the home volume at /home/cabin and cabin-host-socket.socket all use
+# that name. Rename the user and every connection is rejected as a wrong
+# password, and the home volume no longer holds the user's files.
 ARG CABIN_UID=1000
 
 # [REQUIRED] The desktop session itself.
@@ -171,19 +175,21 @@ RUN systemctl mask \
 #
 # Lingering is what lets the user session run without anybody logging in, and
 # the whole desktop is that session. Without it the container boots to nothing.
+# The linger file is written directly because loginctl cannot run during a
+# build.
 #
 # Subordinate ids let the desktop user run rootless Podman of its own. The
 # range is inside the container's own user namespace, so it costs nothing on
 # the host.
 RUN useradd --uid ${CABIN_UID} --create-home --shell /bin/bash \
-        --groups wheel ${CABIN_USER} \
-    && echo "${CABIN_USER}:cabin" | chpasswd \
-    && echo "${CABIN_USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/90-cabin \
+        --groups wheel cabin \
+    && echo "cabin:cabin" | chpasswd \
+    && echo "cabin ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/90-cabin \
     && chmod 0440 /etc/sudoers.d/90-cabin \
-    && echo "${CABIN_USER}:100000:65536" > /etc/subuid \
-    && echo "${CABIN_USER}:100000:65536" > /etc/subgid \
-    && loginctl enable-linger ${CABIN_USER} 2>/dev/null || \
-       (mkdir -p /var/lib/systemd/linger && touch /var/lib/systemd/linger/${CABIN_USER})
+    && echo "cabin:100000:65536" > /etc/subuid \
+    && echo "cabin:100000:65536" > /etc/subgid \
+    && mkdir -p /var/lib/systemd/linger \
+    && touch /var/lib/systemd/linger/cabin
 
 # [REQUIRED] Cabin's own scripts and units, which start and configure the
 # session. These files sit beside this one in the recipe folder.
@@ -210,7 +216,7 @@ RUN chmod +x /usr/libexec/cabin/* \
 # only apply when the image is run by hand.
 ENV CABIN_WIDTH=1920 \
     CABIN_HEIGHT=1080 \
-    CABIN_USER=${CABIN_USER} \
+    CABIN_USER=cabin \
     CABIN_RDP_PORT=3389 \
     CABIN_PASSWORD=cabin
 
