@@ -150,10 +150,54 @@ pub struct Actor {
 /// The parts of a container inspect response that Cabin reads.
 #[derive(Debug, Deserialize)]
 pub struct InspectResponse {
+    #[serde(rename = "Id", default)]
+    pub id: String,
+    #[serde(rename = "Name", default)]
+    pub name: String,
     #[serde(rename = "Config")]
     pub config: InspectConfig,
     #[serde(rename = "State", default)]
     pub state: Option<InspectState>,
+    #[serde(rename = "HostConfig", default)]
+    pub host_config: Option<InspectHostConfig>,
+}
+
+impl InspectResponse {
+    /// The host addresses that the RDP port is published on.
+    ///
+    /// Read from the creation request, not from the live network state, so
+    /// a stopped container reports them too. That is the case that matters:
+    /// Podman binds these exact addresses when the container starts.
+    pub fn bound_addresses(&self, container_port: u16) -> Vec<String> {
+        let key = format!("{container_port}/tcp");
+        self.host_config
+            .as_ref()
+            .and_then(|h| h.port_bindings.as_ref())
+            .and_then(|bindings| bindings.get(&key))
+            .and_then(|list| list.as_ref())
+            .map(|list| list.iter().map(|b| b.host_ip.clone()).collect())
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct InspectHostConfig {
+    /// Podman sends null rather than an empty map when nothing is published.
+    #[serde(rename = "PortBindings", default)]
+    pub port_bindings: Option<HashMap<String, Option<Vec<InspectPortBinding>>>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InspectPortBinding {
+    #[serde(rename = "HostIp", default)]
+    pub host_ip: String,
+}
+
+/// One entry from the volume list.
+#[derive(Debug, Deserialize)]
+pub struct VolumeSummary {
+    #[serde(rename = "Name")]
+    pub name: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -170,4 +214,35 @@ pub struct InspectState {
 pub struct InspectConfig {
     #[serde(rename = "Env", default)]
     pub env: Vec<String>,
+    #[serde(rename = "Labels", default)]
+    pub labels: Option<HashMap<String, String>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_bound_addresses_of_a_stopped_container() {
+        let body = r#"{
+            "Id": "abc",
+            "Name": "fedora",
+            "Config": {"Env": [], "Labels": null},
+            "HostConfig": {"PortBindings": {
+                "3389/tcp": [
+                    {"HostIp": "127.0.0.1", "HostPort": "13389"},
+                    {"HostIp": "fd00::24", "HostPort": "13389"}
+                ]
+            }}
+        }"#;
+        let inspect: InspectResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(inspect.bound_addresses(3389), vec!["127.0.0.1", "fd00::24"]);
+    }
+
+    #[test]
+    fn a_container_with_no_bindings_reports_none() {
+        let body = r#"{"Config": {"Env": []}, "HostConfig": {"PortBindings": null}}"#;
+        let inspect: InspectResponse = serde_json::from_str(body).unwrap();
+        assert!(inspect.bound_addresses(3389).is_empty());
+    }
 }

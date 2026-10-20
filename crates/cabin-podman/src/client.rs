@@ -2,7 +2,7 @@ use crate::error::{Error, Result};
 use crate::http;
 use crate::model::*;
 use cabin_core::{
-    labels, Desktop, DesktopConfig, NetInterface, SocketPolicy, State, LABEL_MANAGED,
+    labels, Desktop, DesktopConfig, Exposure, NetInterface, SocketPolicy, State, LABEL_MANAGED,
 };
 use std::collections::HashMap;
 
@@ -14,6 +14,25 @@ const GUEST_RDP_PORT: u16 = 3389;
 
 /// systemd shuts down cleanly on SIGRTMIN+3, which is signal 37.
 const SIGRTMIN_3: i32 = 37;
+
+/// How long a recreate gives a running desktop to shut down.
+const STOP_TIMEOUT_SECS: u32 = 20;
+
+/// The host port a recreate uses when Podman reports none for the desktop.
+const FALLBACK_RDP_PORT: u16 = 13389;
+
+/// The suffix a recreate gives the old container while it builds the new one.
+///
+/// The old container is the only copy of the desktop's configuration and
+/// password, because Cabin keeps no state of its own. So it is kept under
+/// this name until the new container exists, and it comes back if the new
+/// one cannot be made.
+const OLD_SUFFIX: &str = "-cabin-old";
+
+/// The name the old container carries during a recreate.
+fn old_name(name: &str) -> String {
+    format!("{name}{OLD_SUFFIX}")
+}
 
 pub struct Podman {
     socket: String,
@@ -52,9 +71,26 @@ impl Podman {
             .get_raw(&format!("{API}/containers/json?all=true&filters={filters}"))
             .await?;
         let summaries: Vec<ContainerSummary> = serde_json::from_slice(&body)?;
+        let names: Vec<String> = summaries
+            .iter()
+            .filter_map(|c| c.names.first())
+            .map(|n| n.trim_start_matches('/').to_string())
+            .collect();
 
         Ok(summaries
             .into_iter()
+            .filter(|c| {
+                // During a recreate the old container waits under a second
+                // name while the new one is made. It carries the same labels,
+                // so without this the desktop shows twice. If the recreate
+                // was cut short and nothing holds the real name, the old
+                // container is the desktop, and it must stay visible.
+                let name = c.names.first().map(|n| n.trim_start_matches('/'));
+                match name.and_then(|n| n.strip_suffix(OLD_SUFFIX)) {
+                    Some(real) => !names.iter().any(|n| n == real),
+                    None => true,
+                }
+            })
             .filter_map(|c| {
                 // A container whose labels will not parse is skipped rather
                 // than failing the whole list. It may come from a newer Cabin.
@@ -66,12 +102,18 @@ impl Podman {
                     .iter()
                     .find(|p| p.container_port == GUEST_RDP_PORT)
                     .map(|p| p.host_port);
+                // An old container left by a cut-short recreate is shown
+                // under the desktop's own name. The volumes and the pinned
+                // certificate are keyed by that name, not by the container's.
+                let name = c
+                    .names
+                    .first()
+                    .map(|n| n.trim_start_matches('/'))
+                    .filter(|n| !n.ends_with(OLD_SUFFIX))
+                    .map(str::to_string)
+                    .unwrap_or_else(|| config.name.clone());
                 Some(Desktop {
-                    name: c
-                        .names
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| config.name.clone()),
+                    name,
                     id: c.id,
                     state: State::from_podman(&c.state),
                     config,
@@ -98,6 +140,10 @@ impl Podman {
         interfaces: &[NetInterface],
         password: &str,
     ) -> Result<String> {
+        // Podman would refuse these too, but with a message about the
+        // request rather than about the shared folder.
+        config.check_mounts().map_err(Error::Settings)?;
+
         let mut env = HashMap::new();
         env.insert("CABIN_PASSWORD".to_string(), password.to_string());
         // Whatever the socket policy needs the guest to know.
@@ -122,7 +168,11 @@ impl Podman {
                 options: vec!["rw".to_string()],
             },
             // Separate from the home volume, because it holds the TLS private
-            // key and nothing in the desktop session should be able to read it.
+            // key. Its own volume keeps the certificate stable when a
+            // recreate replaces the container, and keeps the key out of the
+            // home volume, which the user shares and backs up. The session
+            // user still owns the key, because gnome-remote-desktop runs as
+            // that user and has to read it.
             NamedVolume {
                 name: cabin_core::state_volume_name(&config.name),
                 dest: cabin_core::GUEST_STATE.to_string(),
@@ -145,19 +195,17 @@ impl Podman {
 
         // Bind the host container socket in, when the user asked for it and
         // accepted the warning. See DESIGN.md section 7.2.
+        // The mount is always added when the policy names one, so the
+        // environment and the SELinux label below always match a socket that
+        // is really there.
         if let Some(guest_path) = config.socket.guest_socket_path() {
-            if let Some(host_path) = self.host_socket_for(config.socket) {
+            if let Some(host_path) = self.host_socket_for(config.socket)? {
                 mounts.push(CreateMount {
                     destination: guest_path.to_string(),
                     source: host_path,
                     kind: "bind".to_string(),
                     options: vec!["rw".to_string()],
                 });
-            } else {
-                tracing::warn!(
-                    "{:?} was requested but no such socket exists on this host",
-                    config.socket
-                );
             }
         }
 
@@ -239,7 +287,179 @@ impl Podman {
             .iter()
             .find_map(|entry| entry.strip_prefix("CABIN_PASSWORD="))
             .map(str::to_string)
-            .ok_or_else(|| Error::NotFound(format!("no password recorded for {id}")))
+            .ok_or_else(|| Error::PasswordMissing(id.to_string()))
+    }
+
+    /// Reads a container's inspect data, or `None` when it does not exist.
+    async fn inspect(&self, id_or_name: &str) -> Result<Option<InspectResponse>> {
+        match self
+            .get_raw(&format!("{API}/containers/{}/json", urlencode(id_or_name)))
+            .await
+        {
+            Ok(body) => Ok(Some(serde_json::from_slice(&body)?)),
+            Err(Error::Api { status: 404, .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Recreates a desktop with a new configuration and returns the new id.
+    ///
+    /// Every setting needs this, because Podman fixes a container's
+    /// configuration when it creates it. The named home and state volumes are
+    /// attached by name, so the user's files and the pinned certificate
+    /// survive.
+    ///
+    /// The old container holds the only copy of the configuration and the
+    /// password, so it is not removed until the new one exists. It waits
+    /// under a second name, and if Podman refuses the new configuration it
+    /// gets its name back and starts again if it was running.
+    pub async fn recreate_desktop(
+        &self,
+        desktop: &Desktop,
+        updated: &DesktopConfig,
+        render_nodes: &[(String, String)],
+        interfaces: &[NetInterface],
+        start_after: bool,
+    ) -> Result<String> {
+        // Refuse settings Podman would refuse, before anything changes.
+        updated.check_mounts().map_err(Error::Settings)?;
+
+        let name = desktop.config.name.clone();
+        let password = self.desktop_password(&desktop.id).await?;
+        let port = desktop.rdp_port.unwrap_or(FALLBACK_RDP_PORT);
+        let was_running = desktop.state.is_running();
+        if was_running {
+            self.stop(&desktop.id, STOP_TIMEOUT_SECS).await?;
+        }
+
+        let temporary = old_name(&name);
+        self.clear_leftover(&temporary, &desktop.id, &name).await?;
+        let current = self
+            .inspect(&desktop.id)
+            .await?
+            .map(|i| i.name.trim_start_matches('/').to_string())
+            .unwrap_or_default();
+        if current != temporary {
+            self.rename(&desktop.id, &temporary).await?;
+        }
+
+        let new_id = match self
+            .create_desktop(updated, port, render_nodes, interfaces, &password)
+            .await
+        {
+            Ok(id) => id,
+            Err(refused) => {
+                let mut message = refused.to_string();
+                if let Err(e) = self.rename(&desktop.id, &name).await {
+                    message.push_str(&format!(
+                        "\n\nThe desktop is still there, but it is called {temporary} \
+                         until it can be renamed: {e}"
+                    ));
+                } else if was_running {
+                    if let Err(e) = self.start_desktop(&desktop.id, &name).await {
+                        message.push_str(&format!("\n\nIt did not start again: {e}"));
+                    }
+                }
+                return Err(Error::RecreateRefused { name, message });
+            }
+        };
+
+        // The named volumes stay, which is what the recreate depends on.
+        if let Err(e) = self.remove(&desktop.id, true).await {
+            return Err(Error::OldContainerLeft {
+                name,
+                old_name: temporary,
+                message: e.to_string(),
+            });
+        }
+
+        if start_after {
+            self.start_desktop(&new_id, &name).await?;
+        }
+        Ok(new_id)
+    }
+
+    /// Removes a container left under a recreate's temporary name.
+    ///
+    /// Such a container is left when removing the old container failed after
+    /// the new one was made, so it is safe to remove. Anything else under
+    /// that name belongs to somebody else, and the recreate stops instead.
+    async fn clear_leftover(&self, temporary: &str, desktop_id: &str, name: &str) -> Result<()> {
+        let Some(leftover) = self.inspect(temporary).await? else {
+            return Ok(());
+        };
+        if leftover.id == desktop_id {
+            // The desktop itself, from a recreate that was cut short.
+            return Ok(());
+        }
+        let ours = leftover
+            .config
+            .labels
+            .as_ref()
+            .and_then(|l| labels::from_labels(l).ok())
+            .is_some_and(|config| config.name == name);
+        if !ours {
+            return Err(Error::Settings(format!(
+                "A container called {temporary} already exists and Cabin did not \
+                 make it. Rename or remove it, then apply the settings again."
+            )));
+        }
+        self.remove(&leftover.id, true).await
+    }
+
+    /// Starts a desktop, recreating it first when the addresses of its
+    /// chosen networks have changed. Returns the id, which changes when a
+    /// recreate happens.
+    ///
+    /// Podman binds the addresses it was given at create time, so after a
+    /// DHCP lease changes the start would fail. The interface names are what
+    /// Cabin stores, and they are resolved again here.
+    pub async fn start_with_current_addresses(
+        &self,
+        desktop: &Desktop,
+        render_nodes: &[(String, String)],
+        interfaces: &[NetInterface],
+    ) -> Result<String> {
+        if self.needs_rebind(desktop, interfaces).await? {
+            return self
+                .recreate_desktop(desktop, &desktop.config, render_nodes, interfaces, true)
+                .await;
+        }
+        self.start_desktop(&desktop.id, &desktop.name).await?;
+        Ok(desktop.id.clone())
+    }
+
+    /// Like [`Podman::start_with_current_addresses`], for a desktop that may
+    /// be running.
+    pub async fn restart_with_current_addresses(
+        &self,
+        desktop: &Desktop,
+        render_nodes: &[(String, String)],
+        interfaces: &[NetInterface],
+    ) -> Result<String> {
+        if self.needs_rebind(desktop, interfaces).await? {
+            return self
+                .recreate_desktop(desktop, &desktop.config, render_nodes, interfaces, true)
+                .await;
+        }
+        self.restart(&desktop.id, STOP_TIMEOUT_SECS)
+            .await
+            .map_err(|e| explain_bind_failure(&desktop.name, e))?;
+        Ok(desktop.id.clone())
+    }
+
+    async fn needs_rebind(&self, desktop: &Desktop, interfaces: &[NetInterface]) -> Result<bool> {
+        // Only chosen networks resolve to addresses that can change. Asking
+        // Podman for the others would cost a request on every start.
+        if !matches!(desktop.config.exposure, Exposure::Interfaces { .. }) {
+            return Ok(false);
+        }
+        let inspect = self
+            .inspect(&desktop.id)
+            .await?
+            .ok_or_else(|| Error::NotFound(desktop.name.clone()))?;
+        let bound = inspect.bound_addresses(GUEST_RDP_PORT);
+        Ok(desktop.config.exposure.needs_rebind(&bound, interfaces))
     }
 
     pub async fn start(&self, id: &str) -> Result<()> {
@@ -255,7 +475,9 @@ impl Podman {
     /// like a successful start. Without this check the interface shows a
     /// desktop as running while it is already gone.
     pub async fn start_desktop(&self, id: &str, name: &str) -> Result<()> {
-        self.start(id).await?;
+        self.start(id)
+            .await
+            .map_err(|e| explain_bind_failure(name, e))?;
 
         // Long enough for an immediate failure to have happened, short enough
         // not to be felt. A healthy guest reaches multi-user.target in about
@@ -269,6 +491,12 @@ impl Podman {
         };
         if state.status == "running" {
             return Ok(());
+        }
+        if is_bind_failure(&state.error) {
+            return Err(Error::AddressGone {
+                name: name.to_string(),
+                message: state.error.clone(),
+            });
         }
 
         Err(Error::StartedThenExited {
@@ -299,6 +527,12 @@ impl Podman {
         .map(|_| ())
     }
 
+    /// Removes a container.
+    ///
+    /// The named home and state volumes survive this. `v=true` removes only
+    /// anonymous volumes. A recreate depends on that: it removes the old
+    /// container and keeps the user's files and the pinned certificate. Use
+    /// [`Podman::delete_desktop`] to remove a desktop for good.
     pub async fn remove(&self, id: &str, force: bool) -> Result<()> {
         self.send(
             "DELETE",
@@ -309,8 +543,104 @@ impl Podman {
         .map(|_| ())
     }
 
+    /// Removes a named volume. A volume that is already gone is not an error.
+    pub async fn remove_volume(&self, name: &str) -> Result<()> {
+        match self
+            .send(
+                "DELETE",
+                &format!("{API}/volumes/{}?force=true", urlencode(name)),
+                None,
+            )
+            .await
+        {
+            Ok(_) | Err(Error::Api { status: 404, .. }) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Removes a desktop for good: the container, then its home and state
+    /// volumes.
+    ///
+    /// The volumes go only after the container, because Podman will not
+    /// remove a volume that a container still uses. Without this a new
+    /// desktop with the same name would silently inherit the old files and
+    /// the old certificate.
+    pub async fn delete_desktop(&self, id: &str, name: &str) -> Result<()> {
+        // A container that is already gone is not an error, so a delete
+        // that stopped part way can run again and finish.
+        match self.remove(id, true).await {
+            Ok(()) | Err(Error::Api { status: 404, .. }) => {}
+            Err(e) => return Err(e),
+        }
+        let mut left = Vec::new();
+        let mut messages = Vec::new();
+        for volume in [
+            cabin_core::home_volume_name(name),
+            cabin_core::state_volume_name(name),
+        ] {
+            if let Err(e) = self.remove_volume(&volume).await {
+                messages.push(e.to_string());
+                left.push(volume);
+            }
+        }
+        if left.is_empty() {
+            return Ok(());
+        }
+        Err(Error::VolumesLeft {
+            volumes: left.join(" and "),
+            message: messages.join("\n"),
+        })
+    }
+
+    /// Gives a container a new name. Named volumes are attached by name, so
+    /// a rename does not affect them.
+    pub async fn rename(&self, id: &str, new_name: &str) -> Result<()> {
+        self.send(
+            "POST",
+            &format!("{API}/containers/{id}/rename?name={}", urlencode(new_name)),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// The name of every container on the host, Cabin's or not.
+    ///
+    /// Podman refuses a create whose name another container holds, and the
+    /// refusal would come after the dialogue closed. The caller uses this
+    /// only to refuse those names, never to show the containers.
+    pub async fn container_names(&self) -> Result<Vec<String>> {
+        let body = self
+            .get_raw(&format!("{API}/containers/json?all=true"))
+            .await?;
+        let summaries: Vec<ContainerSummary> = serde_json::from_slice(&body)?;
+        Ok(summaries
+            .into_iter()
+            .flat_map(|c| c.names)
+            .map(|n| n.trim_start_matches('/').to_string())
+            .collect())
+    }
+
+    /// The name of every volume on the host.
+    ///
+    /// A desktop's volumes are named after it, so a volume left by an older
+    /// version would hand its files to a new desktop with the same name.
+    pub async fn volume_names(&self) -> Result<Vec<String>> {
+        let body = self.get_raw(&format!("{API}/volumes/json")).await?;
+        // Podman answers null rather than an empty list when there are none.
+        let volumes: Option<Vec<VolumeSummary>> = serde_json::from_slice(&body)?;
+        Ok(volumes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| v.name)
+            .collect())
+    }
+
     /// Follows the container event feed and calls `on_event` for each entry.
-    /// This never returns while the socket stays open.
+    ///
+    /// This returns when the socket closes, for example when Podman restarts.
+    /// The caller must reconnect, or changes made outside Cabin stop
+    /// reaching it.
     pub async fn watch_events<F>(&self, mut on_event: F) -> Result<()>
     where
         F: FnMut(Event),
@@ -327,20 +657,31 @@ impl Podman {
         .await
     }
 
-    /// Finds the host socket for a policy, if it is actually there.
+    /// Finds the host socket to bind into the guest for a policy.
     ///
-    /// A missing socket is not an error at create time. Reporting it as one
-    /// would block a desktop from being made at all, when the user may simply
-    /// not have started that service yet.
-    fn host_socket_for(&self, policy: SocketPolicy) -> Option<String> {
-        let candidate = match policy {
-            SocketPolicy::HostPodman => self.socket.clone(),
-            SocketPolicy::HostDocker => "/var/run/docker.sock".to_string(),
-            SocketPolicy::None | SocketPolicy::Nested => return None,
-        };
-        std::path::Path::new(&candidate)
-            .exists()
-            .then_some(candidate)
+    /// The Docker socket is not tested from here. Podman resolves a bind
+    /// source on the host, and inside the Flatpak this process cannot see
+    /// `/var/run` at all, so a test here would always fail. If the socket is
+    /// absent, Podman refuses the create with an error the user sees.
+    ///
+    /// The Podman socket is the one this client talks to, so this process
+    /// can see it. A missing one is an error rather than a skipped mount: a
+    /// skip would leave the guest pointed at a socket with nothing behind it,
+    /// and with SELinux labelling turned off for no reason.
+    fn host_socket_for(&self, policy: SocketPolicy) -> Result<Option<String>> {
+        match policy {
+            SocketPolicy::HostPodman => {
+                if std::path::Path::new(&self.socket).exists() {
+                    Ok(Some(self.socket.clone()))
+                } else {
+                    Err(Error::HostSocketMissing {
+                        path: self.socket.clone(),
+                    })
+                }
+            }
+            SocketPolicy::HostDocker => Ok(Some("/var/run/docker.sock".to_string())),
+            SocketPolicy::None | SocketPolicy::Nested => Ok(None),
+        }
     }
 
     async fn get_raw(&self, path: &str) -> Result<Vec<u8>> {
@@ -390,6 +731,33 @@ fn diagnose_early_exit(state: &InspectState) -> String {
     format!("The desktop exited with status {}.", state.exit_code)
 }
 
+/// True when an error says that a published address could not be bound.
+///
+/// Podman binds the exact addresses it was given at create time. When an
+/// address of a chosen network has gone, the start fails with one of these,
+/// which names neither the network nor the setting that chose it.
+fn is_bind_failure(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "cannot assign requested address",
+        "failed to bind",
+        "couldn't listen",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
+
+/// Turns a bind failure into an error that names the setting to change.
+fn explain_bind_failure(name: &str, error: Error) -> Error {
+    match error {
+        Error::Api { message, .. } if is_bind_failure(&message) => Error::AddressGone {
+            name: name.to_string(),
+            message,
+        },
+        other => other,
+    }
+}
+
 fn build_limits(config: &DesktopConfig) -> Option<ResourceLimits> {
     let memory = config.memory_mb.map(|mb| Memory {
         limit: (mb * 1024 * 1024) as i64,
@@ -407,7 +775,7 @@ fn build_limits(config: &DesktopConfig) -> Option<ResourceLimits> {
 }
 
 /// Podman reports errors as `{"cause":..,"message":..,"response":..}`.
-fn extract_message(body: &[u8]) -> String {
+pub(crate) fn extract_message(body: &[u8]) -> String {
     serde_json::from_slice::<serde_json::Value>(body)
         .ok()
         .and_then(|v| {
@@ -476,6 +844,38 @@ mod tests {
             error: String::new(),
         };
         assert!(diagnose_early_exit(&state).contains("status 3"));
+    }
+
+    #[test]
+    fn a_lost_address_is_named_as_the_cause() {
+        let refused = Error::Api {
+            status: 500,
+            message: "pasta failed: Failed to bind port 13389 (Cannot assign requested address)"
+                .into(),
+        };
+        let explained = explain_bind_failure("fedora", refused).to_string();
+        assert!(explained.contains("fedora"), "{explained}");
+        assert!(explained.contains("apply them again"), "{explained}");
+    }
+
+    #[test]
+    fn other_start_errors_pass_through() {
+        let refused = Error::Api {
+            status: 500,
+            message: "no such image".into(),
+        };
+        assert!(matches!(
+            explain_bind_failure("fedora", refused),
+            Error::Api { .. }
+        ));
+    }
+
+    #[test]
+    fn the_old_container_name_is_recognised() {
+        // list_desktops hides the old container by this suffix while a
+        // recreate runs, so the two must agree.
+        assert!(old_name("fedora").ends_with(OLD_SUFFIX));
+        assert_eq!(old_name("fedora").strip_suffix(OLD_SUFFIX), Some("fedora"));
     }
 
     #[test]
