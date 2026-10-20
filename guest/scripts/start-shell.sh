@@ -16,8 +16,10 @@ export XDG_CURRENT_DESKTOP=GNOME
 export XDG_SESSION_DESKTOP=gnome
 export GNOME_SHELL_SESSION_MODE=user
 
-# Software rendering is the fallback when no render node is passed in.
-if [ ! -e /dev/dri/renderD128 ]; then
+# Software rendering is the fallback when no render node is passed in. Cabin
+# passes the chosen node at its host path, which can be any renderD number, so
+# any render node counts. Never infer a driver from the node number.
+if ! compgen -G '/dev/dri/renderD*' >/dev/null; then
     export LIBGL_ALWAYS_SOFTWARE=1
     export GALLIUM_DRIVER=llvmpipe
 fi
