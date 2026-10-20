@@ -1,0 +1,4 @@
+# release.py reads Cargo.toml with tomllib, which needs Python 3.11. The CI image
+# and Fedora 44 have newer versions.
+target-version = "py311"
+line-length = 100

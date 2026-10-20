@@ -7,3 +7,4 @@
 *.flatpak
 .cargo/
 /_flatpak
+/_release

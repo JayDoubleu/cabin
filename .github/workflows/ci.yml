@@ -33,6 +33,7 @@ jobs:
           git rust cargo rustfmt clippy gcc pkgconf-pkg-config
           gtk4-devel libadwaita-devel freerdp-devel
           just meson gettext glib2-devel desktop-file-utils appstream python3 uv
+          ShellCheck ruff
       - uses: actions/checkout@v7
       - name: Mark the checkout as safe for git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -45,6 +46,13 @@ jobs:
         run: |
           just flatpak-sources
           git diff --exit-code cargo-sources.json
+      - name: Check the release scripts
+        run: |
+          shellcheck -x -P SCRIPTDIR build-aux/release/*.sh
+          ruff check build-aux/release
+          ruff format --check build-aux/release
+      - name: Check that the version agrees in every place
+        run: python3 build-aux/release/release.py version
       - name: Validate the desktop file and the metainfo
         # Build only the generated data files. A full meson build compiles
         # the application a second time.
@@ -64,8 +72,18 @@ jobs:
       options: --privileged
     steps:
       - uses: actions/checkout@v7
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+      - uses: actions/cache@v6
         with:
-          bundle: cabin.flatpak
-          manifest-path: build-aux/io.github.jaydoubleu.Cabin.yaml
-          cache-key: flatpak-builder-${{ hashFiles('build-aux/io.github.jaydoubleu.Cabin.yaml') }}
+          path: _release/flatpak/state
+          key: flatpak-builder-${{ hashFiles('build-aux/io.github.jaydoubleu.Cabin.yaml') }}
+          restore-keys: flatpak-builder-
+      # The same script as the release, so a pull request tests the release build.
+      - name: Build an unsigned test repository
+        run: build-aux/release/build-repo.sh _release/repo --unsigned --no-mirror
+      - name: Make the bundle
+        run: build-aux/release/package-assets.sh _release/repo _release/assets
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cabin-test-bundle
+          path: _release/assets/
+          retention-days: 7

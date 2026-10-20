@@ -112,7 +112,9 @@ modules:
           - target
           - _build
           - _flatpak
-          # The build directory of the CI flatpak-builder action.
+          # The release scripts write the repository, the site and the bundle here.
+          - _release
+          # The build directory of the flatpak-builder GitHub action.
           - flatpak_app
           - .flatpak-builder
           - build

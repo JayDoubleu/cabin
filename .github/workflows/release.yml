@@ -1,0 +1,156 @@
+# Publishes a release. Push a tag such as v0.2.0 (see "Releases" in CONTRIBUTING.md).
+#
+# 1. build:   builds a signed Flatpak repository that continues the live one, the site,
+#             the bundle and the release notes.
+# 2. publish: deploys the site to GitHub Pages and makes the GitHub release.
+# 3. verify:  installs Cabin from the live .flatpakref in a clean container.
+#
+# A manual run builds and signs, but publishes only when "publish" is set. A pull request
+# that changes the release files runs the build job only. Without the secret (a pull
+# request from a fork), the build is unsigned.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - build-aux/release/**
+      - build-aux/io.github.jaydoubleu.Cabin.yaml
+      - .github/workflows/release.yml
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Deploy the repository to GitHub Pages
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # The container jobs use sh by default. The release scripts need bash.
+    shell: bash
+
+concurrency:
+  # A second release waits. A cancelled deploy can leave a half-published repository.
+  # Pull requests use their own group, so they cannot replace a waiting release.
+  group: release-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: --privileged
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read the version
+        id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            python3 build-aux/release/release.py check "$GITHUB_REF_NAME"
+          fi
+          . build-aux/release/common.sh
+          echo "version=$(app_version)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: _release/flatpak/state
+          key: flatpak-builder-${{ hashFiles('build-aux/io.github.jaydoubleu.Cabin.yaml') }}
+          restore-keys: flatpak-builder-
+      - name: Build the signed repository
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "$GPG_PRIVATE_KEY" ] && [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            build-aux/release/build-repo.sh _release/repo --unsigned
+          else
+            build-aux/release/build-repo.sh _release/repo
+          fi
+      - name: Stage the site
+        run: build-aux/release/stage-site.sh _release/repo _release/site
+      - name: Make the release files
+        run: |
+          build-aux/release/package-assets.sh _release/repo _release/assets
+          python3 build-aux/release/release.py notes "${{ steps.version.outputs.version }}" > _release/notes.md
+          cat _release/notes.md
+      - uses: actions/upload-artifact@v7
+        with:
+          name: site
+          path: _release/site/
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: |
+            _release/assets/
+            _release/notes.md
+          retention-days: 30
+
+  publish:
+    needs: build
+    if: github.ref_type == 'tag' || inputs.publish == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: site
+          path: site
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v5
+      - name: Wait until Pages serves the new version
+        env:
+          PAGES_URL: ${{ steps.deploy.outputs.page_url }}
+        run: |
+          want="$(sha256sum site/repo/summary | cut -d' ' -f1)"
+          for attempt in $(seq 1 30); do
+            have="$(curl -fsSL "${PAGES_URL%/}/repo/summary" | sha256sum | cut -d' ' -f1)" || true
+            [ "$have" = "$want" ] && echo "Pages serves the new summary." && exit 0
+            echo "Attempt $attempt: not yet"
+            sleep 10
+          done
+          echo "Pages did not serve the new summary in 5 minutes." >&2
+          exit 1
+      - uses: actions/download-artifact@v8
+        if: github.ref_type == 'tag'
+        with:
+          name: release
+          path: release
+      - name: Make the GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "Cabin $VERSION" --notes-file release/notes.md --verify-tag \
+            release/assets/*
+
+  verify:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install from the live .flatpakref
+        env:
+          FLATPAK_USER_DIR: /tmp/flatpak-user
+        run: build-aux/release/verify-install.sh "${{ needs.build.outputs.version }}"

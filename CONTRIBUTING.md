@@ -82,18 +82,117 @@ CLAUDE.md has the full list. These catch new contributors most often:
 - That `cargo-sources.json` matches `Cargo.lock`.
 - `desktop-file-validate` and `appstreamcli validate` on the generated data
   files.
-- A Flatpak test build in the GNOME 51 CI image.
+- ShellCheck and ruff on the release scripts, and that the version agrees
+  in every place.
+- A Flatpak test build in the GNOME 51 CI image, with the release build script.
 
-## Releasing
+## Releases
 
-Before you tag a release:
+Cabin has its own signed Flatpak repository on GitHub Pages, at
+<https://jaydoubleu.github.io/cabin>. A tag `vX.Y.Z` starts
+`.github/workflows/release.yml`. The workflow does these steps:
 
-- Set the version in `Cargo.toml`, `meson.build` and the metainfo release
-  entry. They must agree.
-- Set the date of the metainfo release entry to the date of the tag.
-- On the first public release, turn on private vulnerability reporting, which
-  SECURITY.md depends on. Use Settings > Code security, or
-  `gh api -X PUT repos/JayDoubleu/cabin/private-vulnerability-reporting`.
+1. It builds a signed repository that continues the live one, the site, the
+   bundle and the release notes.
+2. It deploys the site to GitHub Pages and makes the GitHub release.
+3. It installs Cabin from the live `.flatpakref` in a clean container.
+
+The scripts are in `build-aux/release/`. The CI workflow runs the same build
+script, unsigned, on every pull request.
+
+### One-time setup
+
+The owner does these steps once, before the first release:
+
+1. Make the repository public. Users cannot reach a private Pages site.
+2. In Settings > Pages, set the source to "GitHub Actions".
+3. In Settings > Environments > github-pages, keep `main` and add the tag rule
+   `v*` under "Deployment branches and tags". Without the tag rule, the deploy
+   of a tag fails.
+4. Add the private signing key as the Actions secret `GPG_PRIVATE_KEY`:
+
+   ```sh
+   gh secret set GPG_PRIVATE_KEY < cabin-signing-key.private.asc
+   ```
+
+5. Turn on private vulnerability reporting, which SECURITY.md depends on. Use
+   Settings > Code security, or
+   `gh api -X PUT repos/JayDoubleu/cabin/private-vulnerability-reporting`.
+
+### Make a release
+
+The version is in four places: `Cargo.toml`, `meson.build`, `Cargo.lock` and
+the newest release entry in the metainfo. They must agree. Do not edit them by
+hand. Use `build-aux/release/release.py`, which changes all four.
+
+1. Set the version and the release notes. The notes go into the metainfo
+   file, so GNOME Software shows them. One note becomes a paragraph, more notes
+   become a list:
+
+   ```sh
+   python3 build-aux/release/release.py bump 0.2.0 \
+       --note "Audio in the guest." --note "Clipboard sharing."
+   ```
+
+   For 0.1.0, the version and the notes are already there. Set only the date
+   of the entry to the day of the tag:
+
+   ```sh
+   python3 build-aux/release/release.py date 0.1.0
+   ```
+
+2. Run `just lint` and `just test`, commit the change, and merge it to `main`.
+3. Tag the commit and push the tag:
+
+   ```sh
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+The workflow fails if the tag does not match the version, or if the newest
+metainfo entry is a different version. `release.py check v0.2.0` does the same
+check on your computer.
+
+Each release continues the live repository. The new commit has the previous
+release as its parent, so `flatpak update` downloads a static delta. The
+repository keeps the last 3 commits.
+
+A manual run of the workflow (Actions > Release > Run workflow) builds and
+signs. It deploys to Pages only if you set "publish", and it never makes a
+GitHub release.
+
+### Test a release on your computer
+
+Run the scripts in the CI image with Podman. `in-container.sh` uses the host
+Podman from a toolbox. Use a separate Flatpak user folder for the test install,
+so the test does not touch your own apps:
+
+```sh
+export PAGES_URL=http://localhost:8790 GPG_PRIVATE_KEY_FILE=~/cabin-signing-key.private.asc
+build-aux/release/in-container.sh build-aux/release/build-repo.sh _release/repo --no-mirror
+build-aux/release/in-container.sh build-aux/release/stage-site.sh _release/repo _release/site
+build-aux/release/in-container.sh build-aux/release/package-assets.sh _release/repo _release/assets
+build-aux/release/in-container.sh build-aux/release/verify-repo.sh _release/repo
+python3 -m http.server 8790 --bind 127.0.0.1 --directory _release/site &
+CONTAINER_ARGS="--network=host --env FLATPAK_USER_DIR=/tmp/flatpak-user" \
+    build-aux/release/in-container.sh build-aux/release/verify-install.sh 0.1.0
+```
+
+Without the private key, give `build-repo.sh` the `--unsigned` option. The
+first build takes about as long as `just flatpak`. Everything goes into
+`_release/`, which git ignores.
+
+### Signing key
+
+The workflow reads the private key from the `GPG_PRIVATE_KEY` Actions secret.
+The public key is `build-aux/release/signing-key.asc`, ID `30D419BA26EDF4F1`.
+Keep an offline copy of the private key and of its revocation certificate. If
+you lose the private key, you must make a new key. Then each user must import
+the new key:
+
+```sh
+flatpak remote-modify --user --gpg-import=signing-key.asc cabin
+```
 
 ## Security issues
 
