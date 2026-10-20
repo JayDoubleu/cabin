@@ -10,6 +10,9 @@
 #
 # Configuration is read from the container environment through /proc/1/environ,
 # because systemd does not pass the container environment down to services.
+# For the same reason the host socket variables are written to
+# /run/environment.d, which the user manager reads when it starts. Without that
+# a terminal inside the desktop never sees them.
 set -euo pipefail
 
 env_of_pid1() {
@@ -27,6 +30,9 @@ CABIN_PASSWORD="$(env_of_pid1 CABIN_PASSWORD)";   CABIN_PASSWORD="${CABIN_PASSWO
 # then shown the other one, which is empty.
 CABIN_SHELL_MONITOR="$(env_of_pid1 CABIN_SHELL_MONITOR)"
 CABIN_NESTED_PODMAN="$(env_of_pid1 CABIN_NESTED_PODMAN)"
+# Set by Cabin when the desktop may use the host's Podman or Docker socket.
+CONTAINER_HOST="$(env_of_pid1 CONTAINER_HOST)"
+DOCKER_HOST="$(env_of_pid1 DOCKER_HOST)"
 
 install -d -m 0755 /run/cabin
 install -d -m 0700 -o "${CABIN_USER}" -g "${CABIN_USER}" /var/lib/cabin
@@ -74,6 +80,25 @@ driver = "vfs"
 ignore_chown_errors = "true"
 STORAGEEOF
     chown "${CABIN_USER}:${CABIN_USER}" "${conf_dir}/storage.conf"
+fi
+
+# Only the cabin units read /run/cabin/env. The rest of the session, such as a
+# terminal, gets its environment from the user manager, and the user manager
+# reads /run/environment.d through systemd-environment-d-generator. This
+# service runs before systemd-user-sessions.service, so the file is in place
+# before the user manager starts. /run is a tmpfs, so the file is written again
+# on every boot and cannot outlive a change of socket policy, which recreates
+# the container anyway. Do not use /etc/environment.d: that sits in the
+# container layer and survives a restart.
+install -d -m 0755 /run/environment.d
+socket_conf=/run/environment.d/50-cabin-container-socket.conf
+rm -f "${socket_conf}"
+if [ -n "${CONTAINER_HOST}" ] || [ -n "${DOCKER_HOST}" ]; then
+    {
+        if [ -n "${CONTAINER_HOST}" ]; then echo "CONTAINER_HOST=${CONTAINER_HOST}"; fi
+        if [ -n "${DOCKER_HOST}" ]; then echo "DOCKER_HOST=${DOCKER_HOST}"; fi
+    } > "${socket_conf}"
+    chmod 0644 "${socket_conf}"
 fi
 
 cat > /run/cabin/env <<ENVEOF
