@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # The container jobs use sh by default. The recipes need bash.
+    shell: bash
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and tests
+    runs-on: ubuntu-latest
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Install the build tools
+        # freerdp-devel gives FreeRDP 3 system wide, so the build needs no
+        # sysroot. gettext gives msgfmt, which meson needs to merge the
+        # desktop file and the metainfo.
+        run: >
+          dnf install -y --setopt=install_weak_deps=False
+          git rust cargo rustfmt clippy gcc pkgconf-pkg-config
+          gtk4-devel libadwaita-devel freerdp-devel
+          just meson gettext glib2-devel desktop-file-utils appstream python3 uv
+      - uses: actions/checkout@v7
+      - name: Mark the checkout as safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - run: just lint
+      # The live tests are ignored by default and stay that way here. They
+      # need the host Podman and a guest image, and CI has neither.
+      - run: just test
+      - name: Check that cargo-sources.json matches Cargo.lock
+        # The Flatpak build is offline, so a stale file fails it.
+        run: |
+          just flatpak-sources
+          git diff --exit-code cargo-sources.json
+      - name: Validate the desktop file and the metainfo
+        # Build only the generated data files. A full meson build compiles
+        # the application a second time.
+        run: |
+          meson setup _build
+          ninja -C _build data/io.github.jaydoubleu.Cabin.desktop \
+              data/io.github.jaydoubleu.Cabin.metainfo.xml
+          desktop-file-validate _build/data/io.github.jaydoubleu.Cabin.desktop
+          appstreamcli validate --no-net --explain \
+              _build/data/io.github.jaydoubleu.Cabin.metainfo.xml
+
+  flatpak:
+    name: Flatpak build
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v7
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: cabin.flatpak
+          manifest-path: build-aux/io.github.jaydoubleu.Cabin.yaml
+          cache-key: flatpak-builder-${{ hashFiles('build-aux/io.github.jaydoubleu.Cabin.yaml') }}
