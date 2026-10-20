@@ -89,6 +89,9 @@ sudo dnf install rust cargo rustfmt clippy gcc pkgconf-pkg-config \
 `rustup` works as well as the Fedora Rust packages. CI installs this same list
 on Fedora 44, so `.github/workflows/ci.yml` is the tested reference.
 
+`just flatpak-sources` also needs `uv`. Run it after any change to
+`Cargo.lock`. On Fedora, install it with `sudo dnf install uv`.
+
 ### FreeRDP, for a native build only
 
 A native build links FreeRDP 3, which the Flatpak provides but a native build

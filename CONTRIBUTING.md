@@ -49,6 +49,7 @@ CLAUDE.md has the full list. These catch new contributors most often:
 - **Rule 7.** After any change to `Cargo.lock`, run `just flatpak-sources` and
   commit the new `cargo-sources.json`. The Flatpak build is offline. CI
   regenerates the file and fails if it differs from the one in the commit.
+  The recipe needs `uv` (`sudo dnf install uv` on Fedora).
 - **Rule 9.** Do not add bindgen to `cabin-freerdp-sys`. The C shim exists for
   a reason.
 - **Rule 17.** Never call bare `podman` in a test. Inside a toolbox that is the
@@ -74,10 +75,25 @@ CLAUDE.md has the full list. These catch new contributors most often:
 `.github/workflows/ci.yml` runs on every pull request:
 
 - `just lint` and `just test` on Fedora 44.
+
+  CI uses the Rust that Fedora packages, and ignores `rust-toolchain.toml`.
+  If you use `rustup`, run `rustup update` before `just lint`. A newer clippy
+  can add a lint, and CI then fails on code that passed on your computer.
 - That `cargo-sources.json` matches `Cargo.lock`.
 - `desktop-file-validate` and `appstreamcli validate` on the generated data
   files.
 - A Flatpak test build in the GNOME 51 CI image.
+
+## Releasing
+
+Before you tag a release:
+
+- Set the version in `Cargo.toml`, `meson.build` and the metainfo release
+  entry. They must agree.
+- Set the date of the metainfo release entry to the date of the tag.
+- On the first public release, turn on private vulnerability reporting, which
+  SECURITY.md depends on. Use Settings > Code security, or
+  `gh api -X PUT repos/JayDoubleu/cabin/private-vulnerability-reporting`.
 
 ## Security issues
 
