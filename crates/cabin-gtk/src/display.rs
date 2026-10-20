@@ -281,7 +281,12 @@ impl CabinDisplay {
         // guest would keep it held. Release everything on the way out.
         let focus = gtk::EventControllerFocus::new();
         let widget = self.clone();
-        focus.connect_leave(move |_| widget.release_held_keys());
+        focus.connect_enter(move |_| widget.set_system_shortcuts_inhibited(true));
+        let widget = self.clone();
+        focus.connect_leave(move |_| {
+            widget.release_held_keys();
+            widget.set_system_shortcuts_inhibited(false);
+        });
         self.add_controller(focus);
 
         let motion = gtk::EventControllerMotion::new();
@@ -363,6 +368,29 @@ impl CabinDisplay {
                 extended,
                 pressed: false,
             });
+        }
+    }
+
+    /// Sends the shortcuts of the host compositor to the guest, or gives them
+    /// back.
+    ///
+    /// Without this, Super opens the overview of the host as well as the
+    /// guest, and Alt+Tab leaves the window. The inhibitor covers only the
+    /// display while it has the focus, so the sidebar and the dialogues keep
+    /// the usual shortcuts. GNOME asks the user once whether to allow it, and
+    /// Super+Escape always gives the shortcuts back to the host.
+    fn set_system_shortcuts_inhibited(&self, inhibited: bool) {
+        let Some(toplevel) = self
+            .native()
+            .and_then(|native| native.surface())
+            .and_downcast::<gtk::gdk::Toplevel>()
+        else {
+            return;
+        };
+        if inhibited {
+            toplevel.inhibit_system_shortcuts(None::<&gtk::gdk::Event>);
+        } else {
+            toplevel.restore_system_shortcuts();
         }
     }
 
