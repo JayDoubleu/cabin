@@ -18,11 +18,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* The context FreeRDP allocates for us. The first member must be rdpContext,
- * because FreeRDP casts between the two. */
+/* The context FreeRDP allocates for us. The first member must be
+ * rdpClientContext, which itself starts with rdpContext, because FreeRDP casts
+ * between all three. A context that starts with a bare rdpContext works, but
+ * freerdp_client_context_new then logs "[APPLICATION BUG] Function must be
+ * called with a context based on rdpClientContext" on every connection and
+ * every free, and each client helper that needs the larger struct refuses to
+ * run. */
 typedef struct
 {
-	rdpContext context;
+	rdpClientContext common;
 	struct cabin_rdp* owner;
 } cabinContext;
 
@@ -356,12 +361,12 @@ void cabin_rdp_free(cabin_rdp* self)
 		return;
 	if (self->ctx && self->needs_disconnect)
 	{
-		freerdp_disconnect(self->ctx->context.instance);
+		freerdp_disconnect(self->ctx->common.context.instance);
 		self->needs_disconnect = 0;
 		self->connected = 0;
 	}
 	if (self->ctx)
-		freerdp_client_context_free(&self->ctx->context);
+		freerdp_client_context_free(&self->ctx->common.context);
 	free(self->expected_fingerprint);
 	free(self->seen_fingerprint);
 	free(self);
@@ -391,7 +396,7 @@ int cabin_rdp_configure(cabin_rdp* self, const char* host, uint32_t port, const 
 	if (!self || !self->ctx)
 		return CABIN_ERR_GENERIC;
 
-	rdpSettings* settings = self->ctx->context.settings;
+	rdpSettings* settings = self->ctx->common.context.settings;
 
 	if (!freerdp_settings_set_string(settings, FreeRDP_ServerHostname, host))
 		return CABIN_ERR_GENERIC;
@@ -418,6 +423,13 @@ int cabin_rdp_configure(cabin_rdp* self, const char* host, uint32_t port, const 
 		return CABIN_ERR_GENERIC;
 	if (!freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, FALSE))
 		return CABIN_ERR_GENERIC;
+	/* NLA tries Kerberos and Kerberos user-to-user before NTLM. The guest has
+	 * no realm and accepts only NTLM, so both attempts always fail and each
+	 * logs an error on every connection. Leaving them out skips the attempts.
+	 * The two have separate names in WinPR's Negotiate package. */
+	if (!freerdp_settings_set_string(settings, FreeRDP_AuthenticationPackageList,
+	                                 "!kerberos,!u2u"))
+		return CABIN_ERR_GENERIC;
 
 	/* Both of these must stay off. Either one makes FreeRDP accept the
 	 * certificate without ever calling VerifyCertificateEx, so the pinning in
@@ -436,12 +448,12 @@ int cabin_rdp_connect(cabin_rdp* self)
 	if (!self || !self->ctx)
 		return CABIN_ERR_GENERIC;
 
-	freerdp* instance = self->ctx->context.instance;
+	freerdp* instance = self->ctx->common.context.instance;
 	/* A failed freerdp_connect disconnects by itself, so a disconnect is owed
 	 * only after a success. */
 	if (!freerdp_connect(instance))
 	{
-		self->last_error = freerdp_get_last_error(&self->ctx->context);
+		self->last_error = freerdp_get_last_error(&self->ctx->common.context);
 		switch (self->last_error)
 		{
 			case FREERDP_ERROR_CONNECT_LOGON_FAILURE:
@@ -462,12 +474,12 @@ int cabin_rdp_poll(cabin_rdp* self, uint32_t timeout_ms)
 	if (!self || !self->ctx)
 		return CABIN_ERR_GENERIC;
 
-	freerdp* instance = self->ctx->context.instance;
-	if (freerdp_shall_disconnect_context(&self->ctx->context))
+	freerdp* instance = self->ctx->common.context.instance;
+	if (freerdp_shall_disconnect_context(&self->ctx->common.context))
 		return 0;
 
 	HANDLE handles[64];
-	DWORD count = freerdp_get_event_handles(&self->ctx->context, handles,
+	DWORD count = freerdp_get_event_handles(&self->ctx->common.context, handles,
 	                                        sizeof(handles) / sizeof(handles[0]));
 	if (count == 0)
 		return CABIN_ERR_GENERIC;
@@ -476,10 +488,10 @@ int cabin_rdp_poll(cabin_rdp* self, uint32_t timeout_ms)
 	if (status == WAIT_FAILED)
 		return CABIN_ERR_GENERIC;
 
-	if (!freerdp_check_event_handles(&self->ctx->context))
+	if (!freerdp_check_event_handles(&self->ctx->common.context))
 	{
-		self->last_error = freerdp_get_last_error(&self->ctx->context);
-		return freerdp_shall_disconnect_context(&self->ctx->context) ? 0 : CABIN_ERR_DISCONNECTED;
+		self->last_error = freerdp_get_last_error(&self->ctx->common.context);
+		return freerdp_shall_disconnect_context(&self->ctx->common.context) ? 0 : CABIN_ERR_DISCONNECTED;
 	}
 
 	(void)instance;
@@ -500,7 +512,7 @@ static const GDI_BITMAP* primary_bitmap(cabin_rdp* self)
 {
 	if (!self || !self->ctx || !self->connected)
 		return NULL;
-	rdpGdi* gdi = self->ctx->context.gdi;
+	rdpGdi* gdi = self->ctx->common.context.gdi;
 	if (!gdi || !gdi->primary || !gdi->primary->bitmap)
 		return NULL;
 	const GDI_BITMAP* bitmap = gdi->primary->bitmap;
@@ -522,7 +534,7 @@ int cabin_rdp_framebuffer_info(cabin_rdp* self, uint32_t* width, uint32_t* heigh
 	if (!self || !self->ctx || !self->connected)
 		return CABIN_ERR_NOT_READY;
 
-	rdpUpdate* update = self->ctx->context.update;
+	rdpUpdate* update = self->ctx->common.context.update;
 	rdp_update_lock(update);
 	const GDI_BITMAP* bitmap = primary_bitmap(self);
 	if (bitmap)
@@ -551,7 +563,7 @@ int cabin_rdp_copy_framebuffer(cabin_rdp* self, uint8_t* dst, size_t dst_len, ui
 		return CABIN_ERR_GENERIC;
 
 	int rc = CABIN_ERR_NOT_READY;
-	rdpUpdate* update = self->ctx->context.update;
+	rdpUpdate* update = self->ctx->common.context.update;
 	rdp_update_lock(update);
 	const GDI_BITMAP* bitmap = primary_bitmap(self);
 	/* Copy only when the bitmap is still the one the caller checked. A
@@ -610,7 +622,7 @@ int cabin_rdp_send_key(cabin_rdp* self, uint32_t scancode, int extended, int dow
 	UINT16 flags = down ? KBD_FLAGS_DOWN : KBD_FLAGS_RELEASE;
 	if (extended)
 		flags |= KBD_FLAGS_EXTENDED;
-	return freerdp_input_send_keyboard_event(self->ctx->context.input, flags, (UINT8)scancode)
+	return freerdp_input_send_keyboard_event(self->ctx->common.context.input, flags, (UINT8)scancode)
 	           ? CABIN_OK
 	           : CABIN_ERR_GENERIC;
 }
@@ -620,7 +632,7 @@ int cabin_rdp_send_unicode(cabin_rdp* self, uint16_t code, int down)
 	if (!self || !self->ctx)
 		return CABIN_ERR_GENERIC;
 	UINT16 flags = down ? KBD_FLAGS_DOWN : KBD_FLAGS_RELEASE;
-	return freerdp_input_send_unicode_keyboard_event(self->ctx->context.input, flags, code)
+	return freerdp_input_send_unicode_keyboard_event(self->ctx->common.context.input, flags, code)
 	           ? CABIN_OK
 	           : CABIN_ERR_GENERIC;
 }
@@ -629,7 +641,7 @@ int cabin_rdp_send_pointer(cabin_rdp* self, uint32_t x, uint32_t y, uint32_t fla
 {
 	if (!self || !self->ctx)
 		return CABIN_ERR_GENERIC;
-	return freerdp_input_send_mouse_event(self->ctx->context.input, (UINT16)flags, (UINT16)x,
+	return freerdp_input_send_mouse_event(self->ctx->common.context.input, (UINT16)flags, (UINT16)x,
 	                                      (UINT16)y)
 	           ? CABIN_OK
 	           : CABIN_ERR_GENERIC;
@@ -639,7 +651,7 @@ void cabin_rdp_disconnect(cabin_rdp* self)
 {
 	if (!self || !self->ctx)
 		return;
-	freerdp_disconnect(self->ctx->context.instance);
+	freerdp_disconnect(self->ctx->common.context.instance);
 	self->needs_disconnect = 0;
 	self->connected = 0;
 }
