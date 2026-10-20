@@ -48,6 +48,40 @@ pub struct Sidebar {
     /// as soon as it appears.
     pending_settings: Cell<bool>,
     on_settings: SelectionCallback,
+    /// Orders the lists that refreshes return. See `Refreshes`.
+    refreshes: Refreshes,
+}
+
+/// Numbers each refresh, so that only the newest list is applied.
+///
+/// Each Podman event starts a refresh, and the lists come back in the
+/// order they complete, not the order they were asked for. A start sends
+/// "init" and then "start". If the list from "init" arrives last, the
+/// viewer sees a stopped desktop, closes the session it has just opened,
+/// and no later event puts it right.
+#[derive(Default)]
+struct Refreshes {
+    issued: Cell<u64>,
+    applied: Cell<u64>,
+}
+
+impl Refreshes {
+    /// Gives the number for a new refresh.
+    fn issue(&self) -> u64 {
+        let number = self.issued.get() + 1;
+        self.issued.set(number);
+        number
+    }
+
+    /// Whether the list from refresh `number` is newer than every list
+    /// applied so far. If so, it is recorded as applied.
+    fn accept(&self, number: u64) -> bool {
+        if number <= self.applied.get() {
+            return false;
+        }
+        self.applied.set(number);
+        true
+    }
 }
 
 impl Sidebar {
@@ -96,6 +130,7 @@ impl Sidebar {
             pending_choice: Cell::new(false),
             pending_settings: Cell::new(false),
             on_settings: Rc::new(RefCell::new(None)),
+            refreshes: Refreshes::default(),
         });
 
         let for_new = sidebar.clone();
@@ -217,10 +252,17 @@ impl Sidebar {
     pub fn refresh(self: &Rc<Self>) {
         let podman = self.podman.clone();
         let sidebar = self.clone();
+        let number = self.refreshes.issue();
         runtime::spawn(
             async move { podman.list_desktops().await },
             move |result| match result {
-                Ok(desktops) => sidebar.populate(desktops),
+                Ok(desktops) => {
+                    if sidebar.refreshes.accept(number) {
+                        sidebar.populate(desktops);
+                    } else {
+                        tracing::debug!("dropping an older list of desktops");
+                    }
+                }
                 Err(e) => tracing::error!("could not list desktops: {e}"),
             },
         );
@@ -737,6 +779,24 @@ mod tests {
             config: DesktopConfig::new("test"),
             rdp_port: port,
         }
+    }
+
+    #[test]
+    fn a_list_that_arrives_after_a_newer_one_is_dropped() {
+        let refreshes = Refreshes::default();
+        let init = refreshes.issue();
+        let start = refreshes.issue();
+        assert!(refreshes.accept(start));
+        assert!(!refreshes.accept(init));
+    }
+
+    #[test]
+    fn lists_that_arrive_in_order_are_all_applied() {
+        let refreshes = Refreshes::default();
+        let first = refreshes.issue();
+        let second = refreshes.issue();
+        assert!(refreshes.accept(first));
+        assert!(refreshes.accept(second));
     }
 
     #[test]
