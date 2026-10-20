@@ -980,7 +980,9 @@ mod tests {
 
     #[test]
     fn a_desktop_named_like_a_leftover_stays_visible() {
-        // check_name accepts this name, so a user can make it beside "work".
+        // check_name refuses this ending, but a container made outside
+        // Cabin, or by an older release, can still carry it. It must stay
+        // visible as its own desktop.
         let real = names(&["work", "work-cabin-old"]);
         assert_eq!(
             listed_name(Some("work-cabin-old"), "work-cabin-old", &real),
