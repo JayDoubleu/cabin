@@ -4,9 +4,29 @@
 //! checks that: the packing is unit tested and the build is tested against the
 //! shipped tree, but the join between them is not.
 //!
-//!     cargo test -p cabin-podman --test live_overlay -- --ignored --nocapture
+//!     just podman-live
+//!
+//! The recipe runs each live Podman test file in turn, because they share
+//! the host Podman and the guest image.
 
 use cabin_podman::{images::build_context, Podman};
+
+/// Runs the host's Podman. Inside a toolbox a bare `podman` is the
+/// container's own, with its own storage, and it cannot join the host user
+/// namespace. Cabin's containers and images live on the host, so the
+/// command has to go there.
+fn host_podman(args: &[&str]) -> std::process::Output {
+    if std::path::Path::new("/run/.toolboxenv").exists() {
+        let mut full = vec!["--host", "podman"];
+        full.extend_from_slice(args);
+        std::process::Command::new("flatpak-spawn")
+            .args(&full)
+            .output()
+    } else {
+        std::process::Command::new("podman").args(args).output()
+    }
+    .expect("could not run podman")
+}
 
 const TAG: &str = "localhost/cabin-overlay-test:latest";
 
@@ -50,19 +70,14 @@ async fn a_customised_recipe_is_what_gets_built() {
 
     // The subdirectory has to arrive too. A context that packed only the
     // top level would build a guest with no scripts and fail much later.
-    let out = std::process::Command::new("flatpak-spawn")
-        .args([
-            "--host",
-            "podman",
-            "run",
-            "--rm",
-            TAG,
-            "sh",
-            "-c",
-            "cat /etc/cabin-overlay && ls /usr/libexec/cabin/",
-        ])
-        .output()
-        .expect("run the built image");
+    let out = host_podman(&[
+        "run",
+        "--rm",
+        TAG,
+        "sh",
+        "-c",
+        "cat /etc/cabin-overlay && ls /usr/libexec/cabin/",
+    ]);
     let text = String::from_utf8_lossy(&out.stdout);
     println!("image contains: {}", text.trim());
     assert!(

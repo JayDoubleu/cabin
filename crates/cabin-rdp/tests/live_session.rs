@@ -14,6 +14,23 @@ use cabin_rdp::{
 };
 use std::time::{Duration, Instant};
 
+/// Runs the host's Podman. Inside a toolbox a bare `podman` is the
+/// container's own, with its own storage, and it cannot join the host user
+/// namespace. Cabin's containers and images live on the host, so the
+/// command has to go there.
+fn host_podman(args: &[&str]) -> std::process::Output {
+    if std::path::Path::new("/run/.toolboxenv").exists() {
+        let mut full = vec!["--host", "podman"];
+        full.extend_from_slice(args);
+        std::process::Command::new("flatpak-spawn")
+            .args(&full)
+            .output()
+    } else {
+        std::process::Command::new("podman").args(args).output()
+    }
+    .expect("could not run podman")
+}
+
 /// How long gnome-remote-desktop needs to recycle a headless session.
 ///
 /// The guest serves one session at a time. A connection that arrives while the
@@ -239,16 +256,14 @@ fn a_resize_sent_before_the_channel_is_ready_still_arrives() {
 fn a_desktop_that_has_just_started_connects_without_help() {
     let _guest = guest_lock();
 
-    let status = std::process::Command::new("flatpak-spawn")
-        .args(["--host", "podman", "restart", "-t", "20", "cabin-test"])
-        .status();
-    match status {
-        Ok(s) if s.success() => {}
-        _ => {
-            eprintln!("could not restart the guest, skipping");
-            return;
-        }
-    }
+    // A failed restart fails the test. Returning early would pass a test
+    // that tested nothing.
+    let restart = host_podman(&["restart", "-t", "20", "cabin-test"]);
+    assert!(
+        restart.status.success(),
+        "could not restart the guest: {}",
+        String::from_utf8_lossy(&restart.stderr)
+    );
 
     // No wait here on purpose. Connecting straight after the restart is the
     // case being tested.
