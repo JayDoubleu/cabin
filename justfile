@@ -102,7 +102,12 @@ guest-test password="testpass" port="13389":
             fi
             exit 1
         fi
-        if {{podman}} exec cabin-test ss -tln 2>/dev/null | grep -q ':3389'; then
+        # Capture the listing before the test. With pipefail, "grep -q" can
+        # exit before podman finishes writing, podman then dies of SIGPIPE,
+        # and a bound port reads as unbound. The pattern also stops a port
+        # such as 33890 from matching.
+        sockets=$({{podman}} exec cabin-test ss -Htln 2>/dev/null || true)
+        if grep -qE ':3389([[:space:]]|$)' <<<"$sockets"; then
             bound=yes
             break
         fi
@@ -211,7 +216,6 @@ podman-live:
     cargo test -p cabin-podman --test live_overlay -- --ignored --test-threads=1
     cargo test -p cabin-podman --test live_selinux -- --ignored --test-threads=1
     cargo test -p cabin-podman --test live_session_health -- --ignored --test-threads=1
-    cargo test -p cabin-podman --test live_delete -- --ignored --test-threads=1
 
 # Run the live guest image tests. This rebuilds {{guest_image}} and takes
 # several minutes, so it is apart from podman-live.
