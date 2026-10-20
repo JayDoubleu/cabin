@@ -35,6 +35,14 @@ set_checked() {
     esac
 }
 
+# Prints grdctl output without the TPM warning. grep exits 1 when it prints
+# nothing, which is not a failure here.
+print_filtered() {
+    if [ -n "$1" ]; then
+        printf '%s\n' "$1" | grep -v 'Init TPM credentials failed' || true
+    fi
+}
+
 set_checked tls-cert "'${CABIN_TLS_CERT}'"
 set_checked tls-key  "'${CABIN_TLS_KEY}'"
 set_checked port     "uint16 ${CABIN_RDP_PORT}"
@@ -44,22 +52,27 @@ set_checked view-only false
 
 # The daemon reads credentials from a secret store. In a container there is no
 # TPM, so it falls back to a keyfile, which works. Filter that one warning.
-grdctl --headless rdp set-credentials "${CABIN_USER}" "${CABIN_PASSWORD}" 2>&1 \
-    | grep -v 'Init TPM credentials failed' || true
-if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+#
+# The status is captured before any "|| true". A pipeline followed by
+# "|| true" leaves PIPESTATUS holding the status of "true", so an earlier
+# version could never see grdctl fail.
+if ! out="$(grdctl --headless rdp set-credentials "${CABIN_USER}" "${CABIN_PASSWORD}" 2>&1)"; then
+    print_filtered "${out}" >&2
     echo "grdctl set-credentials failed" >&2
     exit 1
 fi
+print_filtered "${out}"
 
 # This must come last, and it must be grdctl rather than a gsettings write.
 # "grdctl --headless rdp enable" is the operative call: it tells the daemon to
 # start serving. Setting the "enable" key alone does nothing, and the daemon
 # serves happily while that key still reads false. Replacing this call with a
 # gsettings write stopped the server binding at all.
-grdctl --headless rdp enable 2>&1 | grep -v 'Init TPM credentials failed' || true
-if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+if ! out="$(grdctl --headless rdp enable 2>&1)"; then
+    print_filtered "${out}" >&2
     echo "grdctl rdp enable failed" >&2
     exit 1
 fi
+print_filtered "${out}"
 
 echo "RDP configured: port ${CABIN_RDP_PORT}, view-only $(gsettings get ${SCHEMA} view-only)"
