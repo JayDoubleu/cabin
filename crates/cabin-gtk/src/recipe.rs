@@ -199,10 +199,9 @@ fn present_path_boxed(parent: &gtk::Widget, dir: PathBuf, on_changed: Rc<dyn Fn(
                 "discard" => {
                     dialog_ref.force_close();
                 }
-                "save" => {
-                    if write_ref(dialog_ref.upcast_ref()) {
-                        dialog_ref.force_close();
-                    }
+                // If the write fails, the dialogue stays open with the error.
+                "save" if write_ref(dialog_ref.upcast_ref()) => {
+                    dialog_ref.force_close();
                 }
                 _ => {}
             });
