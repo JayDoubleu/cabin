@@ -444,13 +444,15 @@ async fn nested_podman_can_run_a_container() {
         println!("stderr: {}", errors.trim());
     }
 
+    // Remove the desktop before the assert. A failed assert would otherwise
+    // leave it running on the host with both of its volumes.
+    podman.stop(&id, 20).await.ok();
+    let _ = podman.delete_desktop(&id, name).await;
+
     assert!(
         text.contains("nested-ok"),
         "podman inside the desktop did not run a container.\nstdout: {text}\nstderr: {errors}"
     );
-
-    podman.stop(&id, 20).await.ok();
-    let _ = podman.delete_desktop(&id, name).await;
 }
 
 /// Exposing the host Podman socket must let the desktop drive the host's

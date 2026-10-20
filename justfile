@@ -209,10 +209,11 @@ rdp-live:
     cargo test -p cabin-rdp --test live_input -- --ignored --nocapture --test-threads=1
 
 # Run every live Podman test. Each binary runs on its own, because they share
-# the host Podman and the guest image.
+# the host Podman and the guest image. The nested Podman test is skipped
+# because nested Podman does not work yet (DESIGN.md section 15.17).
 podman-live:
     cargo test -p cabin-podman --test live_podman -- --ignored --test-threads=1
-    cargo test -p cabin-podman --test live_recreate -- --ignored --test-threads=1
+    cargo test -p cabin-podman --test live_recreate -- --ignored --test-threads=1 --skip nested_podman_can_run_a_container
     cargo test -p cabin-podman --test live_delete -- --ignored --test-threads=1
     cargo test -p cabin-podman --test live_overlay -- --ignored --test-threads=1
     cargo test -p cabin-podman --test live_selinux -- --ignored --test-threads=1

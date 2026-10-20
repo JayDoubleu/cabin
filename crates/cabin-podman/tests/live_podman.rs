@@ -16,21 +16,48 @@ use cabin_core::{DesktopConfig, GraphicsMode, Mount, MountMode, State};
 use cabin_podman::Podman;
 use std::process::Command;
 
-/// Runs a command on the host and returns what it printed.
+/// Runs the host Podman, as rule 17 in CLAUDE.md asks.
 ///
 /// Inside a Fedora toolbox the bare `podman` binary is the container's own,
 /// with its own storage, and it cannot join the host user namespace. The
 /// desktops live on the host, so the command has to go there.
-fn on_host(args: &[&str]) -> String {
+fn host_podman(args: &[&str]) -> std::process::Output {
+    if std::path::Path::new("/run/.toolboxenv").exists() {
+        let mut full = vec!["--host", "podman"];
+        full.extend_from_slice(args);
+        Command::new("flatpak-spawn").args(&full).output()
+    } else {
+        Command::new("podman").args(args).output()
+    }
+    .expect("could not run podman")
+}
+
+/// Runs `podman exec` in a desktop and returns what it printed. A failed
+/// command fails the test here, so that it does not compare an empty string.
+fn exec_in(name: &str, command: &[&str]) -> String {
+    let mut args = vec!["exec", name];
+    args.extend_from_slice(command);
+    let output = host_podman(&args);
+    assert!(
+        output.status.success(),
+        "podman exec {command:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// Reads the UTC offset on the host, where the desktop runs. Inside a
+/// toolbox this goes through `flatpak-spawn`, as `host_podman` does.
+fn host_utc_offset() -> String {
     let output = if std::path::Path::new("/run/.toolboxenv").exists() {
         Command::new("flatpak-spawn")
-            .arg("--host")
-            .args(args)
+            .args(["--host", "date", "+%z"])
             .output()
     } else {
-        Command::new(args[0]).args(&args[1..]).output()
+        Command::new("date").arg("+%z").output()
     }
-    .expect("could not run the command on the host");
+    .expect("could not run date on the host");
+    assert!(output.status.success(), "date failed on the host");
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
@@ -105,21 +132,15 @@ async fn create_list_start_stop_remove() {
     );
 
     // A guest in UTC shows a different hour from the host on its clock.
-    let guest_zone = on_host(&["podman", "exec", TEST_NAME, "date", "+%z"]);
-    let host_zone = on_host(&["date", "+%z"]);
+    let guest_zone = exec_in(TEST_NAME, &["date", "+%z"]);
+    let host_zone = host_utc_offset();
     assert_eq!(
         guest_zone, host_zone,
         "the guest must use the time zone of the host"
     );
 
     // The prompt in the guest's terminal shows the host name.
-    let hostname = on_host(&[
-        "podman",
-        "exec",
-        TEST_NAME,
-        "cat",
-        "/proc/sys/kernel/hostname",
-    ]);
+    let hostname = exec_in(TEST_NAME, &["cat", "/proc/sys/kernel/hostname"]);
     assert_eq!(hostname, TEST_NAME, "the guest is named after the desktop");
 
     podman.stop(&id, 20).await.expect("stop should succeed");
