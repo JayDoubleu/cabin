@@ -27,7 +27,8 @@ const FALLBACK_RDP_PORT: u16 = 13389;
 /// password, because Cabin keeps no state of its own. So it is kept under
 /// this name until the new container exists, and it comes back if the new
 /// one cannot be made.
-const OLD_SUFFIX: &str = "-cabin-old";
+/// `check_name` refuses names with this ending, so no new desktop can take it.
+const OLD_SUFFIX: &str = cabin_core::OLD_CONTAINER_SUFFIX;
 
 /// The name the old container carries during a recreate.
 fn old_name(name: &str) -> String {
@@ -79,39 +80,19 @@ impl Podman {
 
         Ok(summaries
             .into_iter()
-            .filter(|c| {
-                // During a recreate the old container waits under a second
-                // name while the new one is made. It carries the same labels,
-                // so without this the desktop shows twice. If the recreate
-                // was cut short and nothing holds the real name, the old
-                // container is the desktop, and it must stay visible.
-                let name = c.names.first().map(|n| n.trim_start_matches('/'));
-                match name.and_then(|n| n.strip_suffix(OLD_SUFFIX)) {
-                    Some(real) => !names.iter().any(|n| n == real),
-                    None => true,
-                }
-            })
             .filter_map(|c| {
                 // A container whose labels will not parse is skipped rather
                 // than failing the whole list. It may come from a newer Cabin.
                 let config = labels::from_labels(&c.labels)
                     .map_err(|e| tracing::warn!("skipping container {}: {e}", c.id))
                     .ok()?;
+                let container_name = c.names.first().map(|n| n.trim_start_matches('/'));
+                let name = listed_name(container_name, &config.name, &names)?;
                 let rdp_port = c
                     .ports
                     .iter()
                     .find(|p| p.container_port == GUEST_RDP_PORT)
                     .map(|p| p.host_port);
-                // An old container left by a cut-short recreate is shown
-                // under the desktop's own name. The volumes and the pinned
-                // certificate are keyed by that name, not by the container's.
-                let name = c
-                    .names
-                    .first()
-                    .map(|n| n.trim_start_matches('/'))
-                    .filter(|n| !n.ends_with(OLD_SUFFIX))
-                    .map(str::to_string)
-                    .unwrap_or_else(|| config.name.clone());
                 Some(Desktop {
                     name,
                     id: c.id,
@@ -328,19 +309,23 @@ impl Podman {
         let password = self.desktop_password(&desktop.id).await?;
         let port = desktop.rdp_port.unwrap_or(FALLBACK_RDP_PORT);
         let was_running = desktop.state.is_running();
+
+        // This can refuse, and it does not need the desktop stopped, so it
+        // runs first. A refusal then leaves the desktop as it was.
+        let temporary = old_name(&name);
+        self.clear_leftover(&temporary, &desktop.id, &name).await?;
+
         if was_running {
             self.stop(&desktop.id, STOP_TIMEOUT_SECS).await?;
         }
-
-        let temporary = old_name(&name);
-        self.clear_leftover(&temporary, &desktop.id, &name).await?;
-        let current = self
-            .inspect(&desktop.id)
-            .await?
-            .map(|i| i.name.trim_start_matches('/').to_string())
-            .unwrap_or_default();
-        if current != temporary {
-            self.rename(&desktop.id, &temporary).await?;
+        if let Err(e) = self.park(&desktop.id, &temporary).await {
+            // Nothing has changed yet, so the desktop goes back to how it was.
+            if was_running {
+                if let Err(start) = self.start_desktop(&desktop.id, &name).await {
+                    tracing::warn!("{name} did not start again: {start}");
+                }
+            }
+            return Err(e);
         }
 
         let new_id = match self
@@ -365,18 +350,44 @@ impl Podman {
         };
 
         // The named volumes stay, which is what the recreate depends on.
-        if let Err(e) = self.remove(&desktop.id, true).await {
+        let removed = self.remove(&desktop.id, true).await;
+
+        // The new desktop starts even when the old container stays behind.
+        // That failure is only clutter, and a start that a rebind asked for
+        // must still happen.
+        let started = if start_after {
+            self.start_desktop(&new_id, &name).await
+        } else {
+            Ok(())
+        };
+
+        if let Err(e) = removed {
+            let mut message = e.to_string();
+            if let Err(start) = started {
+                message.push_str(&format!("\n\nThe desktop did not start: {start}"));
+            }
             return Err(Error::OldContainerLeft {
                 name,
                 old_name: temporary,
-                message: e.to_string(),
+                message,
             });
         }
-
-        if start_after {
-            self.start_desktop(&new_id, &name).await?;
-        }
+        started?;
         Ok(new_id)
+    }
+
+    /// Moves the old container to the recreate's temporary name, unless an
+    /// earlier recreate that was cut short left it there.
+    async fn park(&self, id: &str, temporary: &str) -> Result<()> {
+        let current = self
+            .inspect(id)
+            .await?
+            .map(|i| i.name.trim_start_matches('/').to_string())
+            .unwrap_or_default();
+        if current != temporary {
+            self.rename(id, temporary).await?;
+        }
+        Ok(())
     }
 
     /// Removes a container left under a recreate's temporary name.
@@ -731,20 +742,53 @@ fn diagnose_early_exit(state: &InspectState) -> String {
     format!("The desktop exited with status {}.", state.exit_code)
 }
 
+/// The name to list a Cabin container under, or `None` to hide it.
+///
+/// During a recreate the old container waits under `<name>-cabin-old` while
+/// the new one is made. It carries the same labels, so without this the
+/// desktop shows twice. If the recreate was cut short and nothing holds the
+/// real name, the old container is the desktop, and it must stay visible
+/// under the desktop's own name. The volumes and the pinned certificate are
+/// keyed by that name, not by the container's.
+///
+/// A leftover is known by its labels: its configured name is the container
+/// name without the suffix. A desktop that the user called `x-cabin-old` has
+/// that whole string as its configured name, so it is a desktop in its own
+/// right and stays visible.
+fn listed_name(
+    container_name: Option<&str>,
+    config_name: &str,
+    real_names: &[String],
+) -> Option<String> {
+    let Some(container_name) = container_name else {
+        return Some(config_name.to_string());
+    };
+    match container_name.strip_suffix(OLD_SUFFIX) {
+        Some(real) if real == config_name => {
+            if real_names.iter().any(|n| n == real) {
+                None
+            } else {
+                Some(config_name.to_string())
+            }
+        }
+        _ => Some(container_name.to_string()),
+    }
+}
+
 /// True when an error says that a published address could not be bound.
 ///
 /// Podman binds the exact addresses it was given at create time. When an
 /// address of a chosen network has gone, the start fails with one of these,
 /// which names neither the network nor the setting that chose it.
+///
+/// Only EADDRNOTAVAIL means that. pasta and rootlessport both report it as
+/// "cannot assign requested address". A port that another program holds
+/// also fails "to bind", but with "address already in use", and applying
+/// the settings again cannot help with that. So match the errno text only.
 fn is_bind_failure(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    [
-        "cannot assign requested address",
-        "failed to bind",
-        "couldn't listen",
-    ]
-    .iter()
-    .any(|pattern| message.contains(pattern))
+    message
+        .to_ascii_lowercase()
+        .contains("cannot assign requested address")
 }
 
 /// Turns a bind failure into an error that names the setting to change.
@@ -859,6 +903,21 @@ mod tests {
     }
 
     #[test]
+    fn a_port_in_use_is_not_a_lost_address() {
+        let refused = Error::Api {
+            status: 500,
+            message: "pasta failed: Failed to bind port 13389 (Address already in use)".into(),
+        };
+        assert!(matches!(
+            explain_bind_failure("fedora", refused),
+            Error::Api { .. }
+        ));
+        assert!(!is_bind_failure(
+            "rootlessport listen tcp 0.0.0.0:13389: bind: address already in use"
+        ));
+    }
+
+    #[test]
     fn other_start_errors_pass_through() {
         let refused = Error::Api {
             status: 500,
@@ -876,6 +935,39 @@ mod tests {
         // recreate runs, so the two must agree.
         assert!(old_name("fedora").ends_with(OLD_SUFFIX));
         assert_eq!(old_name("fedora").strip_suffix(OLD_SUFFIX), Some("fedora"));
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn a_leftover_is_hidden_while_the_desktop_exists() {
+        let real = names(&["work", "work-cabin-old"]);
+        assert_eq!(listed_name(Some("work-cabin-old"), "work", &real), None);
+        assert_eq!(
+            listed_name(Some("work"), "work", &real),
+            Some("work".to_string())
+        );
+    }
+
+    #[test]
+    fn a_leftover_is_the_desktop_when_nothing_holds_its_name() {
+        let real = names(&["work-cabin-old"]);
+        assert_eq!(
+            listed_name(Some("work-cabin-old"), "work", &real),
+            Some("work".to_string())
+        );
+    }
+
+    #[test]
+    fn a_desktop_named_like_a_leftover_stays_visible() {
+        // check_name accepts this name, so a user can make it beside "work".
+        let real = names(&["work", "work-cabin-old"]);
+        assert_eq!(
+            listed_name(Some("work-cabin-old"), "work-cabin-old", &real),
+            Some("work-cabin-old".to_string())
+        );
     }
 
     #[test]

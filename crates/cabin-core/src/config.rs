@@ -311,6 +311,9 @@ fn default_height() -> u32 {
     1080
 }
 
+/// The ending a recreate gives the old container while it makes the new one.
+pub const OLD_CONTAINER_SUFFIX: &str = "-cabin-old";
+
 /// Whether a desktop name can be used.
 ///
 /// The name is not only a label. Podman uses it as the container name and
@@ -340,6 +343,14 @@ pub fn check_name(name: &str, taken: &[String]) -> Result<(), String> {
             return Err("The name cannot contain spaces.".to_string());
         }
         return Err(format!("The name cannot contain '{bad}'."));
+    }
+    // A recreate parks the old container under this ending. A desktop with
+    // such a name looks like another desktop's leftover to a recreate.
+    if name.ends_with(OLD_CONTAINER_SUFFIX) {
+        return Err(format!(
+            "The name cannot end in {OLD_CONTAINER_SUFFIX}, because Cabin uses \
+             that ending while it changes the settings of a desktop."
+        ));
     }
     if taken.iter().any(|t| t.eq_ignore_ascii_case(name)) {
         return Err(format!("A desktop called {name} already exists."));
@@ -539,6 +550,12 @@ mod tests {
         assert!(check_name("-leading-dash", &[]).is_err());
         assert!(check_name("has space", &[]).is_err());
         assert!(check_name("slash/name", &[]).is_err());
+    }
+
+    #[test]
+    fn rejects_the_ending_a_recreate_uses() {
+        assert!(check_name("work-cabin-old", &[]).is_err());
+        assert!(check_name("work-cabin-older", &[]).is_ok());
     }
 
     #[test]

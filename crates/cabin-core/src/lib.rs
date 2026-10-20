@@ -10,7 +10,7 @@ pub mod mount;
 
 pub use config::{
     check_name, DesktopConfig, Exposure, GraphicsMode, NetInterface, SocketPolicy,
-    GUEST_SELINUX_TYPE,
+    GUEST_SELINUX_TYPE, OLD_CONTAINER_SUFFIX,
 };
 pub use mount::{Mount, MountKind, MountMode};
 
