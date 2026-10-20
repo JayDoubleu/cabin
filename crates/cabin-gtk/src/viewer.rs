@@ -387,8 +387,21 @@ impl Viewer {
         let Some(current) = desktops.iter().find(|d| d.id == shown.id) else {
             // The desktop was deleted, or recreated under a new id.
             if let Some(replacement) = desktops.iter().find(|d| d.name == shown.name) {
+                // Record the replacement before opening, for the same reason
+                // as the running edge below. A recreate sends create, init
+                // and start events, and each list would otherwise find the
+                // old id missing and open the replacement again.
+                if !replacement.state.is_running() {
+                    // The running edge below opens it once it starts.
+                    self.show_stopped(replacement);
+                    return;
+                }
                 let replacement = replacement.clone();
                 self.detach();
+                *self.shown.borrow_mut() = Some(Shown {
+                    desktop: replacement.clone(),
+                    live: false,
+                });
                 self.open(replacement);
                 return;
             }
