@@ -10,7 +10,7 @@
   <description>
     <p>
       Cabin runs full Fedora GNOME desktops inside containers and shows them in
-      a resizable window. Each desktop starts in about a second and behaves
+      a resizable window. Each desktop starts in a few seconds and behaves
       like a small virtual machine, without emulating hardware.
     </p>
     <p>Features:</p>
