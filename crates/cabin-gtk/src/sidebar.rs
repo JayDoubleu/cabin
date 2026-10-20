@@ -564,12 +564,19 @@ impl Sidebar {
         box_.append(&delete);
 
         popover.set_child(Some(&box_));
-        gtk::MenuButton::builder()
+        // Without a label a screen reader names the button after every item
+        // in the menu, read out as one long label. The tooltip alone does not
+        // hold while the menu is open.
+        let label = format!("Menu for {}", desktop.name);
+        let button = gtk::MenuButton::builder()
             .icon_name("view-more-symbolic")
+            .tooltip_text(&label)
             .valign(gtk::Align::Center)
             .css_classes(vec!["flat", "circular"])
             .popover(&popover)
-            .build()
+            .build();
+        button.update_property(&[gtk::accessible::Property::Label(&label)]);
+        button
     }
 
     /// Deleting destroys the desktop's files, so it asks first and says so.

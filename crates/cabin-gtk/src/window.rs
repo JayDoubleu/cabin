@@ -226,11 +226,15 @@ fn build_main_menu(
     box_.append(&about);
 
     popover.set_child(Some(&box_));
-    gtk::MenuButton::builder()
+    let button = gtk::MenuButton::builder()
         .icon_name("open-menu-symbolic")
         .tooltip_text("Main menu")
         .popover(&popover)
-        .build()
+        .build();
+    // While the menu is open, a screen reader otherwise names the button
+    // after every item in it.
+    button.update_property(&[gtk::accessible::Property::Label("Main menu")]);
+    button
 }
 
 /// Shows the version, the licence and where to report a problem.

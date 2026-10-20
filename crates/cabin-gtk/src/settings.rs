@@ -907,7 +907,13 @@ fn build_mount_row(
 }
 
 fn build_graphics_group(config: Rc<RefCell<DesktopConfig>>) -> adw::PreferencesGroup {
-    let group = adw::PreferencesGroup::builder().title("Graphics").build();
+    // The explanation is the group's, not the row's. A row subtitle leaves
+    // the selected entry a few characters, and "Software rendering" showed
+    // as "Software rend..." (rule 32).
+    let group = adw::PreferencesGroup::builder()
+        .title("Graphics")
+        .description("A graphics card makes the desktop smoother. Software rendering always works.")
+        .build();
 
     // The driver comes from sysfs, through render_nodes, never from the
     // node number (rule 2).
@@ -924,7 +930,7 @@ fn build_graphics_group(config: Rc<RefCell<DesktopConfig>>) -> adw::PreferencesG
 
     let row = adw::ComboRow::builder()
         .title("Renderer")
-        .subtitle("A graphics card makes the desktop smoother. Software rendering always works.")
+        .use_subtitle(true)
         .model(&gtk::StringList::new(&refs))
         .selected(selected)
         .build();

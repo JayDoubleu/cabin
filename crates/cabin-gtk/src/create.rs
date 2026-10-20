@@ -99,10 +99,15 @@ pub fn present(
         modes.push(GraphicsMode::RenderNode { path: path.clone() });
     }
     let option_refs: Vec<&str> = options.iter().map(String::as_str).collect();
+    // On its own line, because the entries are longer than a word and the
+    // title's line leaves them a few characters (rule 32).
     let graphics_row = adw::ComboRow::builder()
         .title("Graphics")
+        .use_subtitle(true)
         .model(&gtk::StringList::new(&option_refs))
         .build();
+    // The entries carry device paths and driver names, which are data.
+    graphics_row.set_use_markup(false);
 
     // Shared folders and the rest are not asked for here, so offer the way to
     // them rather than leaving the user to find the settings afterwards.
