@@ -18,17 +18,30 @@ fn store_dir() -> PathBuf {
 }
 
 /// A file name that cannot escape the store, whatever the desktop is called.
+///
+/// The map must give each name its own file. Desktop names may hold '.', so
+/// mapping it to '_' gave "my.desk" and "my_desk" one shared pin, and each
+/// desktop then refused the other's certificate. Every byte outside the plain
+/// set is written as '%' and two hex digits, and '%' itself is outside the
+/// set, so no two names give the same key.
+///
+/// A leading '.' is also encoded. Cabin's own name check already rejects one,
+/// but a container made outside Cabin carries whatever name its labels give,
+/// and "." or ".." must never become a file name.
 fn key_for(desktop_name: &str) -> String {
-    desktop_name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    let mut key = String::with_capacity(desktop_name.len());
+    for (index, byte) in desktop_name.bytes().enumerate() {
+        let plain = byte.is_ascii_alphanumeric()
+            || byte == b'-'
+            || byte == b'_'
+            || (byte == b'.' && index > 0);
+        if plain {
+            key.push(char::from(byte));
+        } else {
+            key.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    key
 }
 
 /// The fingerprint recorded for a desktop, if this is not the first time.
@@ -71,16 +84,41 @@ mod tests {
     #[test]
     fn a_name_cannot_escape_the_store() {
         // A desktop is named by the user, so the name must never become a path.
-        assert_eq!(key_for("../../etc/passwd"), "______etc_passwd");
-        assert_eq!(key_for("a/b"), "a_b");
-        assert!(!key_for("../x").contains('/'));
-        assert!(!key_for("..").contains('.'));
+        for name in ["../../etc/passwd", "a/b", "../x", "..", ".", ".hidden"] {
+            let key = key_for(name);
+            assert!(!key.contains('/'), "{name} gave {key}");
+            assert!(!key.starts_with('.'), "{name} gave {key}");
+        }
+        assert_eq!(key_for("a/b"), "a%2Fb");
     }
 
     #[test]
     fn ordinary_names_are_left_alone() {
+        // The earlier map kept letters, digits, '-' and '_', and wrote every
+        // other character as '_'. A name made only of the kept characters has
+        // the same key as before, so its recorded pin is still found.
         assert_eq!(key_for("fedora-dev"), "fedora-dev");
         assert_eq!(key_for("my_desktop2"), "my_desktop2");
+    }
+
+    #[test]
+    fn a_name_with_a_dot_has_a_new_key() {
+        // The earlier map gave "work.dev" the key "work_dev". The new key
+        // differs, so a desktop with a '.' in its name records its pin again
+        // on the next connection. The old file is not removed, because
+        // "work_dev" is also the key of a desktop called "work_dev", and
+        // removing it could delete that desktop's pin.
+        assert_eq!(key_for("work.dev"), "work.dev");
+        assert_ne!(key_for("work.dev"), "work_dev");
+    }
+
+    #[test]
+    fn different_names_never_share_a_pin() {
+        // Each desktop has its own certificate, so a shared pin makes one of
+        // them refuse the other's certificate as an attack.
+        assert_ne!(key_for("my.desk"), key_for("my_desk"));
+        assert_ne!(key_for("a%2Fb"), key_for("a/b"));
+        assert_ne!(key_for("a b"), key_for("a_b"));
     }
 
     #[test]

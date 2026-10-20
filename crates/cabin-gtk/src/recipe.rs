@@ -105,9 +105,12 @@ fn present_path_boxed(parent: &gtk::Widget, dir: PathBuf, on_changed: Rc<dyn Fn(
         .icon_name("edit-copy-symbolic")
         .tooltip_text("Copy the whole recipe")
         .build();
-    let text_for_copy = text.clone();
+    // The buffer, not the text read at open time, so unsaved edits are copied
+    // as the user sees them.
+    let copy_buffer = view.buffer();
     copy.connect_clicked(move |button| {
-        button.display().clipboard().set_text(&text_for_copy);
+        let current = copy_buffer.text(&copy_buffer.start_iter(), &copy_buffer.end_iter(), false);
+        button.display().clipboard().set_text(&current);
     });
     header.pack_end(&copy);
 
@@ -139,25 +142,79 @@ fn present_path_boxed(parent: &gtk::Widget, dir: PathBuf, on_changed: Rc<dyn Fn(
         header.pack_start(&save);
 
         let buffer = view.buffer();
+
+        // One write for the Save button and for the question asked on close,
+        // so the two cannot drift apart. True when the recipe was saved.
+        let write: Rc<dyn Fn(&gtk::Widget) -> bool> = {
+            let buffer = buffer.clone();
+            let on_changed = on_changed.clone();
+            Rc::new(move |anchor| {
+                let text = buffer
+                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                    .to_string();
+                match std::fs::write(&path, text) {
+                    Ok(()) => {
+                        on_changed();
+                        true
+                    }
+                    Err(e) => {
+                        let error = adw::AlertDialog::builder()
+                            .heading("Could not save the recipe")
+                            .body(e.to_string())
+                            .build();
+                        error.add_response("close", "Close");
+                        error.present(Some(anchor));
+                        false
+                    }
+                }
+            })
+        };
+
+        // Escape and the close button would otherwise drop every edit
+        // without a word. Comparing with the text as opened, rather than
+        // noting any change, lets an undo back to it close freely again.
         let dialog_ref = dialog.clone();
-        let on_changed_ref = on_changed.clone();
+        buffer.connect_changed(move |buffer| {
+            let current = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+            dialog_ref.set_can_close(current.as_str() == text.as_str());
+        });
+
+        let write_ref = write.clone();
+        dialog.connect_close_attempt(move |dialog| {
+            let question = adw::AlertDialog::builder()
+                .heading("Save changes to the recipe?")
+                .body("Changes that are not saved are lost.")
+                .build();
+            question.add_response("cancel", "Cancel");
+            question.add_response("discard", "Discard");
+            question.add_response("save", "Save");
+            question.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+            question.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+            question.set_default_response(Some("cancel"));
+            question.set_close_response("cancel");
+
+            let dialog_ref = dialog.clone();
+            let write_ref = write_ref.clone();
+            question.connect_response(None, move |_, response| match response {
+                "discard" => {
+                    dialog_ref.force_close();
+                }
+                "save" => {
+                    if write_ref(dialog_ref.upcast_ref()) {
+                        dialog_ref.force_close();
+                    }
+                }
+                _ => {}
+            });
+            question.present(Some(dialog));
+        });
+
+        let dialog_ref = dialog.clone();
         save.connect_clicked(move |button| {
-            let text = buffer
-                .text(&buffer.start_iter(), &buffer.end_iter(), false)
-                .to_string();
-            match std::fs::write(&path, text) {
-                Ok(()) => {
-                    on_changed_ref();
-                    dialog_ref.close();
-                }
-                Err(e) => {
-                    let error = adw::AlertDialog::builder()
-                        .heading("Could not save the recipe")
-                        .body(e.to_string())
-                        .build();
-                    error.add_response("close", "Close");
-                    error.present(Some(button));
-                }
+            // force_close, because close would ask about the changes that
+            // were just saved.
+            if write(button.upcast_ref()) {
+                dialog_ref.force_close();
             }
         });
 

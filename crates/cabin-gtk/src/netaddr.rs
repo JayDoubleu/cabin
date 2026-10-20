@@ -2,32 +2,28 @@
 
 use std::net::{IpAddr, UdpSocket};
 
-/// Returns the local address that would be used to reach the wider network.
+/// Returns the local IPv4 address that would be used to reach the wider
+/// network.
 ///
 /// This connects a UDP socket to a documentation address and reads back the
 /// local end. No packet is ever sent: connecting a UDP socket only fixes the
 /// route, which is exactly the question being asked. Enumerating interfaces
 /// instead would need a C library and would still have to guess which of
 /// several addresses is the useful one.
+///
+/// Only IPv4 is asked about. "Every network" publishes the port on 0.0.0.0,
+/// and pasta binds that as a dual-stack socket, so the desktop also answers
+/// on IPv6. But the dialogue shows one address, and an IPv4 address on the
+/// local network is the one most likely to work from a nearby device.
 pub fn best_local_address() -> Option<IpAddr> {
     // 192.0.2.0/24 is TEST-NET-1, reserved for documentation and never routed.
-    for probe in ["192.0.2.1:9", "[2001:db8::1]:9"] {
-        let bind = if probe.starts_with('[') {
-            "[::]:0"
-        } else {
-            "0.0.0.0:0"
-        };
-        if let Ok(socket) = UdpSocket::bind(bind) {
-            if socket.connect(probe).is_ok() {
-                if let Ok(local) = socket.local_addr() {
-                    if !local.ip().is_loopback() && !local.ip().is_unspecified() {
-                        return Some(local.ip());
-                    }
-                }
-            }
-        }
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:9").ok()?;
+    let local = socket.local_addr().ok()?.ip();
+    if local.is_loopback() || local.is_unspecified() {
+        return None;
     }
-    None
+    Some(local)
 }
 
 /// How the user should describe the address to themselves.
@@ -47,6 +43,7 @@ mod tests {
         // On a machine with no network this returns None, which is correct.
         // What it must never do is offer an address another device cannot use.
         if let Some(ip) = best_local_address() {
+            assert!(ip.is_ipv4(), "every network is published on IPv4 only");
             assert!(!ip.is_loopback(), "loopback is useless to another device");
             assert!(
                 !ip.is_unspecified(),

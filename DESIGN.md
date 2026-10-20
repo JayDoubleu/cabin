@@ -429,8 +429,8 @@ questions, not one, and the settings ask them separately.
 | Setting | Published on |
 |---|---|
 | **Off** (default) | `127.0.0.1` only. |
-| **Chosen networks** | Loopback, plus every address on the named interfaces. |
-| **Every network** | `0.0.0.0`. |
+| **Chosen networks** | Loopback, plus the IPv4 and unique-local IPv6 addresses on the named interfaces. |
+| **Every network** | `0.0.0.0`, which pasta binds on IPv4 and IPv6. |
 
 Turning remote access on lands the user on **chosen networks**, because that is
 the safer of the two. Widening it to every network is a separate, deliberate
@@ -441,6 +441,20 @@ network does. A stored address would leave the desktop unable to start after a
 DHCP lease changed, and the reason would not be obvious. Cabin resolves the
 names to addresses when it creates the container, and an interface that has no
 address at that moment simply contributes nothing.
+
+**Chosen networks never publishes on a global IPv6 address.** A global
+address is reachable from the whole internet unless the router filters it, so
+publishing on it would make chosen networks as wide as every network. Only
+unique-local addresses (`fc00::/7`) are used, and the Tailscale address is one
+of them. Link-local addresses are skipped because Podman does not accept a
+scope identifier. Temporary and deprecated addresses are skipped because they
+rotate, and a rotated address leaves the desktop unable to start. A user who
+wants a desktop on global IPv6 chooses every network.
+
+**Every network also answers on IPv6.** Podman passes `0.0.0.0` to pasta, and
+pasta binds a dual-stack socket. With pasta 2026-10-02 on Fedora 44, a
+desktop published this way accepted connections on `::1` and on a
+unique-local address as well as on IPv4.
 
 **Loopback is always bound.** Choosing an interface never removes the ability
 to connect from the computer the desktop runs on. Offering loopback as a
@@ -1341,9 +1355,16 @@ asks for confirmation because opening a desktop to the network is not something
 to do by accident.
 
 The connection dialogue shows the address, port, username and password, each
-with a copy button, because these get typed into a phone. The address comes
-from connecting a UDP socket to a documentation address, which fixes the route
-without sending a packet, and it never offers a loopback address.
+with a copy button, because these get typed into a phone. For chosen networks
+it lists the addresses that Cabin published on. For every network the address
+comes from connecting a UDP socket to a documentation address, which fixes the
+route without sending a packet. It never offers a loopback address, and an
+IPv6 address is shown in brackets so that a client does not read the port as
+part of the address.
+
+If Cabin's own viewer has connected once, the dialogue also shows the
+recorded SHA-256 fingerprint of the certificate. That fingerprint is the only
+thing another device can check the certificate against.
 
 Two warnings sit alongside, because both would otherwise waste the user's first
 attempt:
@@ -1352,7 +1373,12 @@ attempt:
    `cliprdr` crashes the guest session. Section 15.2 explains why, and that it
    is a fault in `gnome-remote-desktop` rather than in the client.
 2. **The certificate warning is expected.** Each desktop makes its own
-   certificate, so nothing has signed it.
+   certificate, so nothing has signed it. The dialogue tells the user to
+   compare the fingerprint that the client shows with the recorded one, and to
+   accept the certificate only if they are the same. It also tells the user to
+   make the client require NLA, for example `/sec:nla` in FreeRDP. If no
+   fingerprint is recorded yet, the dialogue says so and tells the user to
+   open the desktop in Cabin once first.
 
 ### 15.15 The inotify limit caps how many desktops can run
 
@@ -1459,8 +1485,17 @@ name would present a different certificate and be reported as an attack.
 
 The store is a file per desktop in the application's data directory, keyed by
 name rather than container id, because the id changes whenever a desktop is
-reconfigured. Names come from the user, so they are reduced to safe characters
-before being used as a file name, and a test covers `../` in a desktop name.
+reconfigured. Names come from the user, so the file name must not escape the
+store, and a test covers `../` in a desktop name.
+
+**Each name needs its own file.** An earlier version wrote every unsafe
+character as `_`, so `my.desk` and `my_desk` shared one pin and each refused
+the other's certificate. Now a character outside letters, digits, `-`, `_`
+and a non-leading `.` is written as `%` and two hex digits. A name that holds
+only letters, digits, `-` and `_` keeps its old file name. A name that holds
+`.` gets a new one, so its pin is recorded again on the next connection. The
+old file stays, because it is also the file name of the matching `_` name, and
+deleting it could remove that desktop's pin.
 
 Verified live: a first connection records a fingerprint, and a connection
 expecting a different one is refused.
