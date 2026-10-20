@@ -17,10 +17,14 @@
     <ul>
       <li>Manage several desktops from one sidebar</li>
       <li>The guest resolution follows the window, or use a fixed size</li>
-      <li>Connect from other devices with any standard RDP client</li>
+      <li>Connect from other devices with an RDP client that has clipboard sharing turned off</li>
       <li>Share host directories as read-write or read-only</li>
       <li>Choose hardware or software rendering per desktop</li>
     </ul>
+    <p>
+      Cabin needs rootless Podman 5 on the host, with the podman.socket user
+      service enabled.
+    </p>
     <p>
       A container shares the host kernel. Cabin is a configuration boundary,
       not a sandbox for hostile code. Use a virtual machine for that.
@@ -36,12 +40,31 @@
     <name>Jay W</name>
   </developer>
 
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#99c1f1</color>
+    <color type="primary" scheme_preference="dark">#1a5fb4</color>
+  </branding>
+
   <content_rating type="oars-1.1"/>
 
   <releases>
     <release version="0.1.0" date="2026-08-19">
       <description>
-        <p>First scaffold. The guest image serves a GNOME desktop over RDP.</p>
+        <p>The first public release.</p>
+        <ul>
+          <li>Create, configure, start, stop and delete Fedora GNOME desktops</li>
+          <li>Show each desktop in a window that the guest resolution follows</li>
+          <li>Share host folders, as read-write or read-only</li>
+          <li>Give a desktop a render node for hardware rendering</li>
+          <li>Reach a desktop from other devices over RDP</li>
+          <li>Build and manage guest images from editable recipes</li>
+        </ul>
+        <p>Audio, clipboard sharing and HiDPI scaling are not done yet.</p>
       </description>
     </release>
   </releases>
