@@ -29,6 +29,10 @@ pub struct ContainerSummary {
     pub labels: HashMap<String, String>,
     #[serde(rename = "Ports", default, deserialize_with = "null_as_default")]
     pub ports: Vec<PortMapping>,
+    /// Seconds since 1970. Podman sends a large negative number for a
+    /// container that never started.
+    #[serde(rename = "StartedAt", default)]
+    pub started_at: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -308,6 +312,19 @@ mod tests {
         ]"#;
         let list: Vec<ContainerSummary> = serde_json::from_str(body).unwrap();
         assert_eq!(published_ports(&list), vec![8080, 8081, 8082, 13390]);
+    }
+
+    #[test]
+    fn a_list_entry_reports_when_the_container_started() {
+        // The viewer compares this time to see a restart that a batch of
+        // events hid. A container that never started has a negative time.
+        let body = r#"[
+            {"Id": "a", "Names": ["one"], "State": "running", "StartedAt": 1792505995},
+            {"Id": "b", "Names": ["two"], "State": "created", "StartedAt": -62135596800}
+        ]"#;
+        let list: Vec<ContainerSummary> = serde_json::from_str(body).unwrap();
+        assert_eq!(list[0].started_at, 1792505995);
+        assert!(list[1].started_at < 0);
     }
 
     #[test]

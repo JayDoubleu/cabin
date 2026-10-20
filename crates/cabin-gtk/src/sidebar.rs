@@ -782,6 +782,7 @@ mod tests {
             state,
             config: DesktopConfig::new("test"),
             rdp_port: port,
+            started_at: 0,
         }
     }
 

@@ -99,6 +99,7 @@ impl Podman {
                     state: State::from_podman(&c.state),
                     config,
                     rdp_port,
+                    started_at: c.started_at,
                 })
             })
             .collect())

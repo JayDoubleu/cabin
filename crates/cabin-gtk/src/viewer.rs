@@ -420,12 +420,12 @@ impl Viewer {
 
         // Running again after being stopped. Reconnect on that edge only, so
         // a session that failed for its own reasons is not retried in a loop.
-        let was_stopped = !self
+        let started_again = self
             .shown
             .borrow()
             .as_ref()
-            .is_some_and(|s| s.desktop.state.is_running());
-        if was_stopped {
+            .is_none_or(|s| started_again(&s.desktop, current));
+        if started_again {
             // Record the running state first. Opening fetches the password
             // before it attaches, and starting a desktop sends several Podman
             // events, so a later list would otherwise see "stopped" again and
@@ -672,4 +672,53 @@ fn work_area(window: &gtk::Window) -> Option<(i32, i32)> {
     let monitor = display.monitor_at_surface(&surface)?;
     let area = monitor.geometry();
     Some((area.width(), area.height()))
+}
+
+/// Whether the desktop on screen has started since the pane last saw it.
+///
+/// A desktop that was stopped and now runs has started again. So has one
+/// that runs under the same id with a later start time. That happens when a
+/// recreate fails and Cabin restarts the old container: Podman reports the
+/// stop, the renames and the start in one batch, so every list the pane sees
+/// says "running", and the session that the stop ended is never replaced.
+fn started_again(shown: &Desktop, current: &Desktop) -> bool {
+    !shown.state.is_running() || shown.started_at != current.started_at
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cabin_core::{DesktopConfig, State};
+
+    fn desktop(state: State, started_at: i64) -> Desktop {
+        Desktop {
+            id: "abc".into(),
+            name: "test".into(),
+            state,
+            config: DesktopConfig::new("test"),
+            rdp_port: Some(13389),
+            started_at,
+        }
+    }
+
+    #[test]
+    fn a_desktop_that_was_stopped_has_started_again() {
+        let shown = desktop(State::Exited, 100);
+        assert!(started_again(&shown, &desktop(State::Running, 200)));
+    }
+
+    #[test]
+    fn a_restart_hidden_in_one_batch_of_events_is_seen() {
+        // The pane never saw the stop, only a later start time.
+        let shown = desktop(State::Running, 100);
+        assert!(started_again(&shown, &desktop(State::Running, 160)));
+    }
+
+    #[test]
+    fn a_desktop_that_kept_running_has_not_started_again() {
+        // Every Podman event brings a new list. Reopening on each one would
+        // tear down a working session.
+        let shown = desktop(State::Running, 100);
+        assert!(!started_again(&shown, &desktop(State::Running, 100)));
+    }
 }

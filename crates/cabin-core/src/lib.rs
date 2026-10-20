@@ -102,4 +102,9 @@ pub struct Desktop {
     /// mapping for a stopped container too, so a stopped desktop still holds
     /// its port.
     pub rdp_port: Option<u16>,
+    /// When the container last started, in seconds since 1970, as Podman
+    /// reports it. A stop and the start after it can reach Cabin in one batch
+    /// of events, and every list then says "running", so only this shows
+    /// that the desktop started again.
+    pub started_at: i64,
 }
