@@ -37,6 +37,26 @@ pub struct PortMapping {
     pub host_port: u16,
     #[serde(rename = "container_port", default)]
     pub container_port: u16,
+    /// How many consecutive ports the mapping covers, from `host_port`.
+    #[serde(rename = "range", default)]
+    pub range: u16,
+}
+
+/// Every host port that the listed containers publish, running or not.
+///
+/// A stopped container holds no socket, so a bind test passes on its port,
+/// yet the two containers then cannot run together.
+pub fn published_ports(containers: &[ContainerSummary]) -> Vec<u16> {
+    containers
+        .iter()
+        .flat_map(|c| &c.ports)
+        .filter(|p| p.host_port != 0)
+        .flat_map(|p| {
+            // Podman omits the range or sends 0 for a single port.
+            let count = p.range.max(1);
+            (0..count).filter_map(move |offset| p.host_port.checked_add(offset))
+        })
+        .collect()
 }
 
 /// The body of a libpod container create request.
@@ -271,6 +291,23 @@ mod tests {
         assert!(list[0].ports.is_empty());
         assert!(list[1].names.is_empty());
         assert_eq!(list[1].ports[0].host_port, 13389);
+    }
+
+    #[test]
+    fn published_ports_cover_every_container_and_range() {
+        // The second entry stands for a container whose labels Cabin cannot
+        // read, such as one from a newer Cabin. Its port is still taken.
+        let body = r#"[
+            {"Id": "a", "Names": ["web"], "State": "running", "Labels": null,
+             "Ports": [{"host_port": 8080, "container_port": 80, "range": 3}]},
+            {"Id": "b", "Names": ["future"], "State": "exited",
+             "Labels": {"io.github.jaydoubleu.cabin.managed": "true"},
+             "Ports": [{"host_port": 13390, "container_port": 3389}]},
+            {"Id": "c", "Names": ["plain"], "State": "exited", "Labels": null,
+             "Ports": null}
+        ]"#;
+        let list: Vec<ContainerSummary> = serde_json::from_str(body).unwrap();
+        assert_eq!(published_ports(&list), vec![8080, 8081, 8082, 13390]);
     }
 
     #[test]

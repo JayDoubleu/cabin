@@ -62,9 +62,30 @@ pub async fn stream_request<F>(
     method: &str,
     path: &str,
     body: Option<RawBody<'_>>,
+    on_line: F,
+) -> Result<()>
+where
+    F: FnMut(&str),
+{
+    stream_request_opened(socket, method, path, body, || {}, on_line).await
+}
+
+/// Like [`stream_request`], and calls `on_open` once Podman has accepted
+/// the request, before the first line.
+///
+/// A follower of the event feed needs this point. A change made before it
+/// sends no event to this connection, so a refresh that covers the gap
+/// must happen after it, not before.
+pub async fn stream_request_opened<O, F>(
+    socket: &str,
+    method: &str,
+    path: &str,
+    body: Option<RawBody<'_>>,
+    on_open: O,
     mut on_line: F,
 ) -> Result<()>
 where
+    O: FnOnce(),
     F: FnMut(&str),
 {
     let stream = UnixStream::connect(socket)
@@ -86,6 +107,7 @@ where
             message: crate::client::extract_message(&body),
         });
     }
+    on_open();
 
     let chunked = is_chunked(&headers);
     // A chunked stream ends with a zero size line. A connection that drops
@@ -314,5 +336,30 @@ mod tests {
             Err(Error::Api { message, .. }) => assert_eq!(message, "image not known"),
             other => panic!("expected an API error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn open_is_reported_only_for_an_accepted_request() {
+        let reply = format!("{HEAD}d\r\n{{\"stream\":1}}\n\r\n0\r\n\r\n");
+        let (dir, socket) = serve_once("opened", reply.into_bytes());
+        let mut opened = false;
+        let result =
+            stream_request_opened(&socket, "GET", "/x", None, || opened = true, |_| {}).await;
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(opened);
+
+        let body = r#"{"message":"no"}"#;
+        let reply = format!(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (dir, socket) = serve_once("refused", reply.into_bytes());
+        let mut opened = false;
+        let result =
+            stream_request_opened(&socket, "GET", "/x", None, || opened = true, |_| {}).await;
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(result.is_err());
+        assert!(!opened, "a refused request must not count as open");
     }
 }

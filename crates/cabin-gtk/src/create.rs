@@ -19,8 +19,9 @@ const PORT_RANGE: std::ops::Range<u16> = 13389..13500;
 pub struct InUse {
     /// The names of Cabin's desktops.
     pub desktops: Vec<String>,
-    /// The host port of every desktop, running or not. A stopped desktop
-    /// holds no socket, so a bind test alone would hand its port out again.
+    /// The host port that every container publishes, running or not, Cabin's
+    /// or not. A stopped container holds no socket, so a bind test alone
+    /// would hand its port out again.
     pub ports: Vec<u16>,
     /// The name of every container on the host, Cabin's or not.
     pub containers: Vec<String>,

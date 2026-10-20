@@ -118,7 +118,7 @@ impl Sidebar {
             let button = button.clone();
             runtime::spawn(
                 async move {
-                    let containers = podman.container_names().await;
+                    let containers = podman.containers_in_use().await;
                     let volumes = podman.volume_names().await;
                     (containers, volumes)
                 },
@@ -127,10 +127,14 @@ impl Sidebar {
                     // Without the lists the check is weaker, not wrong: Podman
                     // still refuses a clash, only later. That is no reason to
                     // keep the user from making a desktop.
-                    let containers = containers.unwrap_or_else(|e| {
+                    let (containers, published) = containers.unwrap_or_else(|e| {
                         tracing::warn!("could not list the containers: {e}");
-                        Vec::new()
+                        (Vec::new(), Vec::new())
                     });
+                    // The desktops' own ports stay in the list, so a failed
+                    // listing still leaves those out of the choice.
+                    let mut ports = ports;
+                    ports.extend(published);
                     let volumes = volumes.unwrap_or_else(|e| {
                         tracing::warn!("could not list the volumes: {e}");
                         Vec::new()
@@ -555,9 +559,23 @@ impl Sidebar {
                     match result {
                         // Otherwise a new desktop reusing the name would
                         // present a different certificate and be reported as
-                        // an interception. Only once the state volume is
-                        // gone, because the old certificate lives there.
+                        // an interception. Only once the container is gone:
+                        // a desktop that is still there keeps its pin.
                         Ok(()) => crate::pinning::forget(&name),
+                        Err(e @ cabin_podman::Error::VolumesLeft { .. }) => {
+                            // The container is gone, so the desktop leaves
+                            // the list and Cabin offers no way back to this
+                            // pin. The name stays blocked until the volumes
+                            // go, and a desktop made after that has a new
+                            // certificate, so the pin must go now.
+                            crate::pinning::forget(&name);
+                            tracing::error!("the desktop left volumes behind: {e}");
+                            show_error(
+                                &sidebar.widget,
+                                "Some of the desktop's files were not removed",
+                                &e.to_string(),
+                            );
+                        }
                         Err(e) => {
                             tracing::error!("could not delete the desktop: {e}");
                             // The menu button sits in a popover that has
@@ -593,19 +611,27 @@ impl Sidebar {
                     let mut delay = FEED_RETRY_FIRST;
                     let mut first = true;
                     loop {
-                        if !first {
-                            // Changes made during the gap sent no event, so
-                            // ask for one refresh.
-                            let _ = sender.try_send("reconnected".to_string());
-                        }
+                        let after_gap = !first;
                         first = false;
                         let opened = std::time::Instant::now();
                         let mut delivered = false;
                         let result = podman
-                            .watch_events(|event| {
-                                delivered = true;
-                                let _ = sender.try_send(event.action);
-                            })
+                            .watch_events(
+                                || {
+                                    // Changes made during the gap sent no
+                                    // event, so ask for one refresh. Only
+                                    // once the feed is open: a change made
+                                    // before that would otherwise be missed,
+                                    // and a failed attempt must not refresh.
+                                    if after_gap {
+                                        let _ = sender.try_send("reconnected".to_string());
+                                    }
+                                },
+                                |event| {
+                                    delivered = true;
+                                    let _ = sender.try_send(event.action);
+                                },
+                            )
                             .await;
                         match result {
                             Err(e) => tracing::warn!("event feed stopped: {e}"),

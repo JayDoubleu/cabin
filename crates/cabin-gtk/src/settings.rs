@@ -42,12 +42,19 @@ const SENSITIVE_FOLDERS: &[&str] = &[
     "public_html",
 ];
 
-/// True when `host_path` is one of the sensitive folders, or inside one.
+/// True when `host_path` is one of the sensitive folders, is inside one, or
+/// holds one below the home directory.
+///
+/// The relabel is recursive, so sharing `~/.local` relabels
+/// `~/.local/share/keyrings` too. Podman refuses the home directory itself,
+/// but not the folders between it and a sensitive one.
 fn is_sensitive_location(host_path: &str, home: &std::path::Path) -> bool {
     let path = std::path::Path::new(host_path);
-    SENSITIVE_FOLDERS
-        .iter()
-        .any(|folder| path.starts_with(home.join(folder)))
+    SENSITIVE_FOLDERS.iter().any(|folder| {
+        let sensitive = home.join(folder);
+        path.starts_with(&sensitive)
+            || (sensitive.starts_with(path) && path.starts_with(home) && path != home)
+    })
 }
 
 /// What the dialogue says when the portal gives no real path.
@@ -247,6 +254,7 @@ pub fn present(
     let validity = Rc::new(Validity {
         config: config.clone(),
         invalid_rows: RefCell::new(std::collections::BTreeSet::new()),
+        entries: RefCell::new(Vec::new()),
         buttons: vec![apply.clone(), apply_and_run.clone()],
         problem: problem.clone(),
     });
@@ -331,6 +339,10 @@ struct Validity {
     /// last good location in the configuration, so Apply would silently use
     /// a location the user can no longer see.
     invalid_rows: RefCell<std::collections::BTreeSet<usize>>,
+    /// The location entry of each share row. A row is checked against the
+    /// other rows, so a change to one row can make another valid. The
+    /// references are weak, because each entry's handler holds this.
+    entries: RefCell<Vec<(usize, gtk::glib::WeakRef<adw::EntryRow>)>>,
     buttons: Vec<gtk::Button>,
     problem: gtk::Label,
 }
@@ -362,6 +374,32 @@ impl Validity {
     /// Forgets every row, because the rows are about to be built again.
     fn clear_rows(&self) {
         self.invalid_rows.borrow_mut().clear();
+        self.entries.borrow_mut().clear();
+    }
+
+    fn add_entry(&self, index: usize, entry: &adw::EntryRow) {
+        self.entries.borrow_mut().push((index, entry.downgrade()));
+    }
+
+    /// Checks again every invalid row other than `index`, after the row at
+    /// `index` stored a new location.
+    ///
+    /// Without this, a row that clashed with the old location keeps its
+    /// error, and Apply stays off, until the user types in it again.
+    fn recheck_others(&self, index: usize) {
+        let stale: Vec<adw::EntryRow> = {
+            let invalid = self.invalid_rows.borrow();
+            self.entries
+                .borrow()
+                .iter()
+                .filter(|(row, _)| *row != index && invalid.contains(row))
+                .filter_map(|(_, entry)| entry.upgrade())
+                .collect()
+        };
+        // The borrows end first, because each check records its result here.
+        for entry in stale {
+            entry.emit_by_name::<()>("changed", &[]);
+        }
     }
 }
 
@@ -738,6 +776,7 @@ fn build_mount_row(
     // when what is typed is not one.
     let config_for_location = config.clone();
     let row_for_location = row.clone();
+    validity.add_entry(index, &location);
     location.connect_changed(move |entry| {
         let typed = entry.text().to_string();
         // Compared with every other share, because Podman refuses two
@@ -760,6 +799,7 @@ fn build_mount_row(
                 }
                 row_for_location.set_subtitle(&format!("Appears at {}", entry.text()));
                 validity.set_row(index, true);
+                validity.recheck_others(index);
             }
             Err(why) => {
                 entry.add_css_class("error");
@@ -1350,18 +1390,60 @@ fn apply_now(
                 on_applied();
             }
             Err(e) => {
+                let outcome = apply_failure(&e);
                 let error = adw::AlertDialog::builder()
-                    .heading("Could not apply the changes")
+                    .heading(outcome.heading())
                     .body(e.to_string())
                     .build();
                 error.add_response("close", "Close");
                 error.present(Some(&parent));
+                // The dialogue holds the old desktop. Once that container is
+                // gone or parked, a second Apply would act on a removed id
+                // or on the parked container, so the user reopens the
+                // settings from the refreshed list instead.
+                if outcome != ApplyFailure::KeptOld {
+                    settings_dialog.close();
+                }
                 // The desktop can have a new id, a new state, or a leftover
                 // beside it, so the list has to look again.
                 on_applied();
             }
         },
     );
+}
+
+/// What a failed recreate left in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplyFailure {
+    /// The old container is as it was, so the settings can be tried again.
+    KeptOld,
+    /// The new container exists and the old one is gone, but the start
+    /// failed.
+    AppliedNotStarted,
+    /// The new container exists, but the old one stayed under its
+    /// temporary name.
+    AppliedOldLeft,
+}
+
+impl ApplyFailure {
+    fn heading(self) -> &'static str {
+        match self {
+            Self::KeptOld => "Could not apply the changes",
+            Self::AppliedNotStarted => "The changes were applied, but the desktop did not start",
+            Self::AppliedOldLeft => "The changes were applied, but the old container was left",
+        }
+    }
+}
+
+/// Every error that `recreate_desktop` raises once the new container
+/// exists has its own variant. Any other error happens before that point,
+/// or puts the old container back, so the old desktop is unchanged.
+fn apply_failure(error: &cabin_podman::Error) -> ApplyFailure {
+    match error {
+        cabin_podman::Error::StartAfterRecreate(_) => ApplyFailure::AppliedNotStarted,
+        cabin_podman::Error::OldContainerLeft { .. } => ApplyFailure::AppliedOldLeft,
+        _ => ApplyFailure::KeptOld,
+    }
 }
 
 #[cfg(test)]
@@ -1378,6 +1460,9 @@ mod tests {
             "/home/user/.config/git",
             "/home/user/.local/share/keyrings",
             "/home/user/public_html",
+            // These hold a sensitive folder, and the relabel goes down.
+            "/home/user/.local",
+            "/home/user/.local/share",
         ] {
             assert!(is_sensitive_location(path, home), "{path} was not flagged");
         }
@@ -1391,9 +1476,43 @@ mod tests {
             "/home/user/.sshfs",
             "/home/user/.local/share/fonts",
             "/srv/data",
+            // Podman refuses these itself, so no warning is needed.
+            "/home/user",
+            "/home",
+            "/",
         ] {
             assert!(!is_sensitive_location(path, home), "{path} was flagged");
         }
+    }
+
+    #[test]
+    fn only_errors_that_keep_the_old_desktop_keep_the_dialogue() {
+        use cabin_podman::Error;
+        let kept = [
+            Error::Settings("no".to_string()),
+            Error::RecreateRefused {
+                name: "dev".to_string(),
+                message: "no".to_string(),
+            },
+            Error::Api {
+                status: 500,
+                message: "stop failed".to_string(),
+            },
+        ];
+        for error in &kept {
+            assert_eq!(apply_failure(error), ApplyFailure::KeptOld, "{error:?}");
+        }
+        let not_started = Error::StartAfterRecreate(Box::new(Error::StartedThenExited {
+            name: "dev".to_string(),
+            likely_cause: "inotify".to_string(),
+        }));
+        assert_eq!(apply_failure(&not_started), ApplyFailure::AppliedNotStarted);
+        let left = Error::OldContainerLeft {
+            name: "dev".to_string(),
+            old_name: "dev-cabin-old".to_string(),
+            message: "busy".to_string(),
+        };
+        assert_eq!(apply_failure(&left), ApplyFailure::AppliedOldLeft);
     }
 
     fn roots() -> Vec<PathBuf> {

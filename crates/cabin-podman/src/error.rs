@@ -54,6 +54,13 @@ pub enum Error {
         message: String,
     },
 
+    /// A recreate made the new container and removed the old one, and then
+    /// the start failed. The text is the start's own, because the reason,
+    /// such as the inotify limit, is what the user acts on. The variant
+    /// tells a caller that the new settings are in place.
+    #[error("{0}")]
+    StartAfterRecreate(Box<Error>),
+
     #[error(
         "The desktop was removed, but some of its files are still on this \
          computer, in the Podman volumes {volumes}.\n\n{message}"

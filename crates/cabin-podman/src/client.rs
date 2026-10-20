@@ -372,7 +372,7 @@ impl Podman {
                 message,
             });
         }
-        started?;
+        started.map_err(|e| Error::StartAfterRecreate(Box::new(e)))?;
         Ok(new_id)
     }
 
@@ -615,21 +615,26 @@ impl Podman {
         .map(|_| ())
     }
 
-    /// The name of every container on the host, Cabin's or not.
+    /// The name of every container on the host, Cabin's or not, and every
+    /// host port those containers publish.
     ///
     /// Podman refuses a create whose name another container holds, and the
-    /// refusal would come after the dialogue closed. The caller uses this
-    /// only to refuse those names, never to show the containers.
-    pub async fn container_names(&self) -> Result<Vec<String>> {
+    /// refusal would come after the dialogue closed. The ports include those
+    /// of stopped containers and of Cabin containers whose labels do not
+    /// parse, which `list_desktops` leaves out. The caller uses this only to
+    /// refuse names and ports, never to show the containers.
+    pub async fn containers_in_use(&self) -> Result<(Vec<String>, Vec<u16>)> {
         let body = self
             .get_raw(&format!("{API}/containers/json?all=true"))
             .await?;
         let summaries: Vec<ContainerSummary> = serde_json::from_slice(&body)?;
-        Ok(summaries
+        let ports = crate::model::published_ports(&summaries);
+        let names = summaries
             .into_iter()
             .flat_map(|c| c.names)
             .map(|n| n.trim_start_matches('/').to_string())
-            .collect())
+            .collect();
+        Ok((names, ports))
     }
 
     /// The name of every volume on the host.
@@ -652,14 +657,22 @@ impl Podman {
     /// This returns when the socket closes, for example when Podman restarts.
     /// The caller must reconnect, or changes made outside Cabin stop
     /// reaching it.
-    pub async fn watch_events<F>(&self, mut on_event: F) -> Result<()>
+    ///
+    /// `on_open` runs once Podman has accepted the request. From that point
+    /// every change sends an event, so a caller that missed changes while
+    /// it was not connected refreshes then.
+    pub async fn watch_events<O, F>(&self, on_open: O, mut on_event: F) -> Result<()>
     where
+        O: FnOnce(),
         F: FnMut(Event),
     {
         let filters = urlencode(r#"{"type":["container"]}"#);
-        http::stream_lines(
+        http::stream_request_opened(
             &self.socket,
+            "GET",
             &format!("{API}/events?stream=true&filters={filters}"),
+            None,
+            on_open,
             |line| match serde_json::from_str::<Event>(line) {
                 Ok(event) => on_event(event),
                 Err(e) => tracing::debug!("ignoring unparsable event: {e}"),
