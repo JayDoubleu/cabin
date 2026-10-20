@@ -1,19 +1,33 @@
 //! The parts of the libpod API payloads that Cabin reads and writes.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
+
+/// Reads a field that Podman sends as null when it is empty.
+///
+/// `#[serde(default)]` covers only a missing field, not an explicit null.
+/// libpod sends `"Ports": null` for a container that publishes nothing and
+/// `"Labels": null` for one with no labels. Without this, one such container
+/// fails the decode of the whole list.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ContainerSummary {
     #[serde(rename = "Id")]
     pub id: String,
-    #[serde(rename = "Names", default)]
+    #[serde(rename = "Names", default, deserialize_with = "null_as_default")]
     pub names: Vec<String>,
     #[serde(rename = "State")]
     pub state: String,
-    #[serde(rename = "Labels", default)]
+    #[serde(rename = "Labels", default, deserialize_with = "null_as_default")]
     pub labels: HashMap<String, String>,
-    #[serde(rename = "Ports", default)]
+    #[serde(rename = "Ports", default, deserialize_with = "null_as_default")]
     pub ports: Vec<PortMapping>,
 }
 
@@ -143,7 +157,7 @@ pub struct Event {
 pub struct Actor {
     #[serde(rename = "ID", default)]
     pub id: String,
-    #[serde(rename = "Attributes", default)]
+    #[serde(rename = "Attributes", default, deserialize_with = "null_as_default")]
     pub attributes: HashMap<String, String>,
 }
 
@@ -212,7 +226,7 @@ pub struct InspectState {
 
 #[derive(Debug, Deserialize)]
 pub struct InspectConfig {
-    #[serde(rename = "Env", default)]
+    #[serde(rename = "Env", default, deserialize_with = "null_as_default")]
     pub env: Vec<String>,
     #[serde(rename = "Labels", default)]
     pub labels: Option<HashMap<String, String>>,
@@ -237,6 +251,26 @@ mod tests {
         }"#;
         let inspect: InspectResponse = serde_json::from_str(body).unwrap();
         assert_eq!(inspect.bound_addresses(3389), vec!["127.0.0.1", "fd00::24"]);
+    }
+
+    #[test]
+    fn a_list_entry_with_null_fields_still_reads() {
+        // libpod sends null, not an empty list or map, for a container with
+        // no published ports or no labels. Most containers on a host that
+        // Cabin did not make look like this.
+        let body = r#"[
+            {"Id": "a", "Names": ["toolbox"], "State": "running",
+             "Labels": null, "Ports": null},
+            {"Id": "b", "Names": null, "State": "exited",
+             "Labels": {"x": "y"},
+             "Ports": [{"host_port": 13389, "container_port": 3389}]}
+        ]"#;
+        let list: Vec<ContainerSummary> = serde_json::from_str(body).unwrap();
+        assert_eq!(list[0].names, vec!["toolbox"]);
+        assert!(list[0].labels.is_empty());
+        assert!(list[0].ports.is_empty());
+        assert!(list[1].names.is_empty());
+        assert_eq!(list[1].ports[0].host_port, 13389);
     }
 
     #[test]
