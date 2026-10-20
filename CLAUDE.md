@@ -15,6 +15,7 @@ cost real time.
 | `crates/cabin-gtk` | The application. Owns the `cabin` binary. |
 | `guest/` | The guest desktop image: Containerfile, units, scripts. |
 | `build-aux/` | Flatpak manifest, cargo wrapper, RDP probe. |
+| `build-aux/screenshots/` | The end-to-end test in a private GNOME Shell. DESIGN.md section 23. |
 | `data/` | Desktop entry, metainfo, gschema, icon. |
 
 ## Commands
@@ -22,6 +23,10 @@ cost real time.
 Use `just`. Run `just` alone to list every task.
 
 `just test` must pass before any commit. `just lint` must be clean.
+
+`build-aux/screenshots/e2e.sh` tests the installed Flatpak through real input.
+Run it on the host, or through `flatpak-spawn --host` from a toolbox, after
+`just flatpak` and `just guest`.
 
 The live tests need the host Podman and the guest image, so CI does not run
 them. Run them with `just podman-live`, `just rdp-live` and
@@ -239,6 +244,27 @@ crate: that also runs `make_demo`, which replaces any container called
     chooser returns a path under `/run/user/<uid>/doc/`, and the desktop's
     user cannot read it. Turn it back into the real host path, or refuse the
     share. Do not widen the sandbox instead (rule 6).
+44. **The display inhibits the host shortcuts while it has the focus.**
+    Without that, Super opens the overview of the host and of the guest
+    together, and Alt+Tab leaves the window. Restore them when the focus
+    leaves, so the sidebar and the dialogues keep the usual shortcuts.
+45. **A desktop keeps the time zone of the host.** The create request sets
+    `timezone` to `local`. Without it the guest runs in UTC and its clock
+    shows another hour.
+46. **A desktop's start time, not only its state, shows a restart.** Podman
+    can send a stop and the next start in one batch of events, so every list
+    says "running". After a refused recreate the viewer then stayed on
+    "disconnected" while the old desktop ran again. `started_again` in
+    `viewer.rs` compares `started_at`.
+47. **The shim's FreeRDP context starts with `rdpClientContext`.** A bare
+    `rdpContext` works, but FreeRDP then logs "[APPLICATION BUG]" on every
+    connection, and each client helper that needs the larger struct refuses
+    to run.
+48. **The end-to-end test must not see the user's desktops.** At start-up
+    Cabin opens the first running desktop, and the guest serves one session
+    at a time, so a test would take over a session in use.
+    `podman-proxy.py` hides every desktop whose name does not start with
+    `e2e-` or `shot-`. Name every test desktop that way.
 
 ## Environment notes
 

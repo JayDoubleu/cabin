@@ -8,3 +8,6 @@
 .cargo/
 /_flatpak
 /_release
+
+# Python byte code from the scripts in build-aux.
+__pycache__/

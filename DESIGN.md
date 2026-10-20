@@ -335,6 +335,14 @@ Pointer coordinates scale from widget space to guest framebuffer space. The
 widget letterboxes, so the transform must account for the offset, not only the
 scale.
 
+While the display has the keyboard focus, it inhibits the system shortcuts of
+the host compositor, through `gdk_toplevel_inhibit_system_shortcuts`. Without
+that, Super opened the overview of the host and of the guest together, and
+Alt+Tab left the window. GNOME asks the user once whether to allow it, and
+Super+Escape gives the shortcuts back to the host. The display restores them
+when it loses the focus, so the sidebar and the dialogues keep the usual
+shortcuts. Section 23.3 has how this was found.
+
 ### 6.4 Resize
 
 Two directions exist and they must not fight each other.
@@ -1308,6 +1316,10 @@ framebuffer back to assert the pixels changed.
 Shell screenshot D-Bus API for unlisted callers, so a Wayland window can be
 neither captured nor clicked from a script. The frame path should not care, but
 the render path has not been eyeballed on native Wayland and should be once.
+
+Both limits are now behind us. Section 23 describes a test that runs the
+Flatpak on native Wayland in a private GNOME Shell, with a helper extension
+that takes the screenshots and sends real input.
 
 ### 15.9 Proving that input works
 
@@ -2598,3 +2610,97 @@ a `flatpak remote-add --user` at build time leaves nothing behind.
 `cabin-flathub.service` does it at session start, from a `.flatpakrepo` fetched
 into the image, so a desktop with no network still starts without waiting for a
 timeout.
+
+## 23. The end-to-end test
+
+### 23.1 A private GNOME Shell drives the installed Flatpak
+
+`build-aux/screenshots/` holds a test that drives the installed Flatpak through
+real input, as a user does. Run it on the host:
+
+    build-aux/screenshots/e2e.sh
+
+From a toolbox, run it through `flatpak-spawn --host`. It needs gnome-shell 50
+on the host. The parts are these:
+
+- `session.sh` starts a headless GNOME Shell with its own home, XDG folders,
+  D-Bus session bus and runtime folder. Nothing touches the real desktop or
+  its settings.
+- The `cabin-shot@local` extension takes screenshots, lists windows, and sends
+  keys, clicks and wheel steps through a Clutter virtual keyboard and pointer.
+  Those go the same route as a physical device, so the test covers the input
+  path of the application and of the viewer.
+- `drive.py` finds widgets on the accessibility bus. That also checks that
+  each control has a name a screen reader can use.
+- `podman-proxy.py` runs inside the sandbox, on the socket path where Cabin
+  looks for Podman. It adds a name filter to the desktop list, so Cabin sees
+  only desktops whose names start with `e2e-` or `shot-`. At start-up Cabin
+  opens the first running desktop, and the guest serves one session at a time,
+  so without the proxy the test took over a desktop that the user had open.
+- `e2e.py` runs nine checks, writes a screenshot after each step, and writes
+  `results.json`. Some checks, such as "the icons draw", need a person to look
+  at the screenshots.
+
+### 23.2 Traps in the harness
+
+- Flatpak binds `xdg-run/podman` at its host path. In the private session that
+  is the private runtime folder, not `/run/user/UID`. The private folder sits
+  inside the real one, so a hard link can carry the real socket into it, and
+  the proxy forwards to that link.
+- D-Bus activation of the accessibility bus fails with "Permission denied" in
+  the private session, and the registry on that bus asks systemd. The session
+  starts both by hand. Without them GTK logs a critical at start-up.
+- The virtual pointer starts in the top left corner, where the hot corner
+  opens the overview. The session turns hot corners off.
+- GTK reports the widgets inside an `AdwAlertDialog` some way from where it
+  draws them, and it does not move the focus over the accessibility bus. The
+  script uses the accessibility actions and `EditableText` for alert
+  dialogues, and real clicks everywhere else.
+- `move_resize_frame()` and `unmaximize()` from an extension leave a client
+  side decorated window where it was. The script resizes by dragging the
+  window corner, as a user does.
+- A modal dialogue that belongs to another window skips the taskbar, so the
+  window list selects by window type.
+- A Podman command in the session must get the real `HOME` and `XDG_*`
+  values. With the private ones it opens a new, empty store.
+- The file chooser portal returns paths under the private runtime folder, so
+  the share dialogue shows such a path. A real session never does that.
+
+### 23.3 What the first run found
+
+Each of these is fixed, and the test checks it:
+
+1. Super opened the overview of the host as well as the guest's. The display
+   now inhibits the host shortcuts while it has the focus (section 6.3).
+2. After a refused recreate, Cabin restarts the old container, but the viewer
+   stayed on "disconnected". Podman sent the stop, the renames and the start
+   in one batch, so every list said "running" and the pane never saw the stop.
+   A desktop now carries its start time, and a later start time counts as a
+   start (rule 46).
+3. The guest ran in UTC, so its clock showed a different hour from the host.
+   The create request now sets `timezone` to `local` (rule 45).
+4. Every new desktop showed "Screen Lock disabled" on its first start. GNOME
+   Shell shows that once per home folder when no display manager runs.
+   `start-shell.sh` marks it as shown.
+5. FreeRDP logged "[APPLICATION BUG] Function must be called with a context
+   based on rdpClientContext" on every connection, because the shim's context
+   started with a bare `rdpContext` (rule 47).
+6. NLA tried Kerberos and Kerberos user-to-user before NTLM, and both always
+   failed with a logged error. The shim now leaves them out.
+7. The menu button of a sidebar row had no name of its own, so a screen
+   reader read every menu item as its label. The main menu lost its name in
+   the same way while its menu was open.
+8. The Renderer row showed "Software rend...". Its explanation is now the
+   group's, and the row shows the choice on its own line (rule 32).
+
+### 23.4 What it found and left alone
+
+- FreeRDP logs "REMOTE HOST IDENTIFICATION HAS CHANGED" for a server that it
+  has never seen, because its own store reports "not found" through the same
+  branch. Cabin's pinning makes the decision, so the message is noise from
+  upstream.
+- A new desktop is created stopped, and the user starts it from the sidebar.
+  The pane says so.
+- The guest's host name is the short container id, so the shell prompt shows
+  something like `cabin@4b512ef612a5`.
+
