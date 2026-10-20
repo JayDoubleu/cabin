@@ -12,8 +12,9 @@ use std::net::{IpAddr, UdpSocket};
 /// several addresses is the useful one.
 ///
 /// Only IPv4 is asked about. "Every network" publishes the port on 0.0.0.0,
-/// which pasta binds on IPv4 only, so an IPv6 answer would name an address
-/// that refuses the connection.
+/// and pasta binds that as a dual-stack socket, so the desktop also answers
+/// on IPv6. But the dialogue shows one address, and an IPv4 address on the
+/// local network is the one most likely to work from a nearby device.
 pub fn best_local_address() -> Option<IpAddr> {
     // 192.0.2.0/24 is TEST-NET-1, reserved for documentation and never routed.
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;

@@ -78,9 +78,9 @@ pub fn interfaces() -> Vec<NetInterface> {
 /// would type into another device.
 ///
 /// Only unique-local IPv6 (fc00::/7) is kept. A global address is reachable
-/// from the whole internet unless the router filters it, so publishing on it
-/// would make "Chosen networks" wider than "Every network", which binds IPv4
-/// only. The tailscale0 address is unique-local, so it stays.
+/// from the whole internet unless the router filters it, and that is what
+/// "Every network" is for. "Chosen networks" must stay the narrower choice.
+/// The tailscale0 address is unique-local, so it stays.
 ///
 /// Temporary and deprecated addresses are skipped too, because they rotate.
 /// The address is resolved when the container is created, so a rotated one
