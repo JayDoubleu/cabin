@@ -13,6 +13,46 @@ use std::sync::Arc;
 /// the usual ephemeral services and below the ephemeral allocation range.
 const PORT_RANGE: std::ops::Range<u16> = 13389..13500;
 
+/// What already exists on the host, so the dialogue can refuse a clash as
+/// it is typed rather than after Create is pressed.
+#[derive(Clone, Default)]
+pub struct InUse {
+    /// The names of Cabin's desktops.
+    pub desktops: Vec<String>,
+    /// The host port of every desktop, running or not. A stopped desktop
+    /// holds no socket, so a bind test alone would hand its port out again.
+    pub ports: Vec<u16>,
+    /// The name of every container on the host, Cabin's or not.
+    pub containers: Vec<String>,
+    /// The name of every volume on the host.
+    pub volumes: Vec<String>,
+}
+
+impl InUse {
+    /// Whether a desktop can take this name.
+    ///
+    /// Podman refuses a container name that any container holds, and that
+    /// refusal would arrive after the dialogue closed. Volumes left by a
+    /// desktop with the same name would hand its files and certificate to
+    /// the new one. Other containers are only used to refuse their names,
+    /// never shown as desktops.
+    fn check(&self, name: &str) -> Result<(), String> {
+        cabin_core::check_name(name, &self.desktops)?;
+        let name = name.trim();
+        if self.containers.iter().any(|c| c == name) {
+            return Err(format!("A container called {name} already exists."));
+        }
+        let home = cabin_core::home_volume_name(name);
+        let state = cabin_core::state_volume_name(name);
+        if self.volumes.iter().any(|v| *v == home || *v == state) {
+            return Err(format!(
+                "Old files for a desktop called {name} still exist."
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Presents the New Desktop dialogue.
 ///
 /// `on_created` receives the name of the desktop that was made and whether the
@@ -21,9 +61,10 @@ const PORT_RANGE: std::ops::Range<u16> = 13389..13500;
 pub fn present(
     parent: &impl IsA<gtk::Widget>,
     podman: Arc<Podman>,
-    taken: Vec<String>,
+    in_use: InUse,
     on_created: impl Fn(String, bool) + 'static,
 ) {
+    let in_use = Rc::new(in_use);
     // connect_response can fire more than once over the dialogue's life, so
     // the callback is shared rather than moved.
     let on_created: Rc<dyn Fn(String, bool)> = Rc::new(on_created);
@@ -35,7 +76,9 @@ pub fn present(
     let name_row = adw::EntryRow::builder().title("Name").build();
     // A name that is free, so the dialogue opens ready to use rather than
     // opening with an error against a name the user did not choose.
-    name_row.set_text(&first_free_name("fedora", &taken));
+    name_row.set_text(&first_free_name("fedora", |name| {
+        in_use.check(name).is_ok()
+    }));
 
     let memory_row = adw::SpinRow::with_range(1024.0, 65536.0, 1024.0);
     memory_row.set_title("Memory");
@@ -45,10 +88,14 @@ pub fn present(
     // Offer software rendering plus every render node, labelled with its
     // driver. Never guess the driver from the node number.
     let nodes = graphics::render_nodes();
+    // The mode behind each entry, in the same order, so the selection maps
+    // through a list rather than through arithmetic on its position.
     let mut options: Vec<String> = vec!["Automatic".into(), "Software rendering".into()];
+    let mut modes: Vec<GraphicsMode> = vec![GraphicsMode::Automatic, GraphicsMode::Software];
     for (path, driver) in &nodes {
         let leaf = path.rsplit('/').next().unwrap_or(path.as_str());
         options.push(format!("{leaf} ({driver})"));
+        modes.push(GraphicsMode::RenderNode { path: path.clone() });
     }
     let option_refs: Vec<&str> = options.iter().map(String::as_str).collect();
     let graphics_row = adw::ComboRow::builder()
@@ -121,8 +168,8 @@ pub fn present(
     let dialog_for_name = dialog.clone();
     let group_for_name = group.clone();
     let missing_row = image_missing.clone();
-    let taken_names = taken.clone();
-    let check = move |entry: &adw::EntryRow| match cabin_core::check_name(&entry.text(), &taken) {
+    let in_use_for_name = in_use.clone();
+    let check = move |entry: &adw::EntryRow| match in_use_for_name.check(&entry.text()) {
         Ok(()) => {
             entry.remove_css_class("error");
             group_for_name.set_description(None);
@@ -148,7 +195,7 @@ pub fn present(
     let tags_for_check = image_tags.clone();
     let dialog_for_check = dialog.clone();
     let name_for_check = name_row.clone();
-    let taken_for_check = taken_names.clone();
+    let taken_for_check = in_use.clone();
     let podman_for_check = podman.clone();
     // The image chosen in the image manager, or Cabin's own when none was.
     let preferred = crate::recipes::default_tag();
@@ -199,9 +246,7 @@ pub fn present(
                 row_for_settle.set_visible(!ready);
                 dialog_for_settle.set_response_enabled(
                     "create",
-                    ready
-                        && cabin_core::check_name(&name_for_settle.text(), &taken_for_settle)
-                            .is_ok(),
+                    ready && taken_for_settle.check(&name_for_settle.text()).is_ok(),
                 );
             };
             settle(&combo);
@@ -261,20 +306,29 @@ pub fn present(
         // manager, and a desktop made once from a different image should not
         // quietly become the answer for every desktop after it.
         config.memory_mb = Some(memory_row.value() as u64);
-        config.graphics = match graphics_row.selected() {
-            0 => GraphicsMode::Automatic,
-            1 => GraphicsMode::Software,
-            n => GraphicsMode::RenderNode {
-                path: nodes[(n - 2) as usize].0.clone(),
-            },
-        };
+        config.graphics = modes
+            .get(graphics_row.selected() as usize)
+            .cloned()
+            .unwrap_or(GraphicsMode::Automatic);
 
         let podman = podman.clone();
         let nodes = nodes.clone();
         let interfaces = crate::network::interfaces();
         let parent_widget = parent_widget.clone();
         let on_created = on_created.clone();
-        let port = free_port().unwrap_or(PORT_RANGE.start);
+        let bindable = |port: u16| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
+        let Some(port) = pick_port(&in_use.ports, bindable) else {
+            show_error(
+                &parent_widget,
+                &format!(
+                    "Every port from {} to {} is in use. Delete a desktop you no \
+                     longer need, then try again.",
+                    PORT_RANGE.start,
+                    PORT_RANGE.end - 1
+                ),
+            );
+            return;
+        };
         let password = generate_password();
         let created_name = name.clone();
         let wants_settings = open_settings.is_active();
@@ -389,36 +443,41 @@ fn buildable_images(images: &[cabin_podman::Image]) -> Vec<Choice> {
 }
 
 /// Suggests a name that is not in use, by adding a number if it has to.
-fn first_free_name(base: &str, taken: &[String]) -> String {
-    if !taken.iter().any(|t| t.eq_ignore_ascii_case(base)) {
+fn first_free_name(base: &str, is_free: impl Fn(&str) -> bool) -> String {
+    if is_free(base) {
         return base.to_string();
     }
     for suffix in 2..100 {
         let candidate = format!("{base}-{suffix}");
-        if !taken.iter().any(|t| t.eq_ignore_ascii_case(&candidate)) {
+        if is_free(&candidate) {
             return candidate;
         }
     }
     base.to_string()
 }
 
-/// Finds a free TCP port by asking the kernel to bind one.
+/// Picks a host port for a new desktop.
 ///
-/// This races with anything else that binds in the gap before Podman
-/// publishes the port. The window is small, and Podman reports a clear error
-/// if it loses that race.
-fn free_port() -> Option<u16> {
+/// Every port in `taken` is skipped first. Those belong to other desktops,
+/// and a stopped desktop holds no socket, so the bind test alone would give
+/// its port to the new desktop and the two could never run together.
+/// `is_bindable` then catches ports that other software holds.
+///
+/// The bind test races with anything else that binds in the gap before
+/// Podman publishes the port. The window is small, and Podman reports a clear
+/// error if it loses that race.
+fn pick_port(taken: &[u16], is_bindable: impl Fn(u16) -> bool) -> Option<u16> {
     PORT_RANGE
         .into_iter()
-        .find(|port| std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok())
+        .find(|port| !taken.contains(port) && is_bindable(*port))
 }
 
 /// Generates a per-desktop RDP password.
 ///
 /// The password reaches the guest as an environment variable, so `podman
 /// inspect` shows it. That is the same exposure the guest already has. Storing
-/// it in the host keyring through the Secret portal is still the right home
-/// and is tracked in DESIGN.md section 8.
+/// it in the host keyring through the Secret portal is a plan only, and is
+/// not done. DESIGN.md section 13.4 records it.
 fn generate_password() -> String {
     use std::io::Read;
     const ALPHABET: &[u8] = b"abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -521,24 +580,70 @@ mod tests {
         }
     }
 
+    fn in_use(desktops: &[&str]) -> InUse {
+        InUse {
+            desktops: desktops.iter().map(|d| d.to_string()).collect(),
+            ..InUse::default()
+        }
+    }
+
+    fn suggest(in_use: &InUse) -> String {
+        first_free_name("fedora", |name| in_use.check(name).is_ok())
+    }
+
     #[test]
     fn suggests_the_plain_name_when_it_is_free() {
-        assert_eq!(first_free_name("fedora", &[]), "fedora");
+        assert_eq!(suggest(&InUse::default()), "fedora");
     }
 
     #[test]
     fn suggests_a_numbered_name_when_the_plain_one_is_taken() {
-        let taken = vec!["fedora".to_string(), "fedora-2".to_string()];
-        assert_eq!(first_free_name("fedora", &taken), "fedora-3");
+        assert_eq!(suggest(&in_use(&["fedora", "fedora-2"])), "fedora-3");
     }
 
     #[test]
     fn the_suggestion_is_always_a_valid_name() {
-        let taken: Vec<String> = (2..20).map(|n| format!("fedora-{n}")).collect();
-        let mut all = vec!["fedora".to_string()];
-        all.extend(taken);
-        let suggested = first_free_name("fedora", &all);
-        assert!(cabin_core::check_name(&suggested, &all).is_ok());
+        let names: Vec<String> = std::iter::once("fedora".to_string())
+            .chain((2..20).map(|n| format!("fedora-{n}")))
+            .collect();
+        let all = InUse {
+            desktops: names,
+            ..InUse::default()
+        };
+        assert!(all.check(&suggest(&all)).is_ok());
+    }
+
+    #[test]
+    fn a_name_another_container_holds_is_refused() {
+        // Podman would refuse the create after the dialogue had closed.
+        let in_use = InUse {
+            containers: vec!["fedora-toolbox-44".to_string()],
+            ..InUse::default()
+        };
+        let why = in_use.check("fedora-toolbox-44").unwrap_err();
+        assert!(why.contains("container"), "{why}");
+    }
+
+    #[test]
+    fn a_name_with_volumes_left_behind_is_refused() {
+        // The new desktop would inherit the old files and certificate.
+        for volume in ["cabin-old-home", "cabin-old-state"] {
+            let in_use = InUse {
+                volumes: vec![volume.to_string()],
+                ..InUse::default()
+            };
+            let why = in_use.check("old").unwrap_err();
+            assert!(why.contains("Old files"), "{why}");
+        }
+    }
+
+    #[test]
+    fn the_suggestion_avoids_other_containers() {
+        let in_use = InUse {
+            containers: vec!["fedora".to_string()],
+            ..InUse::default()
+        };
+        assert_eq!(suggest(&in_use), "fedora-2");
     }
 
     #[test]
@@ -560,8 +665,23 @@ mod tests {
     }
 
     #[test]
-    fn free_port_is_inside_the_range() {
-        let port = free_port().expect("some port in the range should be free");
-        assert!(PORT_RANGE.contains(&port));
+    fn the_port_of_a_stopped_desktop_is_skipped() {
+        // A stopped desktop holds no socket, so its port binds, and still
+        // belongs to it.
+        let start = PORT_RANGE.start;
+        assert_eq!(pick_port(&[start], |_| true), Some(start + 1));
+    }
+
+    #[test]
+    fn a_port_something_else_holds_is_skipped() {
+        let start = PORT_RANGE.start;
+        assert_eq!(pick_port(&[], |p| p != start), Some(start + 1));
+    }
+
+    #[test]
+    fn no_port_is_picked_when_the_range_is_full() {
+        let taken: Vec<u16> = PORT_RANGE.collect();
+        assert_eq!(pick_port(&taken, |_| true), None);
+        assert_eq!(pick_port(&[], |_| false), None);
     }
 }

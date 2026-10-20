@@ -11,6 +11,7 @@ use cabin_podman::Podman;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// How long to let a guest shut down before Podman kills it. systemd inside
 /// the guest stops the session cleanly, which takes a moment.
@@ -99,25 +100,59 @@ impl Sidebar {
 
         let for_new = sidebar.clone();
         new_button.connect_clicked(move |button| {
-            let sidebar = for_new.clone();
+            // One dialogue at a time. The button comes back when the names
+            // have arrived and the dialogue is up.
+            button.set_sensitive(false);
             let refresh_target = for_new.clone();
-            // Select the new desktop once it appears, so its settings are one
-            // click away and the pane stops showing the previous one.
-            // The names already in use, so the dialogue can refuse a
-            // duplicate as it is typed rather than after Create is pressed.
-            let taken: Vec<String> = for_new
-                .desktops
-                .borrow()
-                .iter()
-                .map(|d| d.name.clone())
-                .collect();
-            crate::create::present(
-                button,
-                sidebar.podman.clone(),
-                taken,
-                move |name, open_settings| {
-                    refresh_target.pending_settings.set(open_settings);
-                    refresh_target.choose(&name);
+            // The names and ports already in use, so the dialogue can refuse
+            // a clash as it is typed rather than after Create is pressed.
+            let (desktops, ports): (Vec<String>, Vec<u16>) = {
+                let listed = for_new.desktops.borrow();
+                (
+                    listed.iter().map(|d| d.name.clone()).collect(),
+                    listed.iter().filter_map(|d| d.rdp_port).collect(),
+                )
+            };
+            let podman = for_new.podman.clone();
+            let for_dialog = for_new.podman.clone();
+            let button = button.clone();
+            runtime::spawn(
+                async move {
+                    let containers = podman.container_names().await;
+                    let volumes = podman.volume_names().await;
+                    (containers, volumes)
+                },
+                move |(containers, volumes)| {
+                    button.set_sensitive(true);
+                    // Without the lists the check is weaker, not wrong: Podman
+                    // still refuses a clash, only later. That is no reason to
+                    // keep the user from making a desktop.
+                    let containers = containers.unwrap_or_else(|e| {
+                        tracing::warn!("could not list the containers: {e}");
+                        Vec::new()
+                    });
+                    let volumes = volumes.unwrap_or_else(|e| {
+                        tracing::warn!("could not list the volumes: {e}");
+                        Vec::new()
+                    });
+                    let in_use = crate::create::InUse {
+                        desktops,
+                        ports,
+                        containers,
+                        volumes,
+                    };
+                    // Select the new desktop once it appears, so its settings
+                    // are one click away and the pane stops showing the
+                    // previous one.
+                    crate::create::present(
+                        &button,
+                        for_dialog,
+                        in_use,
+                        move |name, open_settings| {
+                            refresh_target.pending_settings.set(open_settings);
+                            refresh_target.choose(&name);
+                        },
+                    );
                 },
             );
         });
@@ -321,27 +356,34 @@ impl Sidebar {
             .css_classes(vec!["flat", "circular"])
             .build();
 
-        let id = desktop.id.clone();
-        let name = desktop.name.clone();
+        let for_action = desktop.clone();
         let podman = self.podman.clone();
         let sidebar = self.clone();
         button.connect_clicked(move |button| {
             // Stop double clicks queueing a second operation. The refresh that
             // follows rebuilds the row and replaces this button.
             button.set_sensitive(false);
-            let id = id.clone();
-            let name = name.clone();
+            let desktop = for_action.clone();
             let podman = podman.clone();
             let sidebar = sidebar.clone();
             // The button is only borrowed for the closure body, so keep an
             // owned handle for the reply that arrives later.
             let button = button.clone();
+            // Read on the main thread: both are quick, and the start needs
+            // them to resolve the chosen networks again (rule 40).
+            let nodes = crate::graphics::render_nodes();
+            let interfaces = crate::network::interfaces();
             runtime::spawn(
                 async move {
                     if running {
-                        podman.stop(&id, STOP_TIMEOUT_SECS).await
+                        podman.stop(&desktop.id, STOP_TIMEOUT_SECS).await
                     } else {
-                        podman.start_desktop(&id, &name).await
+                        // The id changes when the addresses moved and the
+                        // desktop was recreated. The refresh below finds it.
+                        podman
+                            .start_with_current_addresses(&desktop, &nodes, &interfaces)
+                            .await
+                            .map(|_| ())
                     }
                 },
                 move |result| {
@@ -391,19 +433,33 @@ impl Sidebar {
         let restart = flat_button("Restart", "view-refresh-symbolic");
         restart.set_sensitive(desktop.state.is_running());
         let sidebar = self.clone();
-        let id = desktop.id.clone();
+        let for_restart = desktop.clone();
         let popover_ref = popover.clone();
         restart.connect_clicked(move |_| {
             popover_ref.popdown();
             let podman = sidebar.podman.clone();
-            let id = id.clone();
+            let desktop = for_restart.clone();
             let sidebar = sidebar.clone();
+            let nodes = crate::graphics::render_nodes();
+            let interfaces = crate::network::interfaces();
             runtime::spawn(
-                async move { podman.restart(&id, STOP_TIMEOUT_SECS).await },
+                async move {
+                    podman
+                        .restart_with_current_addresses(&desktop, &nodes, &interfaces)
+                        .await
+                },
                 move |result| {
                     if let Err(e) = result {
                         tracing::error!("could not restart the desktop: {e}");
+                        // The menu button can be gone by now, because a
+                        // refresh rebuilds the rows.
+                        show_error(
+                            &sidebar.widget,
+                            "The desktop did not restart",
+                            &e.to_string(),
+                        );
                     }
+                    // A recreate gives the desktop a new id.
                     sidebar.refresh();
                 },
             );
@@ -435,7 +491,14 @@ impl Sidebar {
                 async move { podman.desktop_password(&id).await },
                 move |result| match result {
                     Ok(password) => crate::remote::present(&button, &desktop, password),
-                    Err(e) => tracing::error!("could not read the desktop password: {e}"),
+                    Err(e) => {
+                        tracing::error!("could not read the desktop password: {e}");
+                        show_error(
+                            &button,
+                            "Could not read the desktop password",
+                            &e.to_string(),
+                        );
+                    }
                 },
             );
         });
@@ -481,15 +544,31 @@ impl Sidebar {
             }
             let podman = sidebar.podman.clone();
             let id = desktop.id.clone();
+            let name = desktop.name.clone();
             let sidebar = sidebar.clone();
-            // Otherwise a new desktop reusing the name would present a
-            // different certificate and be reported as an interception.
-            crate::pinning::forget(&desktop.name);
             runtime::spawn(
-                async move { podman.remove(&id, true).await },
-                move |result| {
-                    if let Err(e) = result {
-                        tracing::error!("could not delete the desktop: {e}");
+                async move {
+                    let result = podman.delete_desktop(&id, &name).await;
+                    (name, result)
+                },
+                move |(name, result)| {
+                    match result {
+                        // Otherwise a new desktop reusing the name would
+                        // present a different certificate and be reported as
+                        // an interception. Only once the state volume is
+                        // gone, because the old certificate lives there.
+                        Ok(()) => crate::pinning::forget(&name),
+                        Err(e) => {
+                            tracing::error!("could not delete the desktop: {e}");
+                            // The menu button sits in a popover that has
+                            // closed, and the refresh rebuilds the rows, so it
+                            // may have no parent by now.
+                            show_error(
+                                &sidebar.widget,
+                                "The desktop was not deleted",
+                                &e.to_string(),
+                            );
+                        }
                     }
                     sidebar.refresh();
                 },
@@ -506,13 +585,39 @@ impl Sidebar {
         runtime::spawn_stream(
             move |sender| {
                 Box::pin(async move {
-                    let result = podman
-                        .watch_events(|event| {
-                            let _ = sender.try_send(event.action);
-                        })
-                        .await;
-                    if let Err(e) = result {
-                        tracing::warn!("event feed stopped: {e}");
+                    // The feed ends whenever Podman restarts or its socket
+                    // goes away. Without a reconnect, changes made outside
+                    // Cabin, such as a desktop powering off from inside,
+                    // would stop reaching the list. DESIGN.md section 5 rules
+                    // out a polling timer, so the feed is reopened instead.
+                    let mut delay = FEED_RETRY_FIRST;
+                    let mut first = true;
+                    loop {
+                        if !first {
+                            // Changes made during the gap sent no event, so
+                            // ask for one refresh.
+                            let _ = sender.try_send("reconnected".to_string());
+                        }
+                        first = false;
+                        let opened = std::time::Instant::now();
+                        let mut delivered = false;
+                        let result = podman
+                            .watch_events(|event| {
+                                delivered = true;
+                                let _ = sender.try_send(event.action);
+                            })
+                            .await;
+                        match result {
+                            Err(e) => tracing::warn!("event feed stopped: {e}"),
+                            Ok(()) => tracing::info!("event feed closed by Podman, reconnecting"),
+                        }
+                        // The window has gone, so nobody is listening.
+                        if sender.is_closed() {
+                            break;
+                        }
+                        let wait = feed_wait(delay, delivered, opened.elapsed());
+                        tokio::time::sleep(wait).await;
+                        delay = (wait * 2).min(FEED_RETRY_MAX);
                     }
                 })
             },
@@ -521,6 +626,29 @@ impl Sidebar {
                 sidebar.refresh();
             },
         );
+    }
+}
+
+/// The wait before the first attempt to reopen the event feed.
+const FEED_RETRY_FIRST: Duration = Duration::from_secs(1);
+
+/// The longest wait between attempts. Podman can be down for a while, and
+/// a fast loop would only fill the log.
+const FEED_RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// A connection that stayed open this long counts as healthy.
+const FEED_HEALTHY: Duration = Duration::from_secs(5);
+
+/// The wait before the next attempt to reopen the event feed.
+///
+/// `planned` doubles after each failed attempt, up to a limit. A connection
+/// that delivered an event, or that stayed open for a while, worked, so the
+/// wait starts again from the shortest.
+fn feed_wait(planned: Duration, delivered: bool, lasted: Duration) -> Duration {
+    if delivered || lasted >= FEED_HEALTHY {
+        FEED_RETRY_FIRST
+    } else {
+        planned
     }
 }
 
@@ -583,6 +711,22 @@ mod tests {
             config: DesktopConfig::new("test"),
             rdp_port: port,
         }
+    }
+
+    #[test]
+    fn feed_keeps_the_planned_wait_after_a_failed_connection() {
+        let planned = Duration::from_secs(8);
+        assert_eq!(
+            feed_wait(planned, false, Duration::from_millis(10)),
+            planned
+        );
+    }
+
+    #[test]
+    fn feed_wait_starts_again_after_a_connection_that_worked() {
+        let planned = Duration::from_secs(16);
+        assert_eq!(feed_wait(planned, true, Duration::ZERO), FEED_RETRY_FIRST);
+        assert_eq!(feed_wait(planned, false, FEED_HEALTHY), FEED_RETRY_FIRST);
     }
 
     #[test]
