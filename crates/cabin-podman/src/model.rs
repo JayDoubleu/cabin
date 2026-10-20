@@ -101,6 +101,10 @@ pub struct CreateContainer {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_limits: Option<ResourceLimits>,
     pub stop_signal: i32,
+    /// "local" gives the guest the time zone of the host, which Podman reads
+    /// on the host. Without it the guest runs in UTC, and its clock and every
+    /// file time show a different hour from the host.
+    pub timezone: String,
 }
 
 /// The annotation Podman reads the container's SELinux label back from.

@@ -245,6 +245,7 @@ impl Podman {
             )]),
             resource_limits,
             stop_signal: SIGRTMIN_3,
+            timezone: "local".to_string(),
         };
 
         let body = serde_json::to_vec(&request)?;

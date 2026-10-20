@@ -14,6 +14,25 @@
 
 use cabin_core::{DesktopConfig, GraphicsMode, Mount, MountMode, State};
 use cabin_podman::Podman;
+use std::process::Command;
+
+/// Runs a command on the host and returns what it printed.
+///
+/// Inside a Fedora toolbox the bare `podman` binary is the container's own,
+/// with its own storage, and it cannot join the host user namespace. The
+/// desktops live on the host, so the command has to go there.
+fn on_host(args: &[&str]) -> String {
+    let output = if std::path::Path::new("/run/.toolboxenv").exists() {
+        Command::new("flatpak-spawn")
+            .arg("--host")
+            .args(args)
+            .output()
+    } else {
+        Command::new(args[0]).args(&args[1..]).output()
+    }
+    .expect("could not run the command on the host");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
 
 const TEST_NAME: &str = "cabin-integration-test";
 const TEST_PORT: u16 = 13999;
@@ -77,6 +96,20 @@ async fn create_list_start_stop_remove() {
         running.rdp_port,
         Some(TEST_PORT),
         "the RDP port mapping should be reported"
+    );
+    // The viewer compares this to see a restart that a batch of events hid.
+    assert!(
+        running.started_at > 0,
+        "started_at was {}",
+        running.started_at
+    );
+
+    // A guest in UTC shows a different hour from the host on its clock.
+    let guest_zone = on_host(&["podman", "exec", TEST_NAME, "date", "+%z"]);
+    let host_zone = on_host(&["date", "+%z"]);
+    assert_eq!(
+        guest_zone, host_zone,
+        "the guest must use the time zone of the host"
     );
 
     podman.stop(&id, 20).await.expect("stop should succeed");
