@@ -444,6 +444,7 @@ mod tests {
             created: 0,
             is_guest: guest,
             dangling: false,
+            in_use: false,
         }
     }
 
