@@ -1,6 +1,9 @@
 //! Exercises image management against the real Podman socket.
 //!
-//!     cargo test -p cabin-podman --test live_images -- --ignored --nocapture
+//!     just guest-image-live
+//!
+//! This rebuilds the guest image, which takes several minutes, so
+//! `just podman-live` leaves it out.
 
 use cabin_podman::{images::build_context, Podman};
 

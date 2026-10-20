@@ -1,6 +1,9 @@
 //! Proves that reconfiguring a desktop keeps the user's home directory.
 //!
-//!     cargo test -p cabin-podman --test live_recreate -- --ignored --nocapture
+//!     just podman-live
+//!
+//! The recipe runs each live Podman test file in turn, because they share
+//! the host Podman and the guest image.
 
 use cabin_core::{Desktop, DesktopConfig, Exposure, GraphicsMode, NetInterface};
 use cabin_podman::Podman;

@@ -1,6 +1,9 @@
 //! Proves a desktop boots able to draw icons and to list its applications.
 //!
-//!     cargo test -p cabin-podman --test live_session_health -- --ignored --nocapture
+//!     just podman-live
+//!
+//! The recipe runs each live Podman test file in turn, because they share
+//! the host Podman and the guest image.
 //!
 //! Both faults this guards against look identical from outside: the desktop
 //! starts, accepts a connection, and shows a session that is missing something

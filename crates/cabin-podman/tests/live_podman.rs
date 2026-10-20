@@ -3,7 +3,11 @@
 //! These are ignored by default, because they need a running
 //! podman.socket and the cabin-guest image. Run them with:
 //!
-//!     cargo test -p cabin-podman -- --ignored --test-threads=1
+//!     just podman-live
+//!
+//! Do not run every ignored test in this crate at once. That also runs
+//! `make_demo`, which replaces any container called `demo`, and
+//! `live_images`, which rebuilds the guest image.
 //!
 //! Every test cleans up after itself, and uses a name that no real desktop
 //! would use.

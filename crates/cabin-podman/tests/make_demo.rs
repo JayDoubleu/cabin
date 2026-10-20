@@ -1,6 +1,7 @@
 //! Not a test. A helper that leaves a demo desktop behind so the application
-//! has something to list. Run with:
-//!     cargo test -p cabin-podman --test make_demo -- --ignored
+//! has something to list. It replaces any container called `demo`. Run with:
+//!
+//!     just demo
 use cabin_core::{DesktopConfig, GraphicsMode};
 use cabin_podman::Podman;
 

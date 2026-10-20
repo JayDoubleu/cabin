@@ -1,7 +1,10 @@
 //! Proves that deleting a desktop removes its files, and that only deleting
 //! does.
 //!
-//!     cargo test -p cabin-podman --test live_delete -- --ignored --nocapture
+//!     just podman-live
+//!
+//! The recipe runs each live Podman test file in turn, because they share
+//! the host Podman and the guest image.
 //!
 //! The home and state volumes are named after the desktop. If a delete left
 //! them, a new desktop with the same name would silently take over the old

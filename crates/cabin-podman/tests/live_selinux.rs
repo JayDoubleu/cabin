@@ -1,6 +1,9 @@
 //! Proves a desktop is created with the SELinux label it needs.
 //!
-//!     cargo test -p cabin-podman --test live_selinux -- --ignored --nocapture
+//!     just podman-live
+//!
+//! The recipe runs each live Podman test file in turn, because they share
+//! the host Podman and the guest image.
 //!
 //! The default type cannot mount the devpts that Fedora's image decoder
 //! sandbox needs, and a desktop with the wrong label starts, connects, and
