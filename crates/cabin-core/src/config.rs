@@ -59,9 +59,12 @@ pub enum Exposure {
     /// Only the named interfaces.
     ///
     /// Interface names are stored rather than addresses, because an address
-    /// changes whenever the network does. A stored address would leave the
-    /// desktop unable to start after a DHCP lease changed, and the reason
-    /// would not be obvious.
+    /// changes whenever the network does. Podman fixes the bound addresses
+    /// when it creates the container, so Cabin resolves the names when it
+    /// creates the container and again before each start, and recreates the
+    /// container when the addresses differ. See [`Exposure::needs_rebind`].
+    /// A stored address would leave the desktop unable to start after a DHCP
+    /// lease changed, and the reason would not be obvious.
     Interfaces { names: Vec<String> },
 }
 
@@ -93,6 +96,24 @@ impl Exposure {
                 addresses
             }
         }
+    }
+
+    /// True when the container must be recreated before it starts, because
+    /// the addresses it binds are no longer the ones the chosen interfaces
+    /// hold.
+    ///
+    /// `bound` is the host addresses of the container's current port
+    /// mappings. Podman binds those exact addresses at every start, so an
+    /// address that has gone makes the start fail. Loopback and Everywhere
+    /// bind fixed addresses and never need this.
+    pub fn needs_rebind(&self, bound: &[String], available: &[NetInterface]) -> bool {
+        if !matches!(self, Self::Interfaces { .. }) {
+            return false;
+        }
+        use std::collections::BTreeSet;
+        let wanted: BTreeSet<String> = self.bind_addresses(available).into_iter().collect();
+        let current: BTreeSet<String> = bound.iter().cloned().collect();
+        wanted != current
     }
 
     /// True when something other than this computer can connect.
@@ -290,6 +311,9 @@ fn default_height() -> u32 {
     1080
 }
 
+/// The ending a recreate gives the old container while it makes the new one.
+pub const OLD_CONTAINER_SUFFIX: &str = "-cabin-old";
+
 /// Whether a desktop name can be used.
 ///
 /// The name is not only a label. Podman uses it as the container name and
@@ -319,6 +343,14 @@ pub fn check_name(name: &str, taken: &[String]) -> Result<(), String> {
             return Err("The name cannot contain spaces.".to_string());
         }
         return Err(format!("The name cannot contain '{bad}'."));
+    }
+    // A recreate parks the old container under this ending. A desktop with
+    // such a name looks like another desktop's leftover to a recreate.
+    if name.ends_with(OLD_CONTAINER_SUFFIX) {
+        return Err(format!(
+            "The name cannot end in {OLD_CONTAINER_SUFFIX}, because Cabin uses \
+             that ending while it changes the settings of a desktop."
+        ));
     }
     if taken.iter().any(|t| t.eq_ignore_ascii_case(name)) {
         return Err(format!("A desktop called {name} already exists."));
@@ -354,6 +386,30 @@ impl DesktopConfig {
         }
         self.legacy_expose_on_lan = false;
         self
+    }
+
+    /// Checks every shared folder against the others and against the host
+    /// socket, as well as on its own.
+    ///
+    /// Podman refuses a create request with two mounts on one destination.
+    /// Checking the whole set here means a recreate can refuse the settings
+    /// before it touches the container. It also covers a socket policy that
+    /// changed after the shares were set.
+    pub fn check_mounts(&self) -> Result<(), String> {
+        let socket = self.socket.guest_socket_path();
+        for (index, mount) in self.mounts.iter().enumerate() {
+            let others: Vec<&str> = self
+                .mounts
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+                .map(|(_, m)| m.guest_path.as_str())
+                .chain(socket)
+                .collect();
+            Mount::check_guest_path_among(&mount.guest_path, &others)
+                .map_err(|reason| format!("{}: {reason}", mount.guest_path.trim()))?;
+        }
+        Ok(())
     }
 
     /// Changing any of these needs the container to be recreated.
@@ -497,6 +553,12 @@ mod tests {
     }
 
     #[test]
+    fn rejects_the_ending_a_recreate_uses() {
+        assert!(check_name("work-cabin-old", &[]).is_err());
+        assert!(check_name("work-cabin-older", &[]).is_ok());
+    }
+
+    #[test]
     fn rejects_a_name_already_in_use() {
         let taken = vec!["fedora".to_string()];
         assert!(check_name("fedora", &taken).is_err());
@@ -561,6 +623,98 @@ mod tests {
             e.bind_addresses(&wifi()),
             vec!["127.0.0.1", "192.168.1.24", "fd00::24"]
         );
+    }
+
+    #[test]
+    fn fixed_exposures_never_need_a_rebind() {
+        let bound = vec!["192.0.2.9".to_string()];
+        assert!(!Exposure::Loopback.needs_rebind(&bound, &wifi()));
+        assert!(!Exposure::Everywhere.needs_rebind(&bound, &wifi()));
+    }
+
+    #[test]
+    fn unchanged_addresses_need_no_rebind() {
+        let e = Exposure::Interfaces {
+            names: vec!["wlp3s0".into()],
+        };
+        // Order does not matter. Podman reports the mappings in its own order.
+        let bound = vec![
+            "fd00::24".to_string(),
+            "127.0.0.1".to_string(),
+            "192.168.1.24".to_string(),
+        ];
+        assert!(!e.needs_rebind(&bound, &wifi()));
+    }
+
+    #[test]
+    fn a_changed_address_needs_a_rebind() {
+        // The lease changed, so the old address is gone from the host and a
+        // start would fail to bind it.
+        let e = Exposure::Interfaces {
+            names: vec!["wlp3s0".into()],
+        };
+        let bound = vec![
+            "127.0.0.1".to_string(),
+            "192.168.1.7".to_string(),
+            "fd00::24".to_string(),
+        ];
+        assert!(e.needs_rebind(&bound, &wifi()));
+    }
+
+    #[test]
+    fn a_new_address_needs_a_rebind() {
+        // Without a recreate the desktop would stay unreachable on the
+        // network the user chose.
+        let e = Exposure::Interfaces {
+            names: vec!["wlp3s0".into()],
+        };
+        assert!(e.needs_rebind(&["127.0.0.1".to_string()], &wifi()));
+    }
+
+    fn share(guest: &str) -> Mount {
+        Mount {
+            host_path: "/data".into(),
+            guest_path: guest.into(),
+            mode: crate::mount::MountMode::ReadOnly,
+            relabel: true,
+            kind: crate::mount::MountKind::Directory,
+        }
+    }
+
+    #[test]
+    fn two_shares_on_one_location_are_refused() {
+        let mut c = DesktopConfig::new("test");
+        c.mounts.push(share("/mnt/data"));
+        c.mounts.push(share("/mnt/data/"));
+        assert!(c.check_mounts().is_err());
+    }
+
+    #[test]
+    fn distinct_shares_are_accepted() {
+        let mut c = DesktopConfig::new("test");
+        c.mounts.push(share("/mnt/data"));
+        c.mounts.push(share("/home/cabin/work"));
+        assert!(c.check_mounts().is_ok());
+    }
+
+    #[test]
+    fn a_share_on_the_socket_location_is_refused() {
+        let mut c = DesktopConfig::new("test");
+        c.mounts.push(share(GUEST_HOST_SOCKET));
+        // Refused with no socket as well, so that turning the socket on
+        // later cannot make a saved configuration fail to create.
+        assert!(c.check_mounts().is_err());
+        c.socket = SocketPolicy::HostPodman;
+        assert!(c.check_mounts().is_err());
+    }
+
+    #[test]
+    fn a_share_on_a_volume_is_refused() {
+        let mut c = DesktopConfig::new("test");
+        c.mounts.push(share("/var/lib/cabin"));
+        assert!(c.check_mounts().is_err());
+        c.mounts[0] = share("/home/cabin");
+        assert!(c.check_mounts().is_err());
     }
 
     #[test]

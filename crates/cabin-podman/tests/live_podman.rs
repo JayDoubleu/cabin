@@ -16,7 +16,9 @@ const TEST_PORT: u16 = 13999;
 
 async fn cleanup(podman: &Podman) {
     // force, because the container may be running from a failed earlier run.
-    let _ = podman.remove(TEST_NAME, true).await;
+    // delete_desktop also takes the named volumes, which a bare remove
+    // leaves behind on every run.
+    let _ = podman.delete_desktop(TEST_NAME, TEST_NAME).await;
 }
 
 fn test_config() -> DesktopConfig {
@@ -84,6 +86,8 @@ async fn create_list_start_stop_remove() {
         !desktops.iter().any(|d| d.config.name == TEST_NAME),
         "the desktop should be gone after removal"
     );
+    // The bare remove keeps the named volumes, as a recreate needs.
+    cleanup(&podman).await;
 }
 
 #[tokio::test]
@@ -121,9 +125,9 @@ async fn mounts_and_config_survive_a_round_trip() {
     assert_eq!(found.config.height, 1440);
 
     podman
-        .remove(&id, true)
+        .delete_desktop(&id, TEST_NAME)
         .await
-        .expect("remove should succeed");
+        .expect("delete should succeed");
 }
 
 #[tokio::test]

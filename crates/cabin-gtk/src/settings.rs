@@ -24,8 +24,153 @@ const FILE_SHARE_WARNING: &str =
      change it, and the desktop keeps seeing the original. Share the folder \
      instead if you plan to edit it.";
 
-/// How long to let a guest shut down before Podman kills it.
-const STOP_TIMEOUT_SECS: u32 = 20;
+/// What the relabel switch does. Podman's "z" option changes the SELinux
+/// label of the copy on this computer, and the change stays after the
+/// desktop is deleted.
+const RELABEL_SUBTITLE: &str =
+    "Changes the SELinux label on this computer's copy, and the change stays \
+     after the desktop is gone. Fedora needs this. Do not use it on folders \
+     that other services read, such as .ssh.";
+
+/// Folders, relative to the home directory, that other programs read and
+/// that a changed SELinux label can break.
+const SENSITIVE_FOLDERS: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".config",
+    ".local/share/keyrings",
+    "public_html",
+];
+
+/// True when `host_path` is one of the sensitive folders, is inside one, or
+/// holds one below the home directory.
+///
+/// The relabel is recursive, so sharing `~/.local` relabels
+/// `~/.local/share/keyrings` too. Podman refuses the home directory itself,
+/// but not the folders between it and a sensitive one.
+fn is_sensitive_location(host_path: &str, home: &std::path::Path) -> bool {
+    let path = std::path::Path::new(host_path);
+    SENSITIVE_FOLDERS.iter().any(|folder| {
+        let sensitive = home.join(folder);
+        path.starts_with(&sensitive)
+            || (sensitive.starts_with(path) && path.starts_with(home) && path != home)
+    })
+}
+
+/// What the dialogue says when the portal gives no real path.
+const UNRESOLVED_SHARE: &str =
+    "This location cannot be shared because the system did not give its real path.";
+
+/// The places where the document portal shows files to a sandboxed
+/// application.
+fn document_roots() -> Vec<std::path::PathBuf> {
+    vec![
+        gtk::glib::user_runtime_dir().join("doc"),
+        std::path::PathBuf::from("/run/flatpak/doc"),
+    ]
+}
+
+/// Splits a document portal path into the document id and the components
+/// below the document itself.
+///
+/// The portal shows a document at `<root>/<id>/<name>`, where `<name>` is
+/// the last component of the real path. A chosen folder can then have more
+/// components below that. Returns `None` for a path outside every root.
+fn split_document_path(
+    path: &std::path::Path,
+    roots: &[std::path::PathBuf],
+) -> Option<(String, Vec<String>)> {
+    let below = roots.iter().find_map(|root| path.strip_prefix(root).ok())?;
+    let mut components = below
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned());
+    let id = components.next()?;
+    // The document's own name. The real path already ends with it.
+    let _name = components.next();
+    Some((id, components.collect()))
+}
+
+/// The real path of a document, with the components below it added.
+fn join_host_path(document: &str, rest: &[String]) -> String {
+    let mut path = std::path::PathBuf::from(document);
+    for component in rest {
+        path.push(component);
+    }
+    path.to_string_lossy().into_owned()
+}
+
+/// Asks the document portal for the real path of one document.
+///
+/// `GetHostPaths` answers only for documents this application can already
+/// see, so it gives Cabin nothing new. Podman runs on the host and needs
+/// the real path, because the portal's FUSE mount refuses every user but
+/// this one, and the desktop's user is a different one.
+async fn document_host_path(id: &str) -> Option<String> {
+    use gtk::gio;
+    use gtk::glib::variant::ToVariant;
+    let bus = gio::bus_get_future(gio::BusType::Session).await.ok()?;
+    let reply = bus
+        .call_future(
+            Some("org.freedesktop.portal.Documents"),
+            "/org/freedesktop/portal/documents",
+            "org.freedesktop.portal.Documents",
+            "GetHostPaths",
+            Some(&(vec![id.to_string()],).to_variant()),
+            Some(gtk::glib::VariantTy::new("(a{say})").ok()?),
+            gio::DBusCallFlags::NONE,
+            5000,
+        )
+        .await
+        .ok()?;
+    let (paths,): (std::collections::HashMap<String, Vec<u8>>,) = reply.get()?;
+    let mut bytes = paths.get(id)?.clone();
+    // A GLib byte string ends with a NUL.
+    while bytes.last() == Some(&0) {
+        bytes.pop();
+    }
+    let path = String::from_utf8(bytes).ok()?;
+    (!path.is_empty()).then_some(path)
+}
+
+/// The real path on this computer of a file the chooser returned.
+///
+/// In the Flatpak the chooser returns a document portal path. Host Podman
+/// cannot give that to the desktop: the portal's FUSE mount refuses every
+/// user except this one. So the path is turned back into the real one, and
+/// a path that cannot be turned back is refused, never used as it is.
+/// Widening the sandbox instead is ruled out by CLAUDE.md rule 6.
+async fn host_path_for(file: gtk::gio::File) -> Result<String, &'static str> {
+    let Some(path) = file.path() else {
+        return Err(UNRESOLVED_SHARE);
+    };
+    let Some((id, rest)) = split_document_path(&path, &document_roots()) else {
+        return Ok(path.to_string_lossy().into_owned());
+    };
+    if let Some(document) = document_host_path(&id).await {
+        return Ok(join_host_path(&document, &rest));
+    }
+    // Older portals have no GetHostPaths, but put the real path in an
+    // extended attribute on each file.
+    const ATTRIBUTE: &str = "xattr::document-portal.host-path";
+    let info = file
+        .query_info_future(
+            ATTRIBUTE,
+            gtk::gio::FileQueryInfoFlags::NONE,
+            gtk::glib::Priority::DEFAULT,
+        )
+        .await
+        .map_err(|_| UNRESOLVED_SHARE)?;
+    match info.attribute_string(ATTRIBUTE) {
+        Some(real) if real.starts_with('/') => Ok(real.to_string()),
+        _ => Err(UNRESOLVED_SHARE),
+    }
+}
+
+/// True for a stored share that points into the document portal. An older
+/// build stored such paths, and the desktop's user cannot read them.
+fn is_portal_path(host_path: &str) -> bool {
+    split_document_path(std::path::Path::new(host_path), &document_roots()).is_some()
+}
 
 /// The socket options, in the order they appear, safest first.
 ///
@@ -64,13 +209,6 @@ pub fn present(
         .title(format!("{} Settings", desktop.name))
         .build();
 
-    let page = adw::PreferencesPage::new();
-    page.add(&build_mounts_group(parent, config.clone()));
-    page.add(&build_graphics_group(config.clone()));
-    page.add(&build_socket_group(parent, config.clone()));
-    page.add(&build_remote_group(parent, config.clone()));
-    dialog.add(&page);
-
     // Everything in this dialogue needs the container recreated, so applying
     // is an explicit action rather than something that happens as each row
     // changes. Two actions, because applying and running are separate
@@ -104,6 +242,39 @@ pub fn present(
     buttons.append(&apply);
     buttons.append(&apply_and_run);
 
+    // Says why Apply is off. Podman refuses a configuration with two shares
+    // on one location, and the refusal would come only after the click.
+    let problem = gtk::Label::builder()
+        .wrap(true)
+        .justify(gtk::Justification::Center)
+        .css_classes(vec!["error"])
+        .margin_top(12)
+        .visible(false)
+        .build();
+    let validity = Rc::new(Validity {
+        config: config.clone(),
+        invalid_rows: RefCell::new(std::collections::BTreeSet::new()),
+        entries: RefCell::new(Vec::new()),
+        buttons: vec![apply.clone(), apply_and_run.clone()],
+        problem: problem.clone(),
+    });
+
+    let page = adw::PreferencesPage::new();
+    page.add(&build_mounts_group(
+        parent,
+        config.clone(),
+        validity.clone(),
+    ));
+    page.add(&build_graphics_group(config.clone()));
+    page.add(&build_socket_group(
+        parent,
+        config.clone(),
+        validity.clone(),
+    ));
+    page.add(&build_remote_group(parent, config.clone()));
+    dialog.add(&page);
+    validity.update();
+
     let group = adw::PreferencesGroup::builder()
         .description(if running {
             // Say it plainly. Podman fixes a container's configuration when it
@@ -116,6 +287,7 @@ pub fn present(
         })
         .build();
     group.add(&buttons);
+    group.add(&problem);
     page.add(&group);
 
     for (button, start_after) in [(&apply, false), (&apply_and_run, true)] {
@@ -156,18 +328,99 @@ pub fn present(
     dialog.present(Some(parent));
 }
 
+/// Whether the Apply buttons can be used, and why not.
+///
+/// The settings change one at a time, and some faults only show in the whole
+/// set: two shares on one location, or a share on the location that a newly
+/// chosen socket takes. So the whole set is checked again after each change.
+struct Validity {
+    config: Rc<RefCell<DesktopConfig>>,
+    /// Share rows whose typed location cannot be used. Such a row keeps the
+    /// last good location in the configuration, so Apply would silently use
+    /// a location the user can no longer see.
+    invalid_rows: RefCell<std::collections::BTreeSet<usize>>,
+    /// The location entry of each share row. A row is checked against the
+    /// other rows, so a change to one row can make another valid. The
+    /// references are weak, because each entry's handler holds this.
+    entries: RefCell<Vec<(usize, gtk::glib::WeakRef<adw::EntryRow>)>>,
+    buttons: Vec<gtk::Button>,
+    problem: gtk::Label,
+}
+
+impl Validity {
+    fn update(&self) {
+        let problem = if self.invalid_rows.borrow().is_empty() {
+            self.config.borrow().check_mounts().err()
+        } else {
+            Some("A shared item has a location that cannot be used.".to_string())
+        };
+        for button in &self.buttons {
+            button.set_sensitive(problem.is_none());
+        }
+        self.problem.set_visible(problem.is_some());
+        self.problem.set_text(problem.as_deref().unwrap_or(""));
+    }
+
+    /// Records whether the share row at `index` holds a usable location.
+    fn set_row(&self, index: usize, valid: bool) {
+        if valid {
+            self.invalid_rows.borrow_mut().remove(&index);
+        } else {
+            self.invalid_rows.borrow_mut().insert(index);
+        }
+        self.update();
+    }
+
+    /// Forgets every row, because the rows are about to be built again.
+    fn clear_rows(&self) {
+        self.invalid_rows.borrow_mut().clear();
+        self.entries.borrow_mut().clear();
+    }
+
+    fn add_entry(&self, index: usize, entry: &adw::EntryRow) {
+        self.entries.borrow_mut().push((index, entry.downgrade()));
+    }
+
+    /// Checks again every invalid row other than `index`, after the row at
+    /// `index` stored a new location.
+    ///
+    /// Without this, a row that clashed with the old location keeps its
+    /// error, and Apply stays off, until the user types in it again.
+    fn recheck_others(&self, index: usize) {
+        let stale: Vec<adw::EntryRow> = {
+            let invalid = self.invalid_rows.borrow();
+            self.entries
+                .borrow()
+                .iter()
+                .filter(|(row, _)| *row != index && invalid.contains(row))
+                .filter_map(|(_, entry)| entry.upgrade())
+                .collect()
+        };
+        // The borrows end first, because each check records its result here.
+        for entry in stale {
+            entry.emit_by_name::<()>("changed", &[]);
+        }
+    }
+}
+
 /// Starts or restarts a desktop whose settings did not change.
 fn run_only(parent: &gtk::Widget, podman: Arc<Podman>, desktop: Desktop, on_applied: Rc<dyn Fn()>) {
     let parent = parent.clone();
-    let id = desktop.id.clone();
-    let name = desktop.name.clone();
     let running = desktop.state.is_running();
+    // The chosen networks resolve to addresses again, because those can
+    // have changed since the container was made (rule 40).
+    let nodes = graphics::render_nodes();
+    let interfaces = crate::network::interfaces();
     runtime::spawn(
         async move {
             if running {
-                podman.restart(&id, STOP_TIMEOUT_SECS).await
+                podman
+                    .restart_with_current_addresses(&desktop, &nodes, &interfaces)
+                    .await
             } else {
-                podman.start_desktop(&id, &name).await
+                podman
+                    .start_with_current_addresses(&desktop, &nodes, &interfaces)
+                    .await
             }
         },
         move |result| {
@@ -187,6 +440,7 @@ fn run_only(parent: &gtk::Widget, podman: Arc<Podman>, desktop: Desktop, on_appl
 fn build_mounts_group(
     parent: &impl IsA<gtk::Widget>,
     config: Rc<RefCell<DesktopConfig>>,
+    validity: Rc<Validity>,
 ) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("Shared Files and Folders")
@@ -204,7 +458,7 @@ fn build_mounts_group(
     let rebuild = {
         let list = list.clone();
         let config = config.clone();
-        Rc::new(move || refresh_mount_rows(&list, config.clone()))
+        Rc::new(move || refresh_mount_rows(&list, config.clone(), validity.clone()))
     };
     rebuild();
 
@@ -263,22 +517,37 @@ fn add_button(
         let parent_for_options = parent_widget.clone();
         let chosen = move |result: Result<gtk::gio::File, gtk::glib::Error>| {
             let Ok(file) = result else { return };
-            let Some(path) = file.path() else { return };
-            let host_path = path.to_string_lossy().into_owned();
-            // Ask for the options now rather than adding a share with
-            // defaults the user then has to go and find.
-            present_mount_options(
-                &parent_for_options,
-                Mount {
-                    guest_path: Mount::suggest_guest_path(&host_path),
-                    host_path,
-                    mode: MountMode::ReadOnly,
-                    relabel: true,
-                    kind,
-                },
-                config.clone(),
-                rebuild.clone(),
-            );
+            let parent = parent_for_options.clone();
+            let config = config.clone();
+            let rebuild = rebuild.clone();
+            gtk::glib::spawn_future_local(async move {
+                let host_path = match host_path_for(file).await {
+                    Ok(path) => path,
+                    Err(why) => {
+                        let error = adw::AlertDialog::builder()
+                            .heading("Could not share this")
+                            .body(why)
+                            .build();
+                        error.add_response("close", "Close");
+                        error.present(Some(&parent));
+                        return;
+                    }
+                };
+                // Ask for the options now rather than adding a share with
+                // defaults the user then has to go and find.
+                present_mount_options(
+                    &parent,
+                    Mount {
+                        guest_path: Mount::suggest_guest_path(&host_path),
+                        host_path,
+                        mode: MountMode::ReadOnly,
+                        relabel: true,
+                        kind,
+                    },
+                    config,
+                    rebuild,
+                );
+            });
         };
 
         match kind {
@@ -325,12 +594,35 @@ fn present_mount_options(
         .build();
     group.add(&writable);
 
+    // Podman's "z" option relabels the copy on this computer, recursively,
+    // and nothing undoes it when the desktop goes. Say so where the choice
+    // is made.
     let relabel = adw::SwitchRow::builder()
         .title("Adjust security labels")
-        .subtitle("Fedora needs this. Turn it off only for a path already shared with containers.")
+        .subtitle(RELABEL_SUBTITLE)
         .active(mount.relabel)
         .build();
+    relabel.set_subtitle_lines(0);
     group.add(&relabel);
+
+    // A warning, not a block: the user may accept the risk. Other programs
+    // can stop reading these folders once their label changes.
+    if is_sensitive_location(&mount.host_path, &gtk::glib::home_dir()) {
+        let note = adw::ActionRow::builder()
+            .title("Other programs read this folder")
+            .subtitle(
+                "Changing its security label can stop them working. Turn off \
+                 Adjust security labels, or share a different folder.",
+            )
+            .css_classes(vec!["warning"])
+            .build();
+        note.set_subtitle_lines(0);
+        relabel
+            .bind_property("active", &note, "visible")
+            .sync_create()
+            .build();
+        group.add(&note);
+    }
 
     if mount.kind == MountKind::File {
         let note = adw::ActionRow::builder()
@@ -351,9 +643,20 @@ fn present_mount_options(
 
     // The location has to be usable before the share can be added, and an
     // AlertDialog closes on any response, so it is checked as it is typed.
+    // The other shares count too: Podman refuses two mounts on one location.
+    let others: Vec<String> = config
+        .borrow()
+        .mounts
+        .iter()
+        .map(|m| m.guest_path.clone())
+        .collect();
     let dialog_for_check = dialog.clone();
     let group_for_check = group.clone();
-    let check = move |entry: &adw::EntryRow| match Mount::check_guest_path(&entry.text()) {
+    let check = move |entry: &adw::EntryRow| {
+        let others: Vec<&str> = others.iter().map(String::as_str).collect();
+        Mount::check_guest_path_among(&entry.text(), &others)
+    };
+    let check = move |entry: &adw::EntryRow| match check(entry) {
         Ok(()) => {
             entry.remove_css_class("error");
             group_for_check.set_description(None);
@@ -387,10 +690,17 @@ fn present_mount_options(
     dialog.present(Some(parent));
 }
 
-fn refresh_mount_rows(list: &gtk::ListBox, config: Rc<RefCell<DesktopConfig>>) {
+fn refresh_mount_rows(
+    list: &gtk::ListBox,
+    config: Rc<RefCell<DesktopConfig>>,
+    validity: Rc<Validity>,
+) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
+    // Every row starts from a location that was valid when it was stored.
+    validity.clear_rows();
+    validity.update();
 
     if config.borrow().mounts.is_empty() {
         let empty = adw::ActionRow::builder()
@@ -404,7 +714,13 @@ fn refresh_mount_rows(list: &gtk::ListBox, config: Rc<RefCell<DesktopConfig>>) {
     let count = config.borrow().mounts.len();
     for index in 0..count {
         let mount = config.borrow().mounts[index].clone();
-        list.append(&build_mount_row(index, &mount, config.clone(), list));
+        list.append(&build_mount_row(
+            index,
+            &mount,
+            config.clone(),
+            list,
+            validity.clone(),
+        ));
     }
 }
 
@@ -418,6 +734,7 @@ fn build_mount_row(
     mount: &Mount,
     config: Rc<RefCell<DesktopConfig>>,
     list: &gtk::ListBox,
+    validity: Rc<Validity>,
 ) -> adw::ExpanderRow {
     let row = adw::ExpanderRow::builder()
         .title(&mount.host_path)
@@ -439,9 +756,14 @@ fn build_mount_row(
         .build();
     let config_for_remove = config.clone();
     let list_for_remove = list.clone();
+    let validity_for_remove = validity.clone();
     remove.connect_clicked(move |_| {
         config_for_remove.borrow_mut().mounts.remove(index);
-        refresh_mount_rows(&list_for_remove, config_for_remove.clone());
+        refresh_mount_rows(
+            &list_for_remove,
+            config_for_remove.clone(),
+            validity_for_remove.clone(),
+        );
     });
     row.add_suffix(&remove);
 
@@ -454,9 +776,21 @@ fn build_mount_row(
     // when what is typed is not one.
     let config_for_location = config.clone();
     let row_for_location = row.clone();
+    validity.add_entry(index, &location);
     location.connect_changed(move |entry| {
         let typed = entry.text().to_string();
-        match Mount::check_guest_path(&typed) {
+        // Compared with every other share, because Podman refuses two
+        // mounts on one location, and only after the dialogue has closed.
+        let others: Vec<String> = config_for_location
+            .borrow()
+            .mounts
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .map(|(_, m)| m.guest_path.clone())
+            .collect();
+        let others: Vec<&str> = others.iter().map(String::as_str).collect();
+        match Mount::check_guest_path_among(&typed, &others) {
             Ok(()) => {
                 entry.remove_css_class("error");
                 entry.set_tooltip_text(None);
@@ -464,11 +798,14 @@ fn build_mount_row(
                     m.guest_path = typed.trim().to_string();
                 }
                 row_for_location.set_subtitle(&format!("Appears at {}", entry.text()));
+                validity.set_row(index, true);
+                validity.recheck_others(index);
             }
             Err(why) => {
                 entry.add_css_class("error");
                 entry.set_tooltip_text(Some(why));
                 row_for_location.set_subtitle(why);
+                validity.set_row(index, false);
             }
         }
     });
@@ -504,29 +841,39 @@ fn build_mount_row(
         row.add_row(&note);
     }
 
+    if is_portal_path(&mount.host_path) {
+        // An older build stored the portal's path. The desktop's user cannot
+        // read it, and nothing else says why the share is empty.
+        let note = adw::ActionRow::builder()
+            .title("The desktop cannot read this")
+            .subtitle(
+                "This is a temporary path from the file chooser, not the real \
+                 location. Remove it and share the item again.",
+            )
+            .css_classes(vec!["warning"])
+            .build();
+        note.set_subtitle_lines(0);
+        row.add_row(&note);
+    }
+
     row
 }
 
 fn build_graphics_group(config: Rc<RefCell<DesktopConfig>>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Graphics").build();
 
+    // The driver comes from sysfs, through render_nodes, never from the
+    // node number (rule 2).
     let nodes = graphics::render_nodes();
-    let mut labels: Vec<String> = vec!["Automatic".into(), "Software rendering".into()];
-    for (path, driver) in &nodes {
-        let leaf = path.rsplit('/').next().unwrap_or(path.as_str());
-        labels.push(format!("{leaf} ({driver})"));
-    }
-    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-
-    let selected = match &config.borrow().graphics {
-        GraphicsMode::Automatic => 0,
-        GraphicsMode::Software => 1,
-        GraphicsMode::RenderNode { path } => nodes
-            .iter()
-            .position(|(p, _)| p == path)
-            .map(|i| i as u32 + 2)
-            .unwrap_or(0),
-    };
+    let stored = config.borrow().graphics.clone();
+    let choices = graphics_choices(&nodes, &stored);
+    let refs: Vec<&str> = choices.iter().map(|(label, _)| label.as_str()).collect();
+    let selected = choices
+        .iter()
+        .position(|(_, mode)| *mode == stored)
+        .unwrap_or(0) as u32;
+    let missing = matches!(&stored, GraphicsMode::RenderNode { path }
+        if !nodes.iter().any(|(p, _)| p == path));
 
     let row = adw::ComboRow::builder()
         .title("Renderer")
@@ -534,24 +881,67 @@ fn build_graphics_group(config: Rc<RefCell<DesktopConfig>>) -> adw::PreferencesG
         .model(&gtk::StringList::new(&refs))
         .selected(selected)
         .build();
+    // The entries carry device paths and driver names, which are data.
+    row.set_use_markup(false);
 
+    // A stored device that has gone stays selected and says so. Showing
+    // Automatic instead would keep the old path in the configuration with
+    // nothing on screen to say it is there.
+    let warning = adw::ActionRow::builder()
+        .title("This graphics device is not found")
+        .subtitle("The desktop cannot start until you choose another renderer.")
+        .css_classes(vec!["warning"])
+        .visible(missing)
+        .build();
+    warning.set_subtitle_lines(0);
+
+    let modes: Vec<GraphicsMode> = choices.into_iter().map(|(_, mode)| mode).collect();
+    let warning_for_row = warning.clone();
     row.connect_selected_notify(move |row| {
-        config.borrow_mut().graphics = match row.selected() {
-            0 => GraphicsMode::Automatic,
-            1 => GraphicsMode::Software,
-            n => GraphicsMode::RenderNode {
-                path: nodes[(n - 2) as usize].0.clone(),
-            },
+        let Some(mode) = modes.get(row.selected() as usize) else {
+            return;
         };
+        warning_for_row.set_visible(*mode == stored && missing);
+        config.borrow_mut().graphics = mode.clone();
     });
 
     group.add(&row);
+    group.add(&warning);
     group
+}
+
+/// The renderer entries and the mode behind each one, in order.
+///
+/// The selection maps through this list, never through arithmetic on its
+/// position. A stored render node that is not on this computer now gets an
+/// entry of its own, so it stays visible and any other choice replaces it.
+fn graphics_choices(
+    nodes: &[(String, String)],
+    stored: &GraphicsMode,
+) -> Vec<(String, GraphicsMode)> {
+    let leaf = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+    let mut choices = vec![
+        ("Automatic".to_string(), GraphicsMode::Automatic),
+        ("Software rendering".to_string(), GraphicsMode::Software),
+    ];
+    for (path, driver) in nodes {
+        choices.push((
+            format!("{} ({driver})", leaf(path)),
+            GraphicsMode::RenderNode { path: path.clone() },
+        ));
+    }
+    if let GraphicsMode::RenderNode { path } = stored {
+        if !nodes.iter().any(|(p, _)| p == path) {
+            choices.push((format!("{} (not found)", leaf(path)), stored.clone()));
+        }
+    }
+    choices
 }
 
 fn build_socket_group(
     parent: &impl IsA<gtk::Widget>,
     config: Rc<RefCell<DesktopConfig>>,
+    validity: Rc<Validity>,
 ) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("Container Runtime")
@@ -582,6 +972,13 @@ fn build_socket_group(
         let (policy, _, description) = SOCKET_CHOICES[index];
         row.set_subtitle(description);
 
+        // A declined warning snaps the row back, which lands here again. The
+        // choice it returns to was already accepted, so it must not ask
+        // again.
+        if index as u32 == previous.get() {
+            return;
+        }
+
         // The dangerous options warn before they take, and the row snaps back
         // if the warning is declined. See DESIGN.md section 7.2.
         if let Some(warning) = policy.warning() {
@@ -597,10 +994,13 @@ fn build_socket_group(
             let config = config.clone();
             let row = row.clone();
             let previous = previous.clone();
+            let validity = validity.clone();
             dialog.connect_response(None, move |_, response| {
                 if response == "accept" {
                     config.borrow_mut().socket = policy;
                     previous.set(row.selected());
+                    // The socket takes a location that a share may hold.
+                    validity.update();
                 } else {
                     row.set_selected(previous.get());
                 }
@@ -611,6 +1011,7 @@ fn build_socket_group(
 
         config.borrow_mut().socket = policy;
         previous.set(row.selected());
+        validity.update();
     });
 
     group.add(&row);
@@ -655,8 +1056,28 @@ fn build_remote_group(
     scope_list.append(&scope);
     detail.append(&scope_list);
 
-    let chooser = build_interface_list(&interfaces, config.clone());
+    // Remote access with no network chosen binds loopback only, so the
+    // switch would read as on while nothing else can connect.
+    let none_chosen = adw::ActionRow::builder()
+        .title("Choose at least one network. Until you do, only this computer can connect.")
+        .css_classes(vec!["warning"])
+        .build();
+    none_chosen.set_title_lines(0);
+    let none_chosen_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(vec!["boxed-list"])
+        .build();
+    none_chosen_list.append(&none_chosen);
+
+    let warn_scope = scope.clone();
+    let warn_list = none_chosen_list.clone();
+    let show_none_chosen: SelectionCallback = Rc::new(move |names: &[String]| {
+        warn_list.set_visible(warn_scope.selected() == 1 && names.is_empty());
+    });
+
+    let chooser = build_interface_list(&interfaces, config.clone(), show_none_chosen.clone());
     detail.append(&chooser);
+    detail.append(&none_chosen_list);
 
     let switch = adw::SwitchRow::builder()
         .title("Allow connections from other devices")
@@ -672,11 +1093,14 @@ fn build_remote_group(
     }
     detail.set_visible(switch.is_active());
     chooser.set_visible(scope.selected() == 1);
+    show_none_chosen(&current_selection(&chooser));
 
     let parent_widget = parent.as_ref().clone();
     let config_for_switch = config.clone();
     let detail_for_switch = detail.clone();
     let scope_for_switch = scope.clone();
+    let chooser_for_switch = chooser.clone();
+    let none_chosen_for_switch = show_none_chosen.clone();
     switch.connect_active_notify(move |switch| {
         if !switch.is_active() {
             config_for_switch.borrow_mut().exposure = Exposure::Loopback;
@@ -704,6 +1128,8 @@ fn build_remote_group(
         let switch = switch.clone();
         let detail = detail_for_switch.clone();
         let scope = scope_for_switch.clone();
+        let chooser = chooser_for_switch.clone();
+        let show_none_chosen = none_chosen_for_switch.clone();
         dialog.connect_response(None, move |_, response| {
             if response != "allow" {
                 switch.set_active(false);
@@ -713,7 +1139,13 @@ fn build_remote_group(
             // Chosen networks is the safer of the two, so it is what the
             // switch lands on. The user can widen it deliberately.
             scope.set_selected(1);
-            config.borrow_mut().exposure = Exposure::Interfaces { names: Vec::new() };
+            // When the scope was already on chosen networks, nothing above
+            // emits, so the list is shown and read here. The stored names
+            // then match the switches the user sees.
+            chooser.set_visible(true);
+            let names = current_selection(&chooser);
+            show_none_chosen(&names);
+            config.borrow_mut().exposure = Exposure::Interfaces { names };
         });
         dialog.present(Some(&parent_widget));
     });
@@ -721,10 +1153,12 @@ fn build_remote_group(
     let parent_widget = parent.as_ref().clone();
     let chooser_for_scope = chooser.clone();
     let config_for_scope = config.clone();
+    let none_chosen_for_scope = show_none_chosen.clone();
     scope.connect_selected_notify(move |scope| {
+        let names = current_selection(&chooser_for_scope);
+        none_chosen_for_scope(&names);
         if scope.selected() == 1 {
             chooser_for_scope.set_visible(true);
-            let names = current_selection(&chooser_for_scope);
             config_for_scope.borrow_mut().exposure = Exposure::Interfaces { names };
             return;
         }
@@ -771,20 +1205,35 @@ fn build_remote_group(
     group
 }
 
+/// Called with the chosen interface names whenever a switch changes.
+type SelectionCallback = Rc<dyn Fn(&[String])>;
+
 /// One switch per interface, with the addresses it currently holds.
 ///
 /// The addresses are shown because interface names alone do not say which
 /// network is which. `wlp3s0` means nothing; `192.168.1.24` is recognisable.
+///
+/// A saved interface that is away now, such as a USB adapter or a VPN, still
+/// gets a switch. Names are stored so that they survive the interface being
+/// away (rule 40), and the stored list is read back from the switches, so a
+/// name with no switch would be dropped by the next change.
 fn build_interface_list(
     interfaces: &[cabin_core::NetInterface],
     config: Rc<RefCell<DesktopConfig>>,
+    on_selection: SelectionCallback,
 ) -> gtk::ListBox {
     let list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .css_classes(vec!["boxed-list"])
         .build();
 
-    if interfaces.is_empty() {
+    let chosen: Vec<String> = config.borrow().exposure.chosen_interfaces().to_vec();
+    let absent: Vec<&String> = chosen
+        .iter()
+        .filter(|name| !interfaces.iter().any(|i| &i.name == *name))
+        .collect();
+
+    if interfaces.is_empty() && absent.is_empty() {
         let empty = adw::ActionRow::builder()
             .title("No networks found")
             .subtitle("This computer is not connected to a network.")
@@ -793,21 +1242,38 @@ fn build_interface_list(
         return list;
     }
 
-    let chosen: Vec<String> = config.borrow().exposure.chosen_interfaces().to_vec();
-    for interface in interfaces {
+    let rows = interfaces
+        .iter()
+        .map(|interface| {
+            (
+                interface.name.clone(),
+                interface.addresses.join(", "),
+                chosen.contains(&interface.name),
+            )
+        })
+        .chain(
+            absent
+                .into_iter()
+                .map(|name| (name.clone(), "Not connected now".to_string(), true)),
+        );
+    for (name, subtitle, active) in rows {
         let row = adw::SwitchRow::builder()
-            .title(&interface.name)
-            .subtitle(interface.addresses.join(", "))
-            .active(chosen.contains(&interface.name))
+            .title(&name)
+            .subtitle(&subtitle)
+            .active(active)
             .build();
+        // Interface names and addresses come from the system, so they are
+        // data, not markup (rule 33).
+        row.set_use_markup(false);
         let config = config.clone();
         let list_ref = list.clone();
-        row.connect_active_notify(move |row| {
+        let on_selection = on_selection.clone();
+        row.connect_active_notify(move |_| {
             // Read every row rather than tracking one, so the stored list
             // always matches what the user can see.
             let names = current_selection(&list_ref);
+            on_selection(&names);
             config.borrow_mut().exposure = Exposure::Interfaces { names };
-            let _ = row;
         });
         list.append(&row);
     }
@@ -910,60 +1376,213 @@ fn apply_now(
     let parent = parent.clone();
 
     runtime::spawn(
-        async move { recreate(podman, desktop, updated, nodes, interfaces, start_after).await },
+        // The library keeps the old container until the new one exists, and
+        // puts it back if Podman refuses the new settings. The old container
+        // holds the only copy of the configuration and the password (rule 1).
+        async move {
+            podman
+                .recreate_desktop(&desktop, &updated, &nodes, &interfaces, start_after)
+                .await
+        },
         move |result| match result {
-            Ok(()) => {
+            Ok(_) => {
                 settings_dialog.close();
                 on_applied();
             }
-            Err(message) => {
+            Err(e) => {
+                let outcome = apply_failure(&e);
                 let error = adw::AlertDialog::builder()
-                    .heading("Could not apply the changes")
-                    .body(message)
+                    .heading(outcome.heading())
+                    .body(e.to_string())
                     .build();
                 error.add_response("close", "Close");
                 error.present(Some(&parent));
+                // The dialogue holds the old desktop. Once that container is
+                // gone or parked, a second Apply would act on a removed id
+                // or on the parked container, so the user reopens the
+                // settings from the refreshed list instead.
+                if outcome != ApplyFailure::KeptOld {
+                    settings_dialog.close();
+                }
+                // The desktop can have a new id, a new state, or a leftover
+                // beside it, so the list has to look again.
+                on_applied();
             }
         },
     );
 }
 
-/// Stops, removes and recreates a desktop with a new configuration.
-///
-/// The home volume is not touched, so the user's files survive.
-async fn recreate(
-    podman: Arc<Podman>,
-    desktop: Desktop,
-    updated: DesktopConfig,
-    nodes: Vec<(String, String)>,
-    interfaces: Vec<cabin_core::NetInterface>,
-    start_after: bool,
-) -> Result<(), String> {
-    let password = podman
-        .desktop_password(&desktop.id)
-        .await
-        .map_err(|e| format!("could not read the desktop password: {e}"))?;
-    let port = desktop.rdp_port.unwrap_or(13389);
-    if desktop.state.is_running() {
-        podman
-            .stop(&desktop.id, STOP_TIMEOUT_SECS)
-            .await
-            .map_err(|e| format!("could not stop the desktop: {e}"))?;
-    }
-    podman
-        .remove(&desktop.id, true)
-        .await
-        .map_err(|e| format!("could not remove the old container: {e}"))?;
+/// What a failed recreate left in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplyFailure {
+    /// The old container is as it was, so the settings can be tried again.
+    KeptOld,
+    /// The new container exists and the old one is gone, but the start
+    /// failed.
+    AppliedNotStarted,
+    /// The new container exists, but the old one stayed under its
+    /// temporary name.
+    AppliedOldLeft,
+}
 
-    let id = podman
-        .create_desktop(&updated, port, &nodes, &interfaces, &password)
-        .await
-        .map_err(|e| format!("could not recreate the desktop: {e}"))?;
-    if !start_after {
-        return Ok(());
+impl ApplyFailure {
+    fn heading(self) -> &'static str {
+        match self {
+            Self::KeptOld => "Could not apply the changes",
+            Self::AppliedNotStarted => "The changes were applied, but the desktop did not start",
+            Self::AppliedOldLeft => "The changes were applied, but the old container was left",
+        }
     }
-    podman
-        .start_desktop(&id, &updated.name)
-        .await
-        .map_err(|e| format!("the desktop was recreated but would not start.\n\n{e}"))
+}
+
+/// Every error that `recreate_desktop` raises once the new container
+/// exists has its own variant. Any other error happens before that point,
+/// or puts the old container back, so the old desktop is unchanged.
+fn apply_failure(error: &cabin_podman::Error) -> ApplyFailure {
+    match error {
+        cabin_podman::Error::StartAfterRecreate(_) => ApplyFailure::AppliedNotStarted,
+        cabin_podman::Error::OldContainerLeft { .. } => ApplyFailure::AppliedOldLeft,
+        _ => ApplyFailure::KeptOld,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn sensitive_folders_and_their_contents_are_flagged() {
+        let home = Path::new("/home/user");
+        for path in [
+            "/home/user/.ssh",
+            "/home/user/.ssh/keys",
+            "/home/user/.config/git",
+            "/home/user/.local/share/keyrings",
+            "/home/user/public_html",
+            // These hold a sensitive folder, and the relabel goes down.
+            "/home/user/.local",
+            "/home/user/.local/share",
+        ] {
+            assert!(is_sensitive_location(path, home), "{path} was not flagged");
+        }
+    }
+
+    #[test]
+    fn ordinary_folders_are_not_flagged() {
+        let home = Path::new("/home/user");
+        for path in [
+            "/home/user/Documents",
+            "/home/user/.sshfs",
+            "/home/user/.local/share/fonts",
+            "/srv/data",
+            // Podman refuses these itself, so no warning is needed.
+            "/home/user",
+            "/home",
+            "/",
+        ] {
+            assert!(!is_sensitive_location(path, home), "{path} was flagged");
+        }
+    }
+
+    #[test]
+    fn only_errors_that_keep_the_old_desktop_keep_the_dialogue() {
+        use cabin_podman::Error;
+        let kept = [
+            Error::Settings("no".to_string()),
+            Error::RecreateRefused {
+                name: "dev".to_string(),
+                message: "no".to_string(),
+            },
+            Error::Api {
+                status: 500,
+                message: "stop failed".to_string(),
+            },
+        ];
+        for error in &kept {
+            assert_eq!(apply_failure(error), ApplyFailure::KeptOld, "{error:?}");
+        }
+        let not_started = Error::StartAfterRecreate(Box::new(Error::StartedThenExited {
+            name: "dev".to_string(),
+            likely_cause: "inotify".to_string(),
+        }));
+        assert_eq!(apply_failure(&not_started), ApplyFailure::AppliedNotStarted);
+        let left = Error::OldContainerLeft {
+            name: "dev".to_string(),
+            old_name: "dev-cabin-old".to_string(),
+            message: "busy".to_string(),
+        };
+        assert_eq!(apply_failure(&left), ApplyFailure::AppliedOldLeft);
+    }
+
+    fn roots() -> Vec<PathBuf> {
+        vec![PathBuf::from("/run/user/1000/doc")]
+    }
+
+    #[test]
+    fn a_portal_folder_resolves_with_the_path_below_it() {
+        let (id, rest) = split_document_path(
+            Path::new("/run/user/1000/doc/a1b2c3/Projects/web/site"),
+            &roots(),
+        )
+        .expect("a path under the portal is a document");
+        assert_eq!(id, "a1b2c3");
+        assert_eq!(rest, vec!["web".to_string(), "site".to_string()]);
+        assert_eq!(
+            join_host_path("/home/user/Projects", &rest),
+            "/home/user/Projects/web/site"
+        );
+    }
+
+    #[test]
+    fn a_portal_document_itself_resolves_to_its_real_path() {
+        let (id, rest) =
+            split_document_path(Path::new("/run/user/1000/doc/a1b2c3/.gitconfig"), &roots())
+                .expect("a path under the portal is a document");
+        assert_eq!(id, "a1b2c3");
+        assert_eq!(
+            join_host_path("/home/user/.gitconfig", &rest),
+            "/home/user/.gitconfig"
+        );
+    }
+
+    #[test]
+    fn a_real_path_is_not_a_portal_path() {
+        assert!(split_document_path(Path::new("/home/user/Projects"), &roots()).is_none());
+        // Only a whole component matches, so a neighbour of the root is not
+        // taken for it.
+        assert!(split_document_path(Path::new("/run/user/1000/docs/x"), &roots()).is_none());
+    }
+
+    #[test]
+    fn a_missing_render_node_keeps_its_own_entry() {
+        let nodes = vec![("/dev/dri/renderD128".to_string(), "i915".to_string())];
+        let stored = GraphicsMode::RenderNode {
+            path: "/dev/dri/renderD129".to_string(),
+        };
+        let choices = graphics_choices(&nodes, &stored);
+        let (label, mode) = choices.last().expect("the missing node is listed");
+        assert_eq!(label, "renderD129 (not found)");
+        assert_eq!(*mode, stored);
+        // Every other entry maps to its own mode, so choosing Automatic
+        // replaces the stale path.
+        assert_eq!(choices[0].1, GraphicsMode::Automatic);
+        assert_eq!(
+            choices[2].1,
+            GraphicsMode::RenderNode {
+                path: "/dev/dri/renderD128".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_present_render_node_is_listed_once() {
+        let nodes = vec![("/dev/dri/renderD128".to_string(), "i915".to_string())];
+        let stored = GraphicsMode::RenderNode {
+            path: "/dev/dri/renderD128".to_string(),
+        };
+        let choices = graphics_choices(&nodes, &stored);
+        assert_eq!(choices.len(), 3);
+        assert_eq!(choices[2].0, "renderD128 (i915)");
+    }
 }

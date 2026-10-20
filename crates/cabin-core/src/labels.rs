@@ -19,6 +19,10 @@ pub enum LabelError {
         #[source]
         source: serde_json::Error,
     },
+    #[error(
+        "the desktop uses label schema {found}, newer than this release reads ({SCHEMA_VERSION})"
+    )]
+    UnsupportedVersion { found: String },
 }
 
 const LABEL_CONFIG: &str = "io.github.jaydoubleu.cabin.config";
@@ -26,7 +30,9 @@ const LABEL_VERSION: &str = "io.github.jaydoubleu.cabin.version";
 
 /// The label schema version. Raise it when the format changes in a way that
 /// older releases cannot read.
-pub const SCHEMA_VERSION: &str = "1";
+///
+/// A number, not a string, so that a release compares "10" above "9".
+pub const SCHEMA_VERSION: u32 = 1;
 
 pub fn to_labels(config: &DesktopConfig) -> HashMap<String, String> {
     let mut labels = HashMap::new();
@@ -46,6 +52,21 @@ pub fn to_labels(config: &DesktopConfig) -> HashMap<String, String> {
 pub fn from_labels(labels: &HashMap<String, String>) -> Result<DesktopConfig, LabelError> {
     if labels.get(LABEL_MANAGED).map(String::as_str) != Some("true") {
         return Err(LabelError::NotManaged);
+    }
+    // A newer Cabin may store something this release would misread. serde
+    // ignores fields it does not know, so the JSON alone would still parse,
+    // and a recreate would then write back a configuration with parts
+    // missing. A desktop with no version label predates the label.
+    if let Some(found) = labels.get(LABEL_VERSION) {
+        let readable = found
+            .trim()
+            .parse::<u32>()
+            .is_ok_and(|version| version <= SCHEMA_VERSION);
+        if !readable {
+            return Err(LabelError::UnsupportedVersion {
+                found: found.clone(),
+            });
+        }
     }
     let raw = labels
         .get(LABEL_CONFIG)
@@ -102,6 +123,41 @@ mod tests {
         ]);
         let config = from_labels(&labels).unwrap();
         assert_eq!(config.exposure, crate::config::Exposure::Loopback);
+    }
+
+    #[test]
+    fn a_desktop_with_no_version_label_still_loads() {
+        // Desktops made before the label existed carry none.
+        let labels = HashMap::from([
+            (LABEL_MANAGED.to_string(), "true".to_string()),
+            (
+                LABEL_CONFIG.to_string(),
+                serde_json::to_string(&DesktopConfig::new("old")).unwrap(),
+            ),
+        ]);
+        assert_eq!(from_labels(&labels).unwrap().name, "old");
+    }
+
+    #[test]
+    fn a_newer_schema_is_refused() {
+        // A later release raises the version when this one would misread
+        // the format, so this release must not load it.
+        let mut labels = to_labels(&DesktopConfig::new("new"));
+        labels.insert(LABEL_VERSION.to_string(), "2".to_string());
+        assert!(matches!(
+            from_labels(&labels),
+            Err(LabelError::UnsupportedVersion { .. })
+        ));
+    }
+
+    #[test]
+    fn a_version_that_is_not_a_number_is_refused() {
+        let mut labels = to_labels(&DesktopConfig::new("odd"));
+        labels.insert(LABEL_VERSION.to_string(), "two".to_string());
+        assert!(matches!(
+            from_labels(&labels),
+            Err(LabelError::UnsupportedVersion { .. })
+        ));
     }
 
     #[test]

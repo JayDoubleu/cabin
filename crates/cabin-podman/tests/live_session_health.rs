@@ -102,9 +102,7 @@ async fn a_desktop_boots_with_icons_and_applications() {
          apps={apps} fixed-pitch families={fixed_pitch} {configured} -> {monospace}"
     );
 
-    let _ = podman.remove(NAME, true).await;
-    let _ = host_podman(&["volume", "rm", &cabin_core::home_volume_name(NAME)]);
-    let _ = host_podman(&["volume", "rm", &cabin_core::state_volume_name(NAME)]);
+    let _ = podman.delete_desktop(&id, NAME).await;
 
     assert_ne!(shell_running, "0", "the session never started");
 

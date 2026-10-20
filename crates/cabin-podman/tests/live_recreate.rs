@@ -2,7 +2,7 @@
 //!
 //!     cargo test -p cabin-podman --test live_recreate -- --ignored --nocapture
 
-use cabin_core::{DesktopConfig, Exposure, GraphicsMode, NetInterface};
+use cabin_core::{Desktop, DesktopConfig, Exposure, GraphicsMode, NetInterface};
 use cabin_podman::Podman;
 use std::process::Command;
 
@@ -23,6 +23,17 @@ fn host_podman(args: &[&str]) -> std::process::Output {
 }
 
 const NAME: &str = "cabin-recreate-test";
+
+/// The desktop called `name`, as the settings dialogue sees it.
+async fn find_desktop(podman: &Podman, name: &str) -> Desktop {
+    podman
+        .list_desktops()
+        .await
+        .expect("list")
+        .into_iter()
+        .find(|d| d.config.name == name)
+        .unwrap_or_else(|| panic!("{name} should be listed"))
+}
 
 #[tokio::test]
 #[ignore = "needs a running podman.socket and the cabin-guest image"]
@@ -49,26 +60,82 @@ async fn the_home_volume_outlives_the_container() {
     assert_eq!(inspected, "recreate-test");
 
     // Recreate with a changed configuration, exactly as a settings change does.
-    podman.remove(&id, true).await.expect("remove");
+    let desktop = find_desktop(&podman, NAME).await;
     config.memory_mb = Some(3072);
     let second = podman
-        .create_desktop(&config, 13998, &[], &[], "recreate-test")
+        .recreate_desktop(&desktop, &config, &[], &[], false)
         .await
-        .expect("create again");
+        .expect("recreate");
 
     let desktops = podman.list_desktops().await.expect("list");
-    let found = desktops
-        .iter()
-        .find(|d| d.config.name == NAME)
-        .expect("listed after recreate");
+    let matching: Vec<_> = desktops.iter().filter(|d| d.config.name == NAME).collect();
+    assert_eq!(matching.len(), 1, "the old container must not be left");
     assert_eq!(
-        found.config.memory_mb,
+        matching[0].config.memory_mb,
         Some(3072),
         "the change should apply"
     );
+    assert_eq!(
+        podman.desktop_password(&second).await.expect("password"),
+        "recreate-test",
+        "the password should carry over"
+    );
 
     println!("recreated with home volume {volume} intact");
-    podman.remove(&second, true).await.expect("cleanup");
+    podman.delete_desktop(&second, NAME).await.expect("cleanup");
+}
+
+/// A recreate that Podman refuses must leave the desktop exactly as it was.
+/// The old container holds the only copy of the configuration and the
+/// password, so losing it loses the desktop.
+#[tokio::test]
+#[ignore = "needs a running podman.socket and the cabin-guest image"]
+async fn a_refused_recreate_keeps_the_desktop() {
+    use cabin_core::{Mount, MountMode};
+
+    let podman = Podman::new();
+    let name = "cabin-refused-test";
+    let _ = podman.remove(name, true).await;
+
+    let mut config = DesktopConfig::new(name);
+    config.graphics = GraphicsMode::Software;
+    config.memory_mb = Some(2048);
+    let id = podman
+        .create_desktop(&config, 13989, &[], &[], "refused-test")
+        .await
+        .expect("create");
+
+    // A share whose host folder does not exist. Podman refuses the create.
+    let mut broken = config.clone();
+    broken.memory_mb = Some(3072);
+    broken.mounts.push(Mount {
+        host_path: "/nonexistent/cabin-refused-test".to_string(),
+        guest_path: "/mnt/missing".to_string(),
+        mode: MountMode::ReadOnly,
+        relabel: false,
+        kind: cabin_core::MountKind::Directory,
+    });
+
+    let desktop = find_desktop(&podman, name).await;
+    let result = podman
+        .recreate_desktop(&desktop, &broken, &[], &[], false)
+        .await;
+    let message = result
+        .expect_err("Podman should refuse a missing folder")
+        .to_string();
+    println!("reported to the user:\n{message}");
+    assert!(message.contains("kept its old settings"), "{message}");
+
+    let after = find_desktop(&podman, name).await;
+    assert_eq!(after.id, id, "the original container should still be there");
+    assert_eq!(after.name, name, "it should have its own name back");
+    assert_eq!(after.config, config, "its labels should be unchanged");
+    assert_eq!(
+        podman.desktop_password(&id).await.expect("password"),
+        "refused-test"
+    );
+
+    podman.delete_desktop(&id, name).await.expect("cleanup");
 }
 
 /// The volume only earns its keep if a real file survives. Recreating a
@@ -90,16 +157,13 @@ async fn a_file_in_the_home_directory_survives_a_recreate() {
     podman.start(&id).await.expect("start");
 
     // Write a file as the desktop user, exactly as the user's own work would be.
-    let write = Command::new("podman")
-        .args([
-            "exec",
-            name,
-            "sh",
-            "-c",
-            "echo 'work in progress' > /home/cabin/notes.txt && cat /home/cabin/notes.txt",
-        ])
-        .output()
-        .expect("podman exec");
+    let write = host_podman(&[
+        "exec",
+        name,
+        "sh",
+        "-c",
+        "echo 'work in progress' > /home/cabin/notes.txt && cat /home/cabin/notes.txt",
+    ]);
     assert!(
         write.status.success(),
         "could not write the file: {}",
@@ -107,14 +171,12 @@ async fn a_file_in_the_home_directory_survives_a_recreate() {
     );
 
     // Recreate with a changed setting, as the settings dialogue does.
-    podman.stop(&id, 20).await.expect("stop");
-    podman.remove(&id, true).await.expect("remove");
+    let desktop = find_desktop(&podman, name).await;
     config.memory_mb = Some(3072);
     let second = podman
-        .create_desktop(&config, 13996, &[], &[], "persist-test")
+        .recreate_desktop(&desktop, &config, &[], &[], true)
         .await
         .expect("recreate");
-    podman.start(&second).await.expect("start again");
 
     let read = host_podman(&["exec", name, "cat", "/home/cabin/notes.txt"]);
     let contents = String::from_utf8_lossy(&read.stdout);
@@ -125,7 +187,7 @@ async fn a_file_in_the_home_directory_survives_a_recreate() {
     println!("file survived the recreate: {}", contents.trim());
 
     podman.stop(&second, 20).await.ok();
-    podman.remove(&second, true).await.expect("cleanup");
+    podman.delete_desktop(&second, name).await.expect("cleanup");
 }
 
 /// The remote access switch must actually change what the container binds to,
@@ -187,7 +249,66 @@ async fn exposing_on_the_lan_changes_the_bound_address() {
     println!("published on port {:?}", found.rdp_port);
 
     podman.stop(&id, 20).await.ok();
-    podman.remove(&id, true).await.expect("cleanup");
+    podman.delete_desktop(&id, name).await.expect("cleanup");
+}
+
+/// A chosen network whose address changed must not stop the desktop starting.
+/// Podman fixes the bound addresses at create time, so the start has to
+/// notice the change and recreate the container with the new address.
+#[tokio::test]
+#[ignore = "needs a running podman.socket and the cabin-guest image"]
+async fn a_changed_address_is_bound_again_on_start() {
+    let podman = Podman::new();
+    let name = "cabin-rebind-test";
+    let _ = podman.remove(name, true).await;
+
+    let mut config = DesktopConfig::new(name);
+    config.graphics = GraphicsMode::Software;
+    config.memory_mb = Some(2048);
+    config.exposure = Exposure::Interfaces {
+        names: vec!["cabin-test0".to_string()],
+    };
+    let interface = |address: &str| {
+        vec![NetInterface {
+            name: "cabin-test0".to_string(),
+            addresses: vec![address.to_string()],
+            loopback: false,
+        }]
+    };
+
+    let first = podman
+        .create_desktop(&config, 13988, &[], &interface("127.0.0.2"), "rebind-test")
+        .await
+        .expect("create");
+
+    // The lease changed while the desktop was stopped.
+    let desktop = find_desktop(&podman, name).await;
+    let started = podman
+        .start_with_current_addresses(&desktop, &[], &interface("127.0.0.3"))
+        .await
+        .expect("the desktop should start on the new address");
+    assert_ne!(started, first, "a changed address needs a new container");
+
+    // Ask Podman what it binds, rather than trusting the labels.
+    let inspect = host_podman(&["inspect", name, "--format", "json"]);
+    let inspect: serde_json::Value =
+        serde_json::from_slice(&inspect.stdout).expect("inspect output");
+    let bound = inspect[0]["HostConfig"]["PortBindings"]["3389/tcp"].to_string();
+    println!("bound after the start: {bound}");
+    assert!(bound.contains("127.0.0.3"), "{bound}");
+    assert!(!bound.contains("127.0.0.2"), "{bound}");
+
+    // Nothing changed this time, so the same container starts again.
+    podman.stop(&started, 20).await.ok();
+    let desktop = find_desktop(&podman, name).await;
+    let again = podman
+        .start_with_current_addresses(&desktop, &[], &interface("127.0.0.3"))
+        .await
+        .expect("start again");
+    assert_eq!(again, started);
+
+    podman.stop(&again, 20).await.ok();
+    podman.delete_desktop(&again, name).await.expect("cleanup");
 }
 
 /// When a desktop dies on start-up, the error must name a cause the user can
@@ -223,7 +344,7 @@ async fn a_desktop_that_will_not_start_says_why() {
         }
     }
 
-    let _ = podman.remove(&id, true).await;
+    let _ = podman.delete_desktop(&id, name).await;
 }
 
 /// Shared folders must reach the container, not just the labels.
@@ -274,7 +395,7 @@ async fn a_shared_folder_reaches_the_container() {
         "the home volume should still be there and writable, got {mounts:?}"
     );
 
-    let _ = podman.remove(&id, true).await;
+    let _ = podman.delete_desktop(&id, name).await;
 }
 
 /// Nested Podman must actually run a container inside the desktop. The setting
@@ -326,7 +447,7 @@ async fn nested_podman_can_run_a_container() {
     );
 
     podman.stop(&id, 20).await.ok();
-    let _ = podman.remove(&id, true).await;
+    let _ = podman.delete_desktop(&id, name).await;
 }
 
 /// Exposing the host Podman socket must let the desktop drive the host's
@@ -388,7 +509,7 @@ async fn the_host_podman_socket_reaches_the_desktop() {
     );
 
     podman.stop(&id, 20).await.ok();
-    let _ = podman.remove(&id, true).await;
+    let _ = podman.delete_desktop(&id, name).await;
 }
 
 /// Pinning only means something if the certificate outlives the container.
@@ -435,17 +556,12 @@ async fn the_tls_certificate_survives_a_recreate() {
     assert!(!before.is_empty(), "the guest should have a certificate");
     println!("before: {before}");
 
-    podman.stop(&id, 20).await.expect("stop");
-    podman.remove(&id, true).await.expect("remove");
+    let desktop = find_desktop(&podman, name).await;
     config.memory_mb = Some(3072);
     let second = podman
-        .create_desktop(&config, 13990, &[], &[], "cert-test")
+        .recreate_desktop(&desktop, &config, &[], &[], true)
         .await
-        .expect("recreate");
-    podman
-        .start_desktop(&second, name)
-        .await
-        .expect("start again");
+        .expect("recreate and start again");
 
     let after = read_fingerprint();
     println!("after:  {after}");
@@ -455,5 +571,5 @@ async fn the_tls_certificate_survives_a_recreate() {
     );
 
     podman.stop(&second, 20).await.ok();
-    let _ = podman.remove(&second, true).await;
+    let _ = podman.delete_desktop(&second, name).await;
 }

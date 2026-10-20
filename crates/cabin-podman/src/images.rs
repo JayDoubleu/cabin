@@ -5,6 +5,7 @@
 //! so a fresh installation has no image and the first desktop cannot start.
 //! See DESIGN.md section 19.
 
+use crate::client::extract_message;
 use crate::error::{Error, Result};
 use crate::http::{self, RawBody};
 use crate::Podman;
@@ -47,11 +48,24 @@ pub struct Image {
     /// True when the image carries Cabin's guest label.
     pub is_guest: bool,
     /// True when nothing references the image by name any more. A rebuild
-    /// leaves the image it replaced in this state.
+    /// leaves the image it replaced in this state. A dangling image is not
+    /// necessarily unused: every desktop made from the old build still runs
+    /// on it. See [`Image::prunable`].
     pub dangling: bool,
+    /// True when at least one container, running or not, uses the image.
+    pub in_use: bool,
 }
 
 impl Image {
+    /// True when Podman's default prune would remove this image.
+    ///
+    /// Podman prunes only dangling images that no container uses. Counting
+    /// the others would promise space the prune does not free, and would
+    /// list images that existing desktops still run on.
+    pub fn prunable(&self) -> bool {
+        self.dangling && !self.in_use
+    }
+
     /// The name to show. An image can carry several, and it can carry none
     /// when a rebuild has left the old one untagged.
     ///
@@ -93,6 +107,9 @@ struct ImageSummary {
     created: i64,
     #[serde(rename = "Labels", default)]
     labels: Option<std::collections::HashMap<String, String>>,
+    /// How many containers use the image.
+    #[serde(rename = "Containers", default)]
+    containers: i64,
 }
 
 /// One line of build output.
@@ -114,7 +131,7 @@ impl Podman {
             404 => Ok(false),
             status => Err(Error::Api {
                 status,
-                message: String::from_utf8_lossy(&response.body).into_owned(),
+                message: extract_message(&response.body),
             }),
         }
     }
@@ -131,7 +148,7 @@ impl Podman {
         if response.status >= 400 {
             return Err(Error::Api {
                 status: response.status,
-                message: String::from_utf8_lossy(&response.body).into_owned(),
+                message: extract_message(&response.body),
             });
         }
         let summaries: Vec<ImageSummary> = serde_json::from_slice(&response.body)?;
@@ -148,6 +165,7 @@ impl Podman {
                     .is_some_and(|v| v == "true");
                 Image {
                     dangling: tags.is_empty(),
+                    in_use: s.containers > 0,
                     // An image built before the label existed still carries
                     // the name, so fall back to it rather than hiding an
                     // image the user plainly recognises.
@@ -203,13 +221,20 @@ impl Podman {
         )
         .await?;
 
-        match failure {
-            Some(message) => Err(Error::Api {
+        if let Some(message) = failure {
+            return Err(Error::Api {
                 status: 200,
                 message,
-            }),
-            None => Ok(()),
+            });
         }
+        // A stream can end cleanly with nothing tagged. Saying the image is
+        // ready would then send the user to a desktop that cannot be made.
+        if !self.image_exists(tag).await? {
+            return Err(Error::Protocol(format!(
+                "the build ended, but Podman has no image called {tag}"
+            )));
+        }
+        Ok(())
     }
 
     /// Removes an image. Podman refuses while a container still uses it.
@@ -219,7 +244,7 @@ impl Podman {
         if response.status >= 400 {
             return Err(Error::Api {
                 status: response.status,
-                message: String::from_utf8_lossy(&response.body).into_owned(),
+                message: extract_message(&response.body),
             });
         }
         Ok(())
@@ -243,7 +268,7 @@ impl Podman {
         if response.status >= 400 {
             return Err(Error::Api {
                 status: response.status,
-                message: String::from_utf8_lossy(&response.body).into_owned(),
+                message: extract_message(&response.body),
             });
         }
         // A prune that removed nothing answers with null rather than an
@@ -272,16 +297,29 @@ pub fn is_build_system_file(name: &str) -> bool {
 
 /// Packs a directory into the tar archive that the build endpoint takes.
 ///
-/// File modes are not preserved deliberately. The Containerfile runs `chmod`
-/// on everything it copies, so the archive does not need to carry permissions,
-/// and not carrying them means the build works the same however the files were
-/// checked out.
+/// Only the execute bit is carried. Every file is 0755 or 0644, so the archive
+/// is the same for a given tree however the files were checked out, and
+/// Podman's layer cache still works. The execute bit itself has to survive,
+/// because a custom recipe can `COPY` a script and run it without a `chmod`.
+///
+/// A symbolic link to a file is packed as that file. Any other link, or a
+/// special file, is an error that names the path.
 pub fn build_context(dir: &std::path::Path) -> Result<Vec<u8>> {
     let mut builder = tar::Builder::new(Vec::new());
     append_dir(&mut builder, dir, std::path::Path::new(""))?;
     builder
         .into_inner()
         .map_err(|e| Error::Protocol(format!("could not pack the build context: {e}")))
+}
+
+/// The mode a file gets in the build context: executable or not, nothing else.
+fn archive_mode(metadata: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    if metadata.permissions().mode() & 0o100 != 0 {
+        0o755
+    } else {
+        0o644
+    }
 }
 
 fn append_dir(
@@ -309,8 +347,18 @@ fn append_dir(
             append_dir(builder, &path, &name)?;
             continue;
         }
-        if !file_type.is_file() {
-            continue;
+        // A link to a file is packed as the file it points at, because a
+        // COPY in the recipe means the content. Anything else is refused by
+        // name. Leaving it out quietly made a COPY fail later with a message
+        // that did not point at the link.
+        let metadata = std::fs::metadata(&path)
+            .map_err(|e| Error::Protocol(format!("could not read {}: {e}", path.display())))?;
+        if !metadata.is_file() {
+            return Err(Error::Protocol(format!(
+                "{} is not a regular file, so it cannot go into the build. \
+                 Replace it with a copy of what it points at.",
+                path.display()
+            )));
         }
         if is_build_system_file(&entry.file_name().to_string_lossy()) {
             continue;
@@ -320,7 +368,7 @@ fn append_dir(
             .map_err(|e| Error::Protocol(format!("could not read {}: {e}", path.display())))?;
         let mut header = tar::Header::new_gnu();
         header.set_size(contents.len() as u64);
-        header.set_mode(0o644);
+        header.set_mode(archive_mode(&metadata));
         header.set_mtime(0);
         header.set_cksum();
         builder
@@ -365,11 +413,99 @@ mod tests {
         Image {
             id: "sha256:0123456789abcdef".into(),
             dangling: tags.is_empty(),
+            in_use: false,
             tags: tags.iter().map(|s| s.to_string()).collect(),
             size_bytes: size,
             created: 0,
             is_guest: false,
         }
+    }
+
+    #[test]
+    fn an_untagged_image_a_desktop_uses_is_not_prunable() {
+        // A rebuild of the base leaves the old image untagged while every
+        // existing desktop still runs on it. Podman will not prune it.
+        let mut old = image(1, &[]);
+        assert!(old.prunable());
+        old.in_use = true;
+        assert!(old.dangling);
+        assert!(!old.prunable());
+        assert!(!image(1, &["localhost/x:1"]).prunable());
+    }
+
+    fn archive_modes(archive: &[u8]) -> Vec<(String, u32)> {
+        let mut found: Vec<(String, u32)> = tar::Archive::new(archive)
+            .entries()
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                (
+                    e.path().unwrap().display().to_string(),
+                    e.header().mode().unwrap(),
+                )
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn the_execute_bit_survives_and_nothing_else_does() {
+        // A custom recipe may COPY a script and run it without a chmod.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("cabin-tar-modes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("run.sh"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(dir.join("notes"), b"x").unwrap();
+        std::fs::set_permissions(dir.join("run.sh"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::set_permissions(dir.join("notes"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+
+        let archive = build_context(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(
+            archive_modes(&archive),
+            vec![("notes".to_string(), 0o644), ("run.sh".to_string(), 0o755)]
+        );
+    }
+
+    #[test]
+    fn a_link_to_a_file_is_packed_as_the_file() {
+        let dir = std::env::temp_dir().join(format!("cabin-tar-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("real"), b"content").unwrap();
+        std::os::unix::fs::symlink("real", dir.join("alias")).unwrap();
+
+        let archive = build_context(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        let mut entries = tar::Archive::new(archive.as_slice());
+        let mut contents = std::collections::BTreeMap::new();
+        for entry in entries.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().display().to_string();
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut entry, &mut text).unwrap();
+            contents.insert(path, text);
+        }
+        assert_eq!(contents.get("alias").map(String::as_str), Some("content"));
+    }
+
+    #[test]
+    fn a_broken_link_is_named_rather_than_skipped() {
+        let dir = std::env::temp_dir().join(format!("cabin-tar-broken-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink("missing", dir.join("dangling")).unwrap();
+
+        let result = build_context(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let message = result.expect_err("a broken link must fail").to_string();
+        assert!(message.contains("dangling"), "{message}");
     }
 
     #[test]

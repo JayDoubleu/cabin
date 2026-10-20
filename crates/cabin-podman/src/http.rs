@@ -62,9 +62,30 @@ pub async fn stream_request<F>(
     method: &str,
     path: &str,
     body: Option<RawBody<'_>>,
+    on_line: F,
+) -> Result<()>
+where
+    F: FnMut(&str),
+{
+    stream_request_opened(socket, method, path, body, || {}, on_line).await
+}
+
+/// Like [`stream_request`], and calls `on_open` once Podman has accepted
+/// the request, before the first line.
+///
+/// A follower of the event feed needs this point. A change made before it
+/// sends no event to this connection, so a refresh that covers the gap
+/// must happen after it, not before.
+pub async fn stream_request_opened<O, F>(
+    socket: &str,
+    method: &str,
+    path: &str,
+    body: Option<RawBody<'_>>,
+    on_open: O,
     mut on_line: F,
 ) -> Result<()>
 where
+    O: FnOnce(),
     F: FnMut(&str),
 {
     let stream = UnixStream::connect(socket)
@@ -83,18 +104,33 @@ where
         let body = read_body(&mut reader, &headers).await?;
         return Err(Error::Api {
             status,
-            message: String::from_utf8_lossy(&body).into_owned(),
+            message: crate::client::extract_message(&body),
         });
     }
+    on_open();
 
     let chunked = is_chunked(&headers);
+    // A chunked stream ends with a zero size line. A connection that drops
+    // before it looks the same as a clean end unless this is tracked, and a
+    // build cut short would then be reported as a success.
+    let mut finished = false;
     let mut line = String::new();
     loop {
         line.clear();
         if reader.read_line(&mut line).await? == 0 {
+            if chunked && !finished {
+                return Err(Error::Protocol(
+                    "the stream ended before Podman finished it".to_string(),
+                ));
+            }
             return Ok(());
         }
         let trimmed = line.trim();
+        // A payload line is a JSON object, so it can never be a bare "0".
+        if chunked && trimmed == "0" {
+            finished = true;
+            continue;
+        }
         // In a chunked stream the size lines are interleaved with the payload.
         // Podman sends JSON objects, so skipping anything that is not one is
         // enough to drop the sizes.
@@ -201,7 +237,8 @@ async fn read_chunked(reader: &mut BufReader<UnixStream>) -> Result<Vec<u8>> {
     loop {
         let mut size_line = String::new();
         if reader.read_line(&mut size_line).await? == 0 {
-            break;
+            // No zero size chunk, so the body is incomplete.
+            return Err(Error::Protocol("the response ended early".to_string()));
         }
         let size = usize::from_str_radix(size_line.trim(), 16)
             .map_err(|_| Error::Protocol(format!("bad chunk size: {size_line:?}")))?;
@@ -216,4 +253,113 @@ async fn read_chunked(reader: &mut BufReader<UnixStream>) -> Result<Vec<u8>> {
         reader.read_exact(&mut crlf).await?;
     }
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::UnixListener;
+
+    /// Serves one canned reply on a socket in a fresh directory, and returns
+    /// the directory and the socket path. The reply is written whole and the
+    /// connection then closes, so a reply without its end marker is a
+    /// truncated one.
+    fn serve_once(tag: &str, reply: Vec<u8>) -> (std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("cabin-http-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("podman.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            // Read the request head first, so the client is not cut off
+            // while it writes.
+            let mut line = String::new();
+            while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                if line == "\r\n" {
+                    break;
+                }
+                line.clear();
+            }
+            reader.get_mut().write_all(&reply).await.unwrap();
+            reader.get_mut().shutdown().await.ok();
+        });
+        let path = socket.display().to_string();
+        (dir, path)
+    }
+
+    const HEAD: &str = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+
+    #[tokio::test]
+    async fn a_complete_chunked_stream_succeeds() {
+        let reply = format!("{HEAD}d\r\n{{\"stream\":1}}\n\r\n0\r\n\r\n");
+        let (dir, socket) = serve_once("complete", reply.into_bytes());
+        let mut lines = Vec::new();
+        let result = stream_lines(&socket, "/build", |l| lines.push(l.to_string())).await;
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(lines, vec!["{\"stream\":1}"]);
+    }
+
+    #[tokio::test]
+    async fn a_chunked_stream_cut_short_is_an_error() {
+        // A build whose connection drops must not look like a finished one.
+        let reply = format!("{HEAD}d\r\n{{\"stream\":1}}\n\r\n");
+        let (dir, socket) = serve_once("truncated", reply.into_bytes());
+        let result = stream_lines(&socket, "/build", |_| {}).await;
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(matches!(result, Err(Error::Protocol(_))), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_chunked_body_cut_short_is_an_error() {
+        let reply = format!("{HEAD}2\r\n{{}}\r\n");
+        let (dir, socket) = serve_once("body", reply.into_bytes());
+        let result = request(&socket, "GET", "/x", None).await;
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(matches!(result, Err(Error::Protocol(_))));
+    }
+
+    #[tokio::test]
+    async fn an_error_reply_carries_the_bare_message() {
+        // The user should read Podman's message, not its JSON.
+        let body = r#"{"cause":"x","message":"image not known","response":404}"#;
+        let reply = format!(
+            "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (dir, socket) = serve_once("error", reply.into_bytes());
+        let result = stream_lines(&socket, "/build", |_| {}).await;
+        std::fs::remove_dir_all(&dir).ok();
+        match result {
+            Err(Error::Api { message, .. }) => assert_eq!(message, "image not known"),
+            other => panic!("expected an API error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_is_reported_only_for_an_accepted_request() {
+        let reply = format!("{HEAD}d\r\n{{\"stream\":1}}\n\r\n0\r\n\r\n");
+        let (dir, socket) = serve_once("opened", reply.into_bytes());
+        let mut opened = false;
+        let result =
+            stream_request_opened(&socket, "GET", "/x", None, || opened = true, |_| {}).await;
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(opened);
+
+        let body = r#"{"message":"no"}"#;
+        let reply = format!(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (dir, socket) = serve_once("refused", reply.into_bytes());
+        let mut opened = false;
+        let result =
+            stream_request_opened(&socket, "GET", "/x", None, || opened = true, |_| {}).await;
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(result.is_err());
+        assert!(!opened, "a refused request must not count as open");
+    }
 }
