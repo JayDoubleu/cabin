@@ -41,6 +41,9 @@ pub fn recorded(desktop_name: &str) -> Option<String> {
 }
 
 /// Records the fingerprint seen on a first connection.
+///
+/// Also records a changed fingerprint that the user confirmed. That pins the
+/// exact certificate the user saw, not whatever the next connection presents.
 pub fn record(desktop_name: &str, fingerprint: &str) {
     let dir = store_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -55,8 +58,8 @@ pub fn record(desktop_name: &str, fingerprint: &str) {
 
 /// Forgets a desktop's fingerprint, so the next connection records a new one.
 ///
-/// Used when the user decides a changed certificate is expected, and when a
-/// desktop is deleted.
+/// Only the deletion of a desktop uses this. A desktop made later with the
+/// same name has a new certificate, and must not inherit the old pin.
 pub fn forget(desktop_name: &str) {
     let _ = std::fs::remove_file(store_dir().join(key_for(desktop_name)));
 }
