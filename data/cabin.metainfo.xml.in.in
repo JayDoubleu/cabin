@@ -29,8 +29,8 @@
 
   <launchable type="desktop-id">@APP_ID@.desktop</launchable>
 
-  <url type="homepage">https://github.com/JayDoubleu/linux-virtual-desktop-container</url>
-  <url type="bugtracker">https://github.com/JayDoubleu/linux-virtual-desktop-container/issues</url>
+  <url type="homepage">https://github.com/JayDoubleu/cabin</url>
+  <url type="bugtracker">https://github.com/JayDoubleu/cabin/issues</url>
 
   <developer id="io.github.jaydoubleu">
     <name>Jay W</name>
